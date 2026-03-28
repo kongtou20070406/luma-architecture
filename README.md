@@ -74,3 +74,13 @@
 - 这个仓以 **WSL2 + RTX 5090** 的实验环境为主。
 - 某些依赖路径当前仍偏研究仓风格，环境安装说明里已经写了需要注意的地方。
 - 如果你只是想理解设计，不需要把所有实验都复跑一遍；先看 `docs/plans` 和 `docs/reports` 就够了。
+
+## License
+
+Top-level repository license: `Apache-2.0`.
+
+Notes:
+
+- The main `minimind/` implementation and Luma integration are shared under `Apache-2.0`.
+- The included `parameter-golf/` slice retains its own `MIT` license in `parameter-golf/LICENSE`.
+- Third-party and inherited notices should be kept when redistributing this repository.
