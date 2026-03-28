@@ -1,0 +1,64 @@
+{
+  "config": {
+    "direction": "lower",
+    "goal": "Upgrade Luma exit learning from exit/not-exit heuristics toward continuation gain while preserving emotion/persona/dialogue and keeping params <=0.35B",
+    "guard": "params<=0.35B; math not worse; dialogue not materially worse; emotion preserved or not materially worse; mixed not broken; persona_seed soft-guard only (record but do not veto)",
+    "iterations": 20,
+    "metric": "mixed_self_rollout_tail_512",
+    "parallel_mode": "serial",
+    "repos": [
+      {
+        "path": "/home/kt/ai/minimind",
+        "role": "primary",
+        "scope": "model/model_minimind.py;,scripts/run_luma_stage12.py;,trainer/train_luma_pretrain.py;,docs/plans/Luma_v0.7.2_Agent_MasterPlan.md;,docs/reports;,docs/reference/Luma_Loss_Reference.md;,docs/agent/AGENT_WORKLOG.md"
+      }
+    ],
+    "resume_note": "Next resume should restore iteration-5 branch semantics as an alt-keep candidate under the new soft-guard treatment for persona_seed.",
+    "rollback_policy": "git revert --no-edit HEAD",
+    "scope": "model/model_minimind.py;,scripts/run_luma_stage12.py;,trainer/train_luma_pretrain.py;,docs/plans/Luma_v0.7.2_Agent_MasterPlan.md;,docs/reports;,docs/reference/Luma_Loss_Reference.md;,docs/agent/AGENT_WORKLOG.md",
+    "session_mode": "foreground",
+    "stop_condition": "20 iterations or hard blocker",
+    "verify": "source /home/kt/ai/.venvs/luma-global/bin/activate && cd /home/kt/ai/minimind/scripts && python run_luma_stage12.py --device cuda --fixture-mode competition_math_dialogue_emotion --samples 8 --seq-len 48 --stage2-steps 512 --rollout-steps 10 --slow-k 1 --reason-loops 15 --world-jepa-mode full --enable-self-check-ring --self-check-k 2 --meta-dim 64 --meta-state 16 --c-t-dim 32 --self-check-dim 16 --enable-persona-seed --reason-shared-depth 2 --json-out ../artifacts/autoresearch_eval.json --metrics-out ../artifacts/autoresearch_eval_metrics.jsonl && python -c \"import json;print(json.load(open('/home/kt/ai/minimind/artifacts/autoresearch_eval.json'))['per_task']['mixed']['stage2']['self_rollout_tail'])\"",
+    "web_search": "disabled"
+  },
+  "mode": "loop",
+  "run_tag": "luma-continuation-gain",
+  "state": {
+    "baseline_metric": 0.09375,
+    "best_iteration": 2,
+    "best_metric": 0.041015625,
+    "blocked": 0,
+    "consecutive_discards": 6,
+    "crashes": 1,
+    "current_labels": [
+      "continuation-gain",
+      "one-step-lookahead"
+    ],
+    "current_metric": 0.041015625,
+    "discards": 6,
+    "iteration": 9,
+    "keeps": 1,
+    "last_commit": "b1865f7-dirty-iter2",
+    "last_repo_commits": {
+      "/home/kt/ai/minimind": "b1865f7-dirty-iter2"
+    },
+    "last_status": "discard",
+    "last_trial_commit": "b1865f7-dirty-iter9",
+    "last_trial_labels": [
+      "continuation-gain",
+      "two-step-value",
+      "structured-world-mask",
+      "self-world-coupling",
+      "hierarchical-rollout",
+      "surprise-metric"
+    ],
+    "last_trial_metric": 0.0390625,
+    "last_trial_repo_commits": {
+      "/home/kt/ai/minimind": "b1865f7-dirty-iter9"
+    },
+    "no_ops": 0,
+    "pivot_count": 1
+  },
+  "updated_at": "2026-03-28T13:03:27Z",
+  "version": 1
+}

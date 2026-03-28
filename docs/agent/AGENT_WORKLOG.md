@@ -1,0 +1,1201 @@
+# AGENT 工作日志（跨窗口记忆）
+
+> 记录规范见：/home/kt/ai/AGENT_MEMORY_LOG_PROTOCOL.md
+
+## [2026-03-28 12:26] Step 1 - Mamba3论文三要素工程落地（首版）
+- 阶段: 阶段0C Mamba3算子构建
+- 本步目标: 将 Mamba3 关键特性（指数梯形、复数状态、MIMO）以可运行方式接入 minimind，并保持 mamba 官方算子路径
+- 已完成:
+  - 在 `model/mamba3_module.py` 增加复数相位旋转模块 `ComplexPhaseRotate`
+  - 在 `Mamba3Config` 增加 `mimo_branches/use_complex_rotation/use_exp_trapezoid`
+  - 在 `Mamba3Block` 引入 MIMO 多分支门控融合（多个 `Mamba2` 分支）
+  - 在 `Mamba3Block` 引入 Heun/Trapezoid 两阶段更新（近似指数-梯形离散化）
+  - 保持底层为 `mamba_ssm.Mamba2` 优化算子，未退回纯 PyTorch SSM
+  - 自测脚本前向+反向通过
+- 产出物:
+  - /home/kt/ai/minimind/model/mamba3_module.py
+  - /home/kt/ai/minimind/scripts/test_mamba3_module.py
+- 执行命令:
+  - `/home/kt/ai/.venvs/luma-global/bin/python /home/kt/ai/minimind/scripts/test_mamba3_module.py`
+- 关键结果:
+  - `forward_ok=True backward_ok=True`
+  - `loss=1.000000 y_shape=(2, 256, 768)`
+- 问题/风险:
+  - 当前实现是“论文机制工程近似版”，非逐式复现（特别是指数-梯形离散化为 Heun 风格近似）
+  - `causal-conv1d` 在 5090 上存在 kernel image 兼容问题，暂用 `use_mem_eff_path=False` 避开
+- 下一步:
+  - 逐式对齐论文离散化公式并把“近似版”升级为“公式版”，同时评估是否可替换/重编 causal-conv 路径
+
+## 2026-03-28 13:48 Stage0（不含数据）推进
+- 更新 `Luma_v0.7.2_Agent_MasterPlan.md`：并入压缩区/推理区固定配置（24层压缩区5:1、block repr=8、推理区1~8循环、SWA=1024等）。
+- 完成阶段0脚手架落地（minimind）：
+  - `luma_stage0/config_schema.py`（压缩区/推理区/损失/Gate配置骨架）
+  - `luma_stage0/metrics_schema.py`（指标记录接口）
+  - `luma_stage0/module_mapping.yaml`（模块映射）
+  - `scripts/luma_stage0_validate.py`（配置约束校验）
+  - `scripts/luma_stage0_harness.py`（短程可复现前后向）
+  - `LUMA_STAGE0_IMPLEMENTATION.md`（运行说明）
+- 运行结果：
+  - `python scripts/luma_stage0_validate.py` -> OK
+  - `python scripts/luma_stage0_harness.py --device cuda --seq-len 128 --batch-size 1` -> OK
+  - 产物：`artifacts/stage0_config_snapshot.json`, `artifacts/stage0_metrics.jsonl`
+- MIMO状态补充：
+  - 在 CUDA 13.2 路径下，MIMO kernel 前向编译/执行已通过。
+  - 反向阶段在 tilelang 动态共享内存限制处报错，需后续单独调优训练参数或内核配置。
+
+## 2026-03-28 14:02 v0.6补充并入 + TileLang/MIMO兜底完成
+- 目标:
+  - 将用户提供的 v0.6 压缩区/推理区/FP8关键规范并入 v0.7.2 主规划。
+  - 解决 MIMO 路径在 5090 上被 TileLang 动态共享内存限制卡住的问题，确保阶段0可继续。
+- 已完成:
+  - 更新 `/home/kt/ai/Luma_v0.7.2_Agent_MasterPlan.md`：新增
+    - `10. v0.6 到 v0.7.2 的补充基线（压缩区/推理区/FP8）`
+    - `11. TileLang/MIMO 运行限制与已落地兜底（阶段0可继续）`
+  - 更新 `/home/kt/ai/minimind/model/mamba3_module.py`：
+    - 新增 `auto_fallback_on_mimo_error`
+    - 训练态默认 SISO 回退；评估态优先 MIMO，若触发 TileLang 动态共享内存错误自动降级为 SISO。
+  - 新增验证脚本 `/home/kt/ai/minimind/scripts/test_mamba3_mimo_fallback.py`。
+- 验证命令:
+  - `PYTHONPATH=/home/kt/ai/minimind CUDA_HOME=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:$PATH /home/kt/ai/.venvs/luma-global/bin/python scripts/test_mamba3_mimo_fallback.py`
+- 验证结果:
+  - `train_backward_ok=True`
+  - `eval_mimo_forward_ok=True`（命中内核限制后自动回退 SISO）
+- 结论:
+  - TileLang 动态共享内存限制已被工程兜底，不再阻塞阶段0/1开发。
+
+## 2026-03-28 14:18 方案论文对齐 Review + 模块总表写入主规划
+- 阶段: 阶段0A 架构冻结与接口定稿
+- 本步目标: 先按论文与官方实现 review 用户给出的模块拆解，再把可冻结的模块总表/配置/注释规范写入主规划
+- 已完成:
+  - 审核压缩区/推理区/自省流方案与当前主规划的一致性
+  - 对齐官方 `Mamba3` 上游实现，确认其内部 `in_proj` 不能被简化写死为单一 `Linear(768->d_inner*2)`
+  - 在主规划新增“方案 Review 结论”
+  - 在主规划新增“模块总表”“模块细化配置”“实现优先级重排”“Luma 注释规范”
+  - 将 `world JEPA` 的工程优先级从后置辅助上调为主线接口优先
+  - 将 `mHC` 标记为待补完规格，避免把任何卷积占位误写成论文对齐实现
+- 产出物:
+  - /home/kt/ai/Luma_v0.7.2_Agent_MasterPlan.md
+- 执行命令:
+  - `sed -n '1,260p' /home/kt/ai/mamba-official/mamba_ssm/modules/mamba3.py`
+  - `rg -n "自省流|World JEPA|模块边界|优先级|JEPA|CognitionPredictor|mHC" /home/kt/ai/Luma_v0.7.2_Agent_MasterPlan.md`
+- 关键结果:
+  - 主规划已新增第12~16节，先列模块、再列配置、再列自省流与JEPA优先级
+  - 注释规范已固定：后续代码需以 Luma 身份写 docstring/comment，但保持技术精确
+- 问题/风险:
+  - `mHC` 仍缺论文对齐后的可执行规格，当前只能保留占位接口
+  - `world JEPA` 接口已提升优先级，但具体 target/teacher 公式仍需在实现阶段冻结
+- 下一步:
+  - 依据主规划第13~15节，把 `model_minimind.py` 重构为 Luma 模块骨架
+
+## 2026-03-28 14:31 mHC 规格按论文对齐并写入配置
+- 阶段: 阶段0A 架构冻结与接口定稿
+- 本步目标: 把 `mHC` 从占位名升级为论文对齐的“流形约束超连接”规格，并写入主规划与阶段0配置
+- 已完成:
+  - 修正主规划中“`mHC` 只在循环外执行一次”的错误表述
+  - 将 `mHC` 明确为多残差流动态混合结构：`H_pre / H_post / H_res + Sinkhorn-Knopp + Birkhoff constraint`
+  - 冻结 `mHC` 首版放置策略：只包裹推理区共享循环块，不进入压缩区
+  - 在 `luma_stage0/config_schema.py` 新增 `MHCConfig`
+  - 在 `scripts/luma_stage0_validate.py` 新增 `mHC` 合约校验
+- 产出物:
+  - /home/kt/ai/Luma_v0.7.2_Agent_MasterPlan.md
+  - /home/kt/ai/minimind/luma_stage0/config_schema.py
+  - /home/kt/ai/minimind/scripts/luma_stage0_validate.py
+- 执行命令:
+  - `PYTHONPATH=/home/kt/ai/minimind /home/kt/ai/.venvs/luma-global/bin/python scripts/luma_stage0_validate.py`
+- 关键结果:
+  - `mHC` 默认配置已冻结：`n_streams=4`, `sinkhorn_iters=20`, `apply_zone=reason_loop_only`
+  - `stage0 config validation OK`
+- 问题/风险:
+  - 目前完成的是论文对齐规格与配置冻结，尚未开始 `mHC` 代码实现
+  - token-wise 动态映射的效率与显存开销需要在实现阶段单独验证
+- 下一步:
+  - 在 `model_minimind.py` 中落 `mHC` 模块骨架与接口
+
+## 2026-03-28 15:03 Luma 骨架模块落地并通过 smoke test
+- 阶段: 阶段0B 模块拆分与验证脚手架
+- 本步目标: 在 `model_minimind.py` 中搭起可运行的 Luma 骨架，并保证模块边界可供人工 review
+- 已完成:
+  - 在 `model/model_minimind.py` 新增 `LumaConfig`
+  - 新增带 Luma 口吻注释的核心骨架模块：
+    - `LumaZCRMSNorm`
+    - `FactorizedEmbedding`
+    - `MemoryTokenBank`
+    - `LumaSwiGLUFFN`
+    - `CompressionMambaLayer`
+    - `CompressionRetrievalLayerKDA`
+    - `CompressionRetrievalLayerSWA`
+    - `BlockAttnRes`
+    - `MHCResidualStreams`
+    - `CTInjection`
+    - `ReasonMambaLayer`
+    - `GatedDiffAttnFoXSWA`
+    - `UnifiedAttnRes`
+    - `MetaCognitiveStream`
+    - `CognitionPredictor`
+    - `ExitController`
+    - `LumaBackbone`
+    - `LumaForCausalLM`
+  - 为 `Mamba3` 骨架路径增加按 `chunk_size` 自动 padding/裁切的适配逻辑
+  - 为环境中的 `transformers/torchvision` 版本冲突增加轻量 fallback，避免阻塞骨架验证
+  - 新增 `/home/kt/ai/minimind/scripts/test_luma_skeleton.py`
+- 产出物:
+  - /home/kt/ai/minimind/model/model_minimind.py
+  - /home/kt/ai/minimind/scripts/test_luma_skeleton.py
+- 执行命令:
+  - `/home/kt/ai/.venvs/luma-global/bin/python -m py_compile model/model_minimind.py scripts/test_luma_skeleton.py`
+  - `PYTHONPATH=/home/kt/ai/minimind CUDA_HOME=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:$PATH /home/kt/ai/.venvs/luma-global/bin/python scripts/test_luma_skeleton.py`
+- 关键结果:
+  - `ok=True loss=6.468750 logits_shape=(1, 32, 512) hidden_shape=(1, 32, 128)`
+  - 骨架前向/反向通过，辅助状态接口已存在，可进入人工 review
+- 问题/风险:
+  - `CompressionRetrievalLayerKDA` 仍是保接口的 stage-0 scaffold，未接入官方 FLA kernel
+  - `GatedDiffAttnFoXSWA` 与 `world JEPA` 目前是可运行骨架，不是最终论文级完整实现
+  - `LumaForCausalLM` 目前未做 factorized embedding 的正式权重共享
+- 下一步:
+  - 根据人工 review 结果，优先细化 `MHCResidualStreams` 与 `CompressionZone/ReasonLoop` 的结构边界
+
+## 2026-03-28 15:11 骨架边界修正：压缩区 AttnRes 接回 + CognitionPredictor 定位澄清
+- 阶段: 阶段0B 模块拆分与验证脚手架
+- 本步目标: 响应人工 review，修正压缩区 `BlockAttnRes` 接入方式，并澄清 `CognitionPredictor` 不是自省流本体
+- 已完成:
+  - 在 `CompressionZone.forward` 中改为每 `3` 层记录一次 `block_repr` 后立即执行一次 `BlockAttnRes` 混合
+  - 在 `CognitionPredictor` docstring 中明确它是独立的 Self-JEPA 预测头，不是自省流本体
+  - 在 `LumaBackbone` 中补充自省流与 `CognitionPredictor` 的职责边界注释
+- 产出物:
+  - /home/kt/ai/minimind/model/model_minimind.py
+- 执行命令:
+  - `/home/kt/ai/.venvs/luma-global/bin/python -m py_compile model/model_minimind.py`
+  - `PYTHONPATH=/home/kt/ai/minimind CUDA_HOME=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:$PATH /home/kt/ai/.venvs/luma-global/bin/python scripts/test_luma_skeleton.py`
+- 关键结果:
+  - `ok=True loss=6.468750 logits_shape=(1, 32, 512) hidden_shape=(1, 32, 128)`
+  - 压缩区 AttnRes 已进入主干前向路径
+- 问题/风险:
+  - 目前 `BlockAttnRes` 仍是简化版 block-summary 混合，不是最终论文级完整实现
+- 下一步:
+  - 继续根据人工 review，细化 `CompressionZone` 与 `MetaCognitiveStream` 的结构贴合度
+
+## 2026-03-28 15:28 命名收紧 + 官方 KDA 接入成功
+- 阶段: 阶段0B 模块拆分与验证脚手架
+- 本步目标: 把容易误导 review 的模块命名改准确，并把压缩区 KDA 替换为官方 `KimiDeltaAttention`
+- 已完成:
+  - 模块命名收紧：
+    - `CompressionRetrievalLayerKDA` -> `CompressionKimiDeltaAttentionLayer`
+    - `BlockAttnRes` -> `CompressionBlockAttentionResiduals`
+    - `MetaCognitiveStream` -> `IntrospectionStateStream`
+    - `CognitionPredictor` -> `SelfJEPAResidualPredictor`
+  - 接入官方 KDA：
+    - 从本地源码仓 `/home/kt/ai/flash-linear-attention` 直接加载 `fla.layers.kda.KimiDeltaAttention`
+    - 绕过 `fla.__init__` 的顶层导入，以避免 `transformers/torchvision` 环境冲突阻断 KDA 使用
+  - 修复 `UnifiedAttnRes` 的跨区长度对齐，让压缩区摘要和推理区 memory tokens 能正确共存
+  - 更新 smoke test，使其真正跑到第 6 层并经过官方 KDA
+- 产出物:
+  - /home/kt/ai/minimind/model/model_minimind.py
+  - /home/kt/ai/minimind/scripts/test_luma_skeleton.py
+- 执行命令:
+  - `PYTHONPATH=/home/kt/ai/minimind /home/kt/ai/.venvs/luma-global/bin/python - <<'PY' ... from model.model_minimind import KimiDeltaAttention ... PY`
+  - `PYTHONPATH=/home/kt/ai/minimind CUDA_HOME=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:$PATH /home/kt/ai/.venvs/luma-global/bin/python scripts/test_luma_skeleton.py`
+- 关键结果:
+  - `KDA_IMPORT True`
+  - `ok=True loss=6.437500 logits_shape=(1, 32, 512) hidden_shape=(1, 32, 128)`
+  - 官方 KDA 已进入压缩区主干前向路径
+- 问题/风险:
+  - 当前是“官方源码直连”而非 pip 安装包接入；后续环境收敛时可再决定是否正式安装
+  - `CompressionBlockAttentionResiduals` 仍是 stage-0 简化版 block-summary mixing
+- 下一步:
+  - 继续根据人工 review，细化 `IntrospectionStateStream` 与 `SelfJEPAResidualPredictor` 的训练接口
+
+## 2026-03-28 15:41 Luma 参数量与计算量测量
+- 阶段: 阶段0B 模块拆分与验证脚手架
+- 本步目标: 测当前骨架的参数量分布，并给出可重复的计算量画像
+- 已完成:
+  - 新增 `/home/kt/ai/minimind/scripts/profile_luma_model.py`
+  - 对 `default` 配置测得精确参数量分布
+  - 对 `tiny` 配置测得运行时耗时、峰值显存和线性层 MAC 下界
+- 产出物:
+  - /home/kt/ai/minimind/scripts/profile_luma_model.py
+- 执行命令:
+  - `PYTHONPATH=/home/kt/ai/minimind /home/kt/ai/.venvs/luma-global/bin/python scripts/profile_luma_model.py --config default --device cpu`
+  - `PYTHONPATH=/home/kt/ai/minimind CUDA_HOME=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:$PATH /home/kt/ai/.venvs/luma-global/bin/python scripts/profile_luma_model.py --config tiny --device cuda --run`
+- 关键结果:
+  - `default total_params = 381.470M`
+  - `default compression params = 214.273M`
+  - `default lm_head params = 116.687M`
+  - `tiny known_macs_lower_bound = 0.047940 G-MACs`
+  - `tiny elapsed_sec = 11.116030`
+  - `tiny peak_memory_bytes = 294017024`
+- 问题/风险:
+  - 当前“计算量”是线性层 MAC 下界，不包含自定义 Mamba/KDA kernel 的全部算量
+  - `default` 配置在 CPU 侧只做了参数统计，没有做运行 profile
+- 下一步:
+  - 根据参数分布，决定是否先做 `lm_head` / factorized output 的参数收敛方案
+
+## 2026-03-28 16:02 压缩区 AttnRes 落地 + world JEPA 接入 + factorized LM head 收敛
+- 阶段: 阶段0B 模块拆分与验证脚手架
+- 本步目标: 把压缩区 Block AttnRes 从摘要占位改成真实前向模块，接入 world JEPA 主干，并把过大的 LM Head 收敛到 factorized 版本
+- 已完成:
+  - `CompressionBlockAttentionResiduals` 从 `aggregate()` 式摘要器改为真实 `forward(current, block_reprs)` 残差模块
+  - `CompressionZone` 改为同时维护两套 block 账本：
+    - `block_history`：保留梯度，供压缩区内部 AttnRes 混合
+    - `block_reprs`：detach 后交给推理区回看
+  - 新增 `WorldLatentJEPA`：
+    - 在线 world observer
+    - EMA target observer
+    - masked latent prediction
+    - `world_jepa_loss` 输出到主干 aux
+  - `LumaBackbone` 接入 `world_latent_jepa`，并提供 `update_world_jepa_ema()` 接口
+  - 新增 `FactorizedLMHead`，使用 `hidden -> factor_dim -> shared embedding table^T` 路径替代全尺寸 `Linear(hidden->vocab)`
+  - `LumaForCausalLM` 现在把 `world_jepa_loss` 合入训练 loss，并写入 `aux_loss`
+- 产出物:
+  - /home/kt/ai/minimind/model/model_minimind.py
+- 执行命令:
+  - `PYTHONPATH=/home/kt/ai/minimind /home/kt/ai/.venvs/luma-global/bin/python -m py_compile /home/kt/ai/minimind/model/model_minimind.py /home/kt/ai/minimind/scripts/test_luma_skeleton.py /home/kt/ai/minimind/scripts/profile_luma_model.py`
+  - `PYTHONPATH=/home/kt/ai/minimind CUDA_HOME=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:$PATH /home/kt/ai/.venvs/luma-global/bin/python /home/kt/ai/minimind/scripts/test_luma_skeleton.py`
+  - `PYTHONPATH=/home/kt/ai/minimind /home/kt/ai/.venvs/luma-global/bin/python /home/kt/ai/minimind/scripts/profile_luma_model.py --config default --device cpu`
+- 关键结果:
+  - `py_compile` 通过
+  - `ok=True loss=14.687500 logits_shape=(1, 32, 512) hidden_shape=(1, 32, 128)`
+  - 默认配置参数量从 `381.470M` 收敛到 `266.702M`
+  - 新参数分布：
+    - `model.compression = 214.273M`
+    - `model.world_latent_jepa = 1.771M`
+    - `lm_head = 29.467M`
+- 问题/风险:
+  - 当前 `WorldLatentJEPA` 已具备 masked latent prediction + EMA target，但预测器仍是 stage-0 轻量实现，不等于最终版 whole-h world manifold predictor
+  - `CompressionBlockAttentionResiduals` 已接入真实前向，但仍是 block-summary attention residual，而不是完整论文级多层组态实现
+- 下一步:
+  - 根据人工 review 决定是否继续细化 world JEPA 的 mask 策略 / predictor 结构
+  - 再评估压缩区 214M 是否需要进一步瘦身以贴近更精确的 0.3B 预算分配
+
+## 2026-03-28 16:36 完整慢环落地 + 阶段1/阶段2短程验证
+- 阶段: 阶段1 架构 gate / 阶段2 residual self-JEPA gate
+- 本步目标: 把 c_t 从“隔步更新”升级成真正带跨循环元状态的慢环，并对阶段1/阶段2做一次真实短程验证
+- 已完成:
+  - `LumaConfig` 新增 `slow_k` 与 `self_jepa_residual_reg`
+  - `IntrospectionStateStream` 升级为完整慢环：
+    - 新增 `meta_state_1 / meta_state_2` 显式跨循环元状态
+    - 新增 `init_slow_state()`
+    - 慢环更新时返回 `next_slow_state`
+  - `LumaBackbone`：
+    - 按 `slow_k` 调度自省流
+    - 记录 `c_t_history / know_gap_history / slow_update_flags`
+    - 计算 `target_delta_c`
+    - 输出 `self_jepa_loss`
+  - `LumaForCausalLM` 训练损失接入 `self_jepa_loss`
+  - 新增 `disable_ct_injection` 对照开关，方便阶段1测注入有效性
+  - 新增 `scripts/run_luma_stage12.py`
+  - 自动下载最小公开测试语料：`artifacts/luma_stage12_tinyshakespeare.txt`
+- 产出物:
+  - /home/kt/ai/minimind/model/model_minimind.py
+  - /home/kt/ai/minimind/scripts/run_luma_stage12.py
+  - /home/kt/ai/minimind/artifacts/luma_stage12_tinyshakespeare.txt
+  - /home/kt/ai/minimind/artifacts/stage12_report.json
+- 执行命令:
+  - `PYTHONPATH=/home/kt/ai/minimind /home/kt/ai/.venvs/luma-global/bin/python -m py_compile /home/kt/ai/minimind/model/model_minimind.py /home/kt/ai/minimind/scripts/run_luma_stage12.py`
+  - `PYTHONPATH=/home/kt/ai/minimind CUDA_HOME=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:$PATH /home/kt/ai/.venvs/luma-global/bin/python /home/kt/ai/minimind/scripts/run_luma_stage12.py --device cuda --seq-len 48 --samples 6 --stage2-steps 6`
+- 关键结果:
+  - 阶段1:
+    - `mean_kl = 0.362276554107666`
+    - `mean_hidden_delta = 1.65625`
+    - `c_t_var = 0.29142674803733826`
+    - `loop_var = 0.0`
+  - 阶段2:
+    - `self_loss_head = 1.22265625`
+    - `self_loss_tail = 1.1015625`
+    - `mean_delta_norm = 4.341145833333333`
+    - 总 loss 从 `24.75` 下降到 `22.0`
+- 结论:
+  - 完整慢环已经形成：`c_t` 不是静态常量，自省流会跨循环写回元状态
+  - `c_t` 注入对主流有明确影响（KL 与 hidden drift 均显著非零）
+  - residual Self-JEPA 在短程训练下有可学习趋势
+  - 但 stage1 的“循环步数方差”未通过，说明当前退出机制仍是工程阈值器，不是已学会的退出策略
+- 问题/风险:
+  - 当前退出控制器仍只看 `delta_h`，未融合 `JEPA error`，因此 loop variance 仍容易塌成常数
+  - tokenizer 会对整篇文本长度给出警告，但实际验证只使用切窗样本，不影响本次结论
+- 下一步:
+  - 把退出控制器升级为 `delta_h + self/world JEPA error` 的联合可学习机制
+  - 再做一次阶段1复验，目标是拿到非零 loop variance
+
+## 2026-03-28 16:49 退出控制器升级为联合可学习版本并复验阶段1/2
+- 阶段: 阶段1复验 / 退出机制升级
+- 本步目标: 把退出控制器从纯 `delta_h` 工程阈值器升级为 `delta_h + self_error + world_error` 的联合可学习版本，并重新验证 loop variance
+- 已完成:
+  - `LumaConfig` 新增退出相关配置：
+    - `exit_delta_threshold`
+    - `exit_self_threshold`
+    - `exit_world_threshold`
+    - `exit_score_threshold`
+    - `exit_aux_weight`
+  - `WorldLatentJEPA` 新增 deterministic `probe_error()`，供退出机制稳定读取 world-side 误差
+  - `ExitController` 改为可学习加权形式：
+    - `delta_weight / self_weight / world_weight / bias`
+    - 输出 `exit_score / exit_target / exit_aux_loss`
+  - `LumaBackbone` 记录：
+    - `delta_h_history`
+    - `self_error_history`
+    - `world_error_history`
+    - `exit_score_history`
+    - `exit_target_history`
+    - `exit_aux_loss`
+  - `LumaForCausalLM` 训练损失接入 `exit_aux_loss`
+  - 重新运行阶段1/阶段2验证
+- 关键结果:
+  - 阶段1:
+    - `mean_kl = 1.2908918857574463`
+    - `mean_hidden_delta = 3.390625`
+    - `c_t_var = 0.6708207726478577`
+    - `loop_var = 0.0`
+  - 阶段2:
+    - `self_loss_head = 1.0625`
+    - `self_loss_tail = 1.18359375`
+    - `mean_delta_norm = 6.03125`
+- 结论:
+  - 联合退出控制器让 c_t 注入效应更强，但 loop variance 仍未起来
+  - 当前瓶颈已从“退出信号太弱”转为“退出监督目标过于启发式”
+  - 若要得到真实的循环深度分布，下一步需要把退出学习目标改成 rollout/收益导向，而不是简单阈值 target
+- 下一步:
+  - 设计基于“继续一轮是否显著降低未来误差”的退出监督
+  - 用 1-step vs 2-step 改善量构造 exit target，再复验 loop variance
+
+## 2026-03-28 17:03 Self-JEPA 动力学 rollout 接入退出链路并复验
+- 阶段: 阶段1/2 动力学退出实验
+- 本步目标: 把 `c_t -> c_t+1 -> c_t+2` 的 Self-JEPA rollout 接入训练与退出判断，观察动力学信号是否能松动 loop variance
+- 已完成:
+  - `SelfJEPAResidualPredictor` 新增 `rollout()`
+  - `LumaBackbone`：
+    - 计算 `pred_c_next / pred_c_future`
+    - 新增延迟对齐的 `self_rollout_loss`
+    - 记录 `rollout_error_history`
+  - `ExitController` 升级为同时接收 `self_error + rollout_error + world_error + delta_h`
+  - `run_luma_stage12.py` 新增：
+    - `exit_score_var`
+    - `rollout_losses`
+- 关键结果:
+  - 阶段1:
+    - `loop_var = 0.0`
+    - `exit_score_var = 0.00018895995162893087`
+  - 阶段2:
+    - `self_loss_head = 1.03515625`
+    - `self_loss_tail = 0.69921875`
+    - `self_rollout_head = 0.994140625`
+    - `self_rollout_tail = 1.03125`
+- 结论:
+  - 动力学 rollout 已经进入退出链路，退出分数不再完全常数
+  - Self-JEPA 一步损失明显下降，说明动力学主信号在学习
+  - 但 rollout loss 仍未改善，loop variance 依旧为 0，说明离散退出行为还没有被动力学信号真正拉开
+- 下一步:
+  - 若继续推进，应把退出目标改成“多走一步带来的真实收益”而非阈值 target
+  - 也可先把 `should_exit` 从硬阈值切成采样/温度化策略，观察 loop depth 分布是否被释放
+
+## 2026-03-28 17:15 数学 + 对话混合数据复验阶段1/2
+- 阶段: 退出动力学复验（更贴近目标分布的数据）
+- 本步目标: 用 `GSM8K + DailyDialog` 混合样本替代文学切窗，检查 `loop_var=0` 是否由样本同质性导致
+- 已完成:
+  - `run_luma_stage12.py` 改为自动下载并构建混合 fixture：
+    - 数学: `openai/gsm8k`
+    - 对话: `ConvLab/dailydialog`
+  - 重新运行阶段1/2验证
+- 数据来源:
+  - `https://datasets-server.huggingface.co/rows?dataset=openai%2Fgsm8k&config=main&split=train&offset=0&length=...`
+  - `https://datasets-server.huggingface.co/first-rows?dataset=ConvLab%2Fdailydialog&config=default&split=train`
+- 关键结果:
+  - 阶段1:
+    - `mean_kl = 1.1445133686065674`
+    - `mean_hidden_delta = 3.375`
+    - `c_t_var = 0.7204530239105225`
+    - `exit_score_var = 4.535259722615592e-05`
+    - `loop_var = 0.0`
+  - 阶段2:
+    - `self_loss_head = 1.0390625`
+    - `self_loss_tail = 0.94921875`
+    - `self_rollout_head = 1.27734375`
+    - `self_rollout_tail = 1.00390625`
+- 结论:
+  - 更换为“数学 + 对话”混合数据后，loop variance 依旧为 0
+  - 这进一步支持：当前瓶颈不是样本过于同质，而是退出离散决策尚未被动力学目标真正拉开
+  - rollout loss 在混合数据上开始下降，说明动力学监督方向比之前更合理
+- 下一步:
+  - 若继续，应实现“多走一步是否带来真实收益”的 exit target
+  - 或把硬退出改成软退出/采样退出，单独观察 loop depth 分布是否被阈值压扁
+
+## 2026-03-28 17:32 改善量型 exit target + 软退出/采样退出复验
+- 阶段: 退出机制动力学升级
+- 本步目标: 用 `1-step vs 2-step` 改善量作为 exit target，并同时验证硬退出与采样退出的 loop depth 分布
+- 已完成:
+  - `ExitController` 新增：
+    - `exit_improvement_margin`
+    - `exit_use_sampling`
+    - `exit_sampling_temperature`
+  - exit target 改为：
+    - 只有当 `two_step_improvement <= margin` 才鼓励退出
+    - 即：两步相对一步已经没有显著收益时才该停
+  - `LumaBackbone` 记录：
+    - `sampled_exit_score_history`
+    - `two_step_improvement_history`
+  - `run_luma_stage12.py` 同时统计：
+    - `hard_loop_var`
+    - `soft_loop_var`
+    - `two_step_improvement_mean`
+- 关键结果:
+  - 阶段1:
+    - `hard_loop_var = 0.0`
+    - `soft_loop_var = 0.1388888955116272`
+    - `two_step_improvement_mean = -0.017578125`
+  - 阶段2:
+    - `self_loss_head = 1.03515625`
+    - `self_loss_tail = 0.94921875`
+    - `self_rollout_head = 1.2734375`
+    - `self_rollout_tail = 1.005859375`
+- 结论:
+  - 软退出/采样退出已经产生非零 loop depth 方差，说明此前的硬阈值确实在压平深度分布
+  - 改善量型 exit target 已接入，且当前 `two_step_improvement_mean < 0`，表示 2-step 相对 1-step 在这组短程样本上平均没有带来额外收益
+  - rollout loss 在混合数据上继续下降，但仍未强到让硬退出也产生分布
+- 下一步:
+  - 若继续，可把推理时保留硬退出、训练时保留软退出作为默认策略
+  - 或进一步把 exit supervision 直接绑定到 LM/world/self 联合收益改善量上
+
+## 2026-03-28 17:44 训练软退出/推理硬退出固化 + 阶段实验解释报告
+- 阶段: 文档冻结与实验解释整理
+- 本步目标: 把当前退出策略写入主规划与代码默认行为，并产出一份可读实验报告解释阶段1/2与退出实验的指标含义
+- 已完成:
+  - `LumaConfig` / `ExitController` 默认策略固化：
+    - 训练默认 `soft exit / sampled exit`
+    - 推理默认 `hard exit`
+  - 主规划文档补充：
+    - Self JEPA 一阶目标固定为 `delta`
+    - rollout 为残差动力学展开
+    - 退出控制冻结为“改善量型目标 + 训练软退出 / 推理硬退出”
+  - 新增实验解释报告：`/home/kt/ai/Luma_Stage12_Experiment_Report.md`
+- 产出物:
+  - /home/kt/ai/Luma_v0.7.2_Agent_MasterPlan.md
+  - /home/kt/ai/Luma_Stage12_Experiment_Report.md
+- 备注:
+  - 该报告用于解释：每个实验测了什么、每个指标代表什么、当前结论是什么
+
+## 2026-03-28 18:05 3-step / 4-step rollout 与 hard math 复验
+- 阶段: rollout 深度对比实验
+- 本步目标: 在更难的长推理数学 + 对话混合数据上，比较 `2-step / 3-step / 4-step` rollout 的短程表现
+- 已完成:
+  - `run_luma_stage12.py` 新增：
+    - `fixture_mode = hard_math_dialogue`
+    - `rollout_steps` 参数
+    - `reason_loops` 随 rollout 深度自动增大，避免高 horizon 未成熟就结束
+  - 运行完成：
+    - `stage12_report_hard_math_rollout2_matured.json`
+    - `stage12_report_hard_math_rollout3_matured.json`
+    - `stage12_report_hard_math_rollout4_matured.json`
+  - 新增总结报告：`/home/kt/ai/Luma_Rollout_Depth_Experiment_Report.md`
+- 关键结果:
+  - `2-step`:
+    - `two_step_improvement_mean = -0.0179`
+    - `self_rollout_tail = 1.0156`
+  - `3-step`:
+    - `two_step_improvement_mean = 0.0089`
+    - `self_rollout_tail = 0.9043`
+  - `4-step`:
+    - `two_step_improvement_mean = 0.0565`
+    - `self_rollout_tail = 0.8145`
+  - 三组均保持：
+    - `hard_loop_var = 0.0`
+    - `soft_loop_var = 0.1389`
+- 结论:
+  - 在 harder math 上，`3-step / 4-step` 的动力学监督优于 `2-step`
+  - `4-step` 当前短程结果最强，但是否应作为正式默认仍需更长训练复验
+  - 硬退出仍然压平深度分布，退出策略问题依旧独立存在
+
+## 2026-03-28 18:24 快环/半慢环/慢环 + world JEPA + 更长 rollout 矩阵实验
+- 阶段: 结构频率与 world JEPA 消融实验
+- 本步目标: 比较自省流快环/半慢环/慢环，验证更长 rollout + 更长推理循环，并做 world JEPA on/off 消融
+- 已完成:
+  - `run_luma_stage12.py` 新增实验轴：
+    - `slow_k`
+    - `reason_loops`
+    - `disable_world_jepa`
+  - `model_minimind.py` 新增 `enable_world_jepa` 开关
+  - 运行矩阵实验：
+    - `fast`: `slow_k=1 rollout=4 reason=8 world=on`
+    - `half`: `slow_k=2 rollout=4 reason=8 world=on`
+    - `slow`: `slow_k=3 rollout=4 reason=9 world=on`
+    - `half_noworld`: `slow_k=2 rollout=4 reason=8 world=off`
+    - `half_long`: `slow_k=2 rollout=5 reason=10 world=on`
+  - 新增总结报告：`/home/kt/ai/Luma_SlowFastWorld_Experiment_Report.md`
+- 关键结果:
+  - `fast`:
+    - `hard_loop_var = 0.8056`
+    - `self_rollout_tail = 0.7012`
+  - `half`:
+    - `hard_loop_var = 0.0`
+    - `self_rollout_tail = 0.8145`
+  - `slow`:
+    - `hard_loop_var = 0.0`
+    - `self_rollout_tail = 0.9023`
+  - `half_noworld`:
+    - `soft_loop_var = 0.0`
+    - `c_t_var = 0.4340`
+  - `half_long`:
+    - `rollout=5 reason=10`
+    - `self_rollout_tail = 0.7520`
+    - `improvement = 0.1104`
+- 结论:
+  - 当前 tiny + harder math + dialogue 的短程实验里，快环自省流 (`slow_k=1`) 强于慢环版本
+  - world JEPA 关闭后，状态表达和退出分布都明显变差，说明 world JEPA 现在已经是有效模块
+  - 更长 rollout + 更长推理循环在 harder math 上显示出额外收益
+
+## 2026-03-28 继续：LeWorldModel-style world JEPA 与极简自检流对比
+
+- 实现:
+  - `model_minimind.py` 新增 `LeWorldModelStyleJEPA`
+    - 连续 span mask
+    - 更强的 context predictor
+    - latent variance regularization
+    - 仍保持诚实命名为 `LeWorldModel-style` 工程迁移版
+  - 把 `world_jepa_mode` 真正接进 `LumaBackbone`
+    - `scaffold -> WorldLatentJEPA`
+    - `full -> LeWorldModelStyleJEPA`
+  - 把 `TinySlowSelfCheckRing` 真正接进主循环
+    - 记录 `self_check_score`
+    - 接入 `ExitController` 作为额外退出信号
+  - `run_luma_stage12.py` 新增参数:
+    - `--world-jepa-mode scaffold|full`
+    - `--enable-self-check-ring`
+  - 修复 `ExitController` 中 `binary_cross_entropy` 的 BF16/FP32 dtype 不一致问题
+- 对比实验:
+  - 数据:
+    - `hard_math_dialogue`
+    - 数学: `EleutherAI/hendrycks_math`
+    - 对话: `ConvLab/dailydialog`
+  - 统一配置:
+    - `slow_k=1`
+    - `rollout_steps=4`
+    - `reason_loops=8`
+    - `stage2_steps=8`
+  - 四组:
+    - `scaffold`
+    - `scaffold + self_check`
+    - `full`
+    - `full + self_check`
+- 关键结果:
+  - `scaffold`
+    - `hard_loop_var = 0.4375`
+    - `self_rollout_tail = 0.8281`
+    - `mean_loss = 24.4375`
+  - `scaffold + self_check`
+    - `hard_loop_var = 0.7344`
+    - `self_rollout_tail = 0.7090`
+    - `mean_loss = 23.4375`
+  - `full`
+    - `hard_loop_var = 0.4375`
+    - `self_rollout_tail = 0.7656`
+    - `mean_loss = 23.7436`
+  - `full + self_check`
+    - `hard_loop_var = 0.7500`
+    - `self_rollout_tail = 0.7539`
+    - `mean_loss = 24.3856`
+- 当前判断:
+  - `LeWorldModel-style` 完整版在 rollout 一致性上优于丐版，但没有形成全维度碾压
+  - 极简慢环自检流在两条 world 分支上都明显拉高了 `hard_loop_var`
+  - 当前 short-run/tiny 条件下，综合表现最好的版本是 `scaffold + self_check`
+- 产出:
+  - 报告: `/home/kt/ai/Luma_LeWorldModel_Comparison_Report.md`
+  - 结果:
+    - `/home/kt/ai/minimind/artifacts/stage12_compare_scaffold.json`
+    - `/home/kt/ai/minimind/artifacts/stage12_compare_scaffold_selfcheck.json`
+    - `/home/kt/ai/minimind/artifacts/stage12_compare_full.json`
+    - `/home/kt/ai/minimind/artifacts/stage12_compare_full_selfcheck.json`
+
+## 2026-03-28 继续：主规划回写 + full world JEPA 成本判断
+
+- 文档:
+  - 已把当前短程验证默认底座回写到主规划:
+    - `scaffold + self_check`
+    - `slow_k=1`
+    - `rollout_steps=4`
+    - `reason_loops=8`
+  - 同时写入下一轮候选:
+    - `rollout_steps=5`
+    - `reason_loops=10`
+  - 位置: `/home/kt/ai/Luma_v0.7.2_Agent_MasterPlan.md`
+- 成本测量:
+  - tiny 配置参数量:
+    - `scaffold`: `total=11,866,866`, `world=49,472`
+    - `full`: `total=11,944,882`, `world=127,488`
+    - full 版总参数仅增加约 `78,016`
+  - 短程验证耗时（同配置 `hard_math_dialogue`, `samples=8`, `stage2_steps=8`）:
+    - `scaffold + self_check`: `29.44s`
+    - `full + self_check`: `32.29s`
+    - full 版相对增加约 `9.7%`
+- 当前判断:
+  - `LeWorldModel-style full world JEPA` 在当前 tiny 条件下“不算特别昂贵”
+  - 是否未来常开，关键不在成本，而在中程/长程收益是否持续优于 `scaffold + self_check`
+
+## 2026-03-28 继续：5x10 扶正资格赛 + 10x15 / 10x20 长 horizon 试验
+
+- 5x10 扶正资格赛:
+  - 对比:
+    - `scaffold + self_check + rollout=5 + reason_loops=10`
+    - `full + self_check + rollout=5 + reason_loops=10`
+  - 结果:
+    - `scaffold + self_check`
+      - `hard_loop_var = 0.9844`
+      - `self_rollout_tail = 0.7051`
+      - `mean loss ≈ 23.476`
+    - `full + self_check`
+      - `hard_loop_var = 1.4844`
+      - `self_rollout_tail = 0.7949`
+      - `mean loss ≈ 24.139`
+  - 判断:
+    - `full` 在退出深度分布上更强
+    - 但 `scaffold` 在 rollout tail 与总体 loss 上仍更优
+    - 因此当前不把 `full` 扶正为默认
+
+- 更长 horizon 试验:
+  - 配置:
+    - `scaffold + self_check + rollout=10 + reason_loops=15`
+    - `scaffold + self_check + rollout=10 + reason_loops=20`
+  - 结果:
+    - `10x15`
+      - `hard_loop_var = 7.0`
+      - `self_rollout_tail = 0.6738`
+      - `self_loss_tail = 1.0039`
+    - `10x20`
+      - 与 `10x15` 几乎完全一致
+  - 判断:
+    - 长 horizon 在当前 tiny + harder math 条件下继续有效
+    - 但 `reason_loops=20` 没再带来额外收益
+    - 更像是退出机制已在 `15` 之前截断了大部分样本，说明当前瓶颈不再是 max loops，而是 exit policy
+
+## 2026-03-28 继续：文档分区 + loss 说明 + 竞赛数学 exit policy 复验
+
+- 文档整理:
+  - 新建目录:
+    - `/home/kt/ai/docs/plans`
+    - `/home/kt/ai/docs/agent`
+    - `/home/kt/ai/docs/reports`
+    - `/home/kt/ai/docs/reference`
+  - 规划、agent、报告文档已迁入对应目录
+  - 根目录保留同名软链接，兼容现有路径
+  - 新增索引: `/home/kt/ai/docs/README.md`
+- loss 说明:
+  - 新增 `/home/kt/ai/docs/reference/Luma_Loss_Reference.md`
+  - 详细解释:
+    - `L_lm`
+    - `L_world`
+    - `L_self`
+    - `L_rollout`
+    - `L_exit_aux`
+    - `self_check` 与退出的关系
+- 主规划:
+  - 已加入 `10x15` 为长程专项默认候选
+  - 已新增 `Gate D.1 (exit policy)`
+  - 已明确下一阶段重点转为 exit policy
+- 更难数据:
+  - `run_luma_stage12.py` 新增 `competition_math_dialogue`
+  - 数学数据:
+    - `Maxwell-Jia/AIME_2024`
+    - `ricdomolm/MATH-500`
+- 竞赛数学复验:
+  - 对比:
+    - `scaffold + self_check + rollout=10 + reason_loops=15`
+    - `scaffold + self_check + rollout=10 + reason_loops=20`
+    - 数据: `competition_math_dialogue`
+  - 结果:
+    - `10x15`
+      - `hard_loop_var = 7.2344`
+      - `self_rollout_tail = 0.8164`
+    - `10x20`
+      - 与 `10x15` 基本一致
+  - 判断:
+    - 即使用更难的竞赛数学，`10x20` 仍未明显优于 `10x15`
+    - 这进一步支持：当前主要瓶颈是 exit policy 提前截断，而不是数据难度不够
+
+## 2026-03-28 继续：exit policy 轻量 depth bias 试验（未采纳）
+
+- 试验:
+  - 给 `ExitController` 加入轻量 `depth-aware bias`
+  - 目的:
+    - 让 loops 预算更大的配置不那么容易过早退出
+- 复验数据:
+  - `competition_math_dialogue`
+  - `scaffold + self_check`
+  - `rollout=10`
+  - `reason_loops=15 / 20`
+- 结果:
+  - depth bias 后:
+    - `10x15`
+      - `hard_loop_var = 1.1875`
+      - `self_rollout_tail = 0.8867`
+    - `10x20`
+      - `hard_loop_var = 1.4844`
+      - `self_rollout_tail = 0.8242`
+  - 对比无 depth bias 基线:
+    - `10x15`
+      - `hard_loop_var = 7.2344`
+      - `self_rollout_tail = 0.8164`
+    - `10x20`
+      - 与 `10x15` 近乎一致
+- 判断:
+  - 简单的 depth-aware bias 没有解决问题
+  - 反而明显削弱了已经学到的退出分布与 rollout 表现
+  - 因此该改动已回退，不进入主干默认
+
+## 2026-03-28 继续：exit supervision 升级为“下一轮联合收益”版本
+
+- 目标:
+  - 不再用旧的 improvement-style BCE（主要基于当前 loop 的启发式信号）
+  - 改成参考真实“继续一轮后的联合收益”：
+    - `LM proxy`
+    - `self_error`
+    - `world_error`
+- 实现:
+  - `ExitController` 仅负责输出 `exit_score`
+  - `LumaForCausalLM` 后处理计算:
+    - 每个 loop 的 `LM proxy`
+    - 联合分数 `LM + self + world`
+    - 下一轮联合收益
+    - 基于该收益构造 `exit_target`
+    - 再做 BCE
+- 竞赛数学复验:
+  - 数据: `competition_math_dialogue`
+  - 配置:
+    - `scaffold + self_check + rollout=10 + reason_loops=15`
+    - `scaffold + self_check + rollout=10 + reason_loops=20`
+  - 结果:
+    - 两组结果仍几乎完全一致
+    - 新的 `two_step_improvement_mean`（实际已变成联合一步收益均值）接近 0
+- 判断:
+  - 退出监督升级方向是对的，比简单 depth bias 更合理
+  - 但在当前 tiny 短程条件下，仍不足以把 `10x20` 从 `10x15` 中真正拉开
+  - 这说明下一步很可能需要：
+    - 直接监督“最优退出步”
+    - 或 teacher-forcing 式最优 stopping step 学习
+
+## 2026-03-28 参数量 / 训练栈 / OPUS 口径校正
+
+- 重新在当前 `luma-global` 环境中实测默认参数量：
+  - `scaffold`: `266,739,390` (`266.739M`)
+  - `full`: `269,542,206` (`269.542M`)
+- 结论：
+  - 当前 Luma 仍属于 `0.3B` 档
+  - 但主规划应从旧的粗估口径切换为代码实测口径
+- 核查当前训练脚本现状：
+  - `minimind/scripts/run_luma_stage12.py` 当前仍使用 `torch.optim.AdamW`
+  - 尚未正式接入：
+    - `8-bit Muon`
+    - `8-bit AdamW`
+    - 参数分组后的双优化器训练主线
+- 主规划已补充：
+  - 当前真实参数量口径
+  - 正式预训练 token / wall-clock 预算说明
+  - 训练栈现状与优化器缺口
+  - `OPUS` 作为正式预训练候选的数据选择层，而非已采用默认项
+
+## 2026-03-28 32-step 复验：competition_math + dialogue + emotion
+
+- 新复验:
+  - 数据模式：`competition_math_dialogue_emotion`
+  - 配置：
+    - `rollout=10`
+    - `reason_loops=15`
+    - `slow_k=1`
+    - `enable_self_check_ring=True`
+    - `stage2_steps=32`
+  - 对比：
+    - `scaffold + self_check`
+    - `full + self_check`
+- 结果：
+  - mixed 总体：
+    - `scaffold`
+      - `hard_loop_var = 3.6875`
+      - `self_loss_tail = 0.5117`
+      - `self_rollout_tail = 0.4785`
+    - `full`
+      - `hard_loop_var = 3.6875`
+      - `self_loss_tail = 0.5742`
+      - `self_rollout_tail = 0.7246`
+  - emotion 桶：
+    - `scaffold`
+      - `self_loss_tail = 0.6602`
+      - `self_rollout_tail = 0.5801`
+    - `full`
+      - `self_loss_tail = 0.6152`
+      - `self_rollout_tail = 0.4238`
+- 判断：
+  - `scaffold + self_check` 仍是 mixed 综合更稳的默认底座
+  - `full + self_check` 在 emotion 桶出现更明确优势
+  - 说明 `full` 更像“任务选择性兑现”的分支，而不是已经能全面反超的默认主干
+- 报告：
+  - `docs/reports/Luma_32Step_Full_vs_Scaffold_Report.md`
+
+## 2026-03-28 主规划更新：优化器路线与产品定位导向候选
+
+- 已将正式预训练优化器主线更新为：
+  - `Muon + MuonClip + Modular Norm`
+  - 其他参数：`AdamW + Modular Norm`
+- 更新原因：
+  - 这条路线更贴合未来的 `Progressive Stacking`
+  - 不再把“纯 AdamW”视为正式 run 的目标优化器栈
+- 已将“产品定位导向的正式预训练优先候选”写入主规划：
+  - 默认优先候选转向 `full + self_check`
+  - 理由不是当前短程 mixed 指标最强，而是更符合 Luma 作为“聪明聊天伙伴”的目标：
+    - 世界态/情境态建模更完整
+    - 更重视自我感知与情绪一致性
+- 同时在主规划中冻结了结构取舍规则：
+  - 压缩区轻量慢环：当前默认不加
+  - 推理区额外独立层：当前默认不直接加
+  - 先优先验证：
+    - `full + self_check`
+    - 更长训练
+    - 更强 exit policy
+
+## 2026-03-28 外部 Muon 接入 + 64/128 step 中程复验
+
+- 按用户要求，不复用 `parameter-golf` 内置 Muon 实现
+- 在 `luma-global` 环境中安装外部包：
+  - `muon-optimizer`
+- 当前训练主线接入方式：
+  - `Muon` 本体：外部包
+  - `MuonClip`：本仓轻量梯度 RMS 比例裁剪包装
+  - `Modular Norm`：本仓轻量 shape-aware 学习率缩放包装
+- 代码：
+  - 新增 `minimind/luma_stage0/optimizers.py`
+  - `run_luma_stage12.py` 已从单一 `AdamW` 切到新的 Muon/AdamW 双路 stepper
+  - `model_minimind.py` 新增 `reason_intermediate_size`，支持共享推理 block 宽度试验
+
+### 64-step 结果
+- 配置：
+  - `full + self_check`
+  - `rollout=10`
+  - `reason_loops=15`
+  - `competition_math_dialogue_emotion`
+- baseline:
+  - `self_loss_tail = 0.1577`
+  - `self_rollout_tail = 0.3672`
+- `reason_width_mult = 1.5`:
+  - `self_loss_tail = 0.1553`
+  - `self_rollout_tail = 0.2539`
+- 判断：
+  - 扩宽共享推理 block 在 `64-step` 上对总体 rollout 有帮助
+  - 但会明显伤到 `dialogue` 桶
+
+### 128-step 结果
+- baseline:
+  - `self_loss_tail = 0.0708`
+  - `self_rollout_tail = 0.1172`
+- `reason_width_mult = 1.5`:
+  - `self_loss_tail = 0.1875`
+  - `self_rollout_tail = 0.1875`
+- 判断：
+  - 在更长的 `128-step` 中程里，默认宽度整体更稳
+  - 宽共享 block 更像“短中程专项增压器”，而不是当前默认主干升级
+
+- 报告：
+  - `docs/reports/Luma_Muon_Width_Experiment_Report.md`
+
+## 2026-03-28（正式 pretrain trainer 主线落地 + 两层共享推理深度）
+- 结构更新：
+  - `model_minimind.py`
+    - 新增 `reason_shared_depth`
+    - `LumaReasonCore` 从“单层共享 block”升级为“可配置多层真实共享深度”的 block
+    - 当前实验默认可直接使用 `reason_shared_depth=2`
+- 优化器更新：
+  - `minimind/luma_stage0/optimizers.py`
+    - 接入外部 `bitsandbytes` 的 `AdamW8bit`
+    - 新增运行时量化状态版的实验性 `Luma8BitMuon`
+    - `LumaMuonAdamWOptimizer` 升级为统一 bundle，可同时管理 Muon / AdamW 两路参数组
+    - 新增 `LumaCosineScheduler`
+- 正式训练主线：
+  - 新增 `minimind/trainer/train_luma_pretrain.py`
+  - 支持：
+    - `full + self_check`
+    - 参数分组
+    - scheduler
+    - checkpoint / resume
+    - `8-bit Muon + 8-bit AdamW`
+- 兼容性修复：
+  - `trainer_utils.lm_checkpoint()` 在 resume 路径下改为 `weights_only=False`
+  - 新 trainer 自动把 tokenizer 的 `pad_token / bos_token` 兜底到可用 special token
+  - 新 trainer 会在 tokenizer 词表更大时自动抬高 `luma_config.vocab_size`
+  - `LumaForCausalLM` 的 exit aux 改为 `binary_cross_entropy_with_logits`，兼容 autocast
+- smoke 结果：
+  - `tiny_pretrain_luma.jsonl`
+  - 成功跑通 `full + self_check + reason_shared_depth=2 + 8-bit Muon + 8-bit AdamW`
+  - 日志示例：
+    - `Epoch:[1/1](1/4), loss: 38.2793 ...`
+    - `Epoch:[1/1](4/4), loss: 35.1844 ...`
+- resume 结果：
+  - `luma_smoke_128_resume.pth` 成功恢复
+  - 恢复后继续完成第 2 个 epoch，日志下降到：
+    - `Epoch:[2/2](4/4), loss: 20.4296 ...`
+- 当前诚实结论：
+  - 正式 `Luma` pretrain trainer 实验主线已经能训练、保存、恢复
+  - `8-bit AdamW` 为外部官方实现
+  - `8-bit Muon` 为本仓实验性运行时量化状态实现，已完成可运行验证，但仍需更长训练验证稳定性
+
+## 2026-03-28（persona_seed 桶接入 + 128-step 深度对比）
+- 数据验证更新：
+  - `run_luma_stage12.py` 已接入 `persona_seed` 桶
+  - 来源目录：
+    - `/home/kt/ai/luma_dataset/wechat_pretrain.jsonl`
+    - `/home/kt/ai/luma_dataset/pretrain.jsonl`
+  - `persona_seed` 已与：
+    - `math`
+    - `dialogue`
+    - `emotion`
+    - `mixed`
+    并列进入分桶评估
+- 128-step 对比实验：
+  - 配置：
+    - `full + self_check`
+    - `rollout=10`
+    - `reason_loops=15`
+    - `competition_math_dialogue_emotion`
+    - `enable_persona_seed=true`
+  - 对比项：
+    - `reason_shared_depth=1`
+    - `reason_shared_depth=2`
+- 结果摘要：
+  - `depth=1`
+    - mixed `self_rollout_tail = 0.1719`
+    - persona_seed `self_loss_tail = 0.0536`
+    - persona_seed `self_rollout_tail = 0.0664`
+    - top-level `hard_loop_var = 2.4375`
+  - `depth=2`
+    - mixed `self_rollout_tail = 0.2617`
+    - persona_seed `self_loss_tail = 0.0586`
+    - persona_seed `self_rollout_tail = 0.0664`
+    - emotion `hard_loop_var = 3.6875`
+- 工程判断：
+  - `depth=1` 当前更适合作为 mixed / 正式预训练候选底座
+  - `depth=2` 更像情感/表达专项候选，不直接扶正
+- FP8 现状再确认：
+  - 当前仓内没有 `Transformer Engine` / `torchao` 风格的正式 `FP8` 主干训练接线
+  - 当前真实状态应写为：
+    - `8-bit optimizer` 已接入
+    - `FP8 training` 尚未接入
+- 新报告：
+  - `docs/reports/Luma_Persona_Depth128_Report.md`
+
+## 2026-03-28（depth2 基底：loops / slow-self-check / heavier introspection 对比）
+- 目标：
+  - 在 `full + depth2 + self_check` 基底上，验证：
+    - 增加 `reason_loops` 是否真能提高推理
+    - “慢 self_check” 是否合适
+    - 自省流 + self_check 轻量增重是否值得
+- 新增代码开关：
+  - `LumaConfig.self_check_k`
+  - `run_luma_stage12.py` 已支持：
+    - `--self-check-k`
+    - `--meta-dim`
+    - `--meta-state`
+    - `--c-t-dim`
+    - `--self-check-dim`
+- 实验矩阵：
+  - `baseline_d2_10x15`
+  - `depth2_10x20`
+  - `depth2_slowcheck2`
+  - `depth2_heavier`
+- 关键结果：
+  - `depth2_10x20` 与 `baseline_d2_10x15` 几乎完全一致
+    - 说明当前不是 loops 上限不足，而是更长预算没被利用
+  - `depth2_slowcheck2`
+    - top `self_loss_tail = 0.1631`
+    - top `self_rollout_tail = 0.1582`
+    - mixed `self_rollout_tail = 0.2168`（优于 baseline 的 `0.2617`）
+    - emotion 仅轻微回退
+  - `depth2_heavier`
+    - top `hard_loop_var = 9.7344`
+    - mixed / dialogue / persona_seed 变强
+    - 但 `math / emotion` 明显退化
+- 当前工程判断：
+  - 在 `depth2` 基底上，优先继续跟踪：
+    - `self_check_k = 2`
+  - 当前不优先继续加大 `reason_loops`
+  - 轻量增重自省/自检暂不扶正，作为专项分支保留
+- 新报告：
+  - `docs/reports/Luma_Depth2_Check_Loops_Report.md`
+
+## 2026-03-28（depth2 当前实验底座冻结）
+- 用户决策更新：
+  - 当前实验底座保持：
+    - `full + depth2 + self_check`
+  - 当前优先验证项：
+    - `self_check_k = 2`
+- 工程同步：
+  - `train_luma_pretrain.py` 已新增 `--self_check_k`
+  - 正式 trainer 默认值已切到：
+    - `self_check_k = 2`
+- 含义：
+  - 后续若继续沿 `depth2` 路线验证，不需要每次手动补这个开关
+
+## 2026-03-28（self_check_k 与 JEPA crystal 对比）
+- 目标：
+  - 继续验证：
+    - `self_check_k = 2` 是否真的是稳点
+    - `self_check_k = 3` 是否更适合聊天伙伴方向
+    - `JEPA-guided entropy crystallization` 是否值得加入退出信号
+- 代码更新：
+  - `LumaConfig` 新增：
+    - `enable_exit_jepa_crystal`
+    - `exit_jepa_crystal_temperature`
+  - `ExitController` 新增：
+    - `jepa_crystal_signal`
+    - `crystal_weight`
+  - `run_luma_stage12.py` 新增：
+    - `--enable-exit-jepa-crystal`
+    - `stage1_jepa_crystal_mean`
+- 实验矩阵：
+  - `k1`
+  - `k2`
+  - `k3`
+  - `k2 + crystal`
+- 核心结果：
+  - `k1`
+    - top `self_tail = 0.1909`
+    - top `rollout_tail = 0.2266`
+  - `k2`
+    - top `self_tail = 0.1631`
+    - top `rollout_tail = 0.1582`
+  - `k3`
+    - top `self_tail = 0.1519`
+    - top `rollout_tail = 0.1406`
+    - 但 mixed 总体未优于 `k2`
+  - `k2 + crystal`
+    - top `self_tail = 0.1072`
+    - top `rollout_tail = 0.0879`
+    - `jepa_crystal_mean = 0.1739`
+    - 但 mixed `rollout_tail` 退化到 `0.2949`
+- 工程判断：
+  - 默认仍保留：
+    - `self_check_k = 2`
+  - `k=3` 作为 persona / dialogue 优先专项候选
+  - `JEPA crystal` 保留为退出策略专项研究，不直接扶正
+- 诚实边界：
+  - 当前 JEPA predictor 仍是自研工程实现 / 论文风格迁移版
+  - 不是官方原仓 predictor 直接接入
+- 新报告：
+  - `docs/reports/Luma_SelfCheck_Crystal_Report.md`
+
+## 2026-03-28（补跑 k=3/k=4 + crystal 与 10x20）
+- 目标：
+  - 继续验证：
+    - `k=3 + crystal`
+    - `k=4 + crystal`
+    - `k=3 + crystal + rollout=10 + loops=20`
+- 动作：
+  - 沿用：
+    - `full + depth2 + self_check`
+    - `competition_math_dialogue_emotion + persona_seed`
+    - `stage2_steps = 128`
+  - 补跑三组新实验并合并进晶体报告
+- 核心结果：
+  - `k3 + crystal`
+    - `hard_loop_var = 0.9844`
+    - `self_tail = 0.1035`
+    - `rollout_tail = 0.1348`
+    - `jepa_crystal_mean = 0.1626`
+  - `k4 + crystal`
+    - `hard_loop_var = 0.9375`
+    - `self_tail = 0.1606`
+    - `rollout_tail = 0.1445`
+    - `jepa_crystal_mean = 0.1739`
+  - `k3 + crystal + 10x20`
+    - 与 `k3 + crystal + 10x15` 几乎重合
+- 判断：
+  - `k=3 + crystal` 比 `k=4 + crystal` 更值得保留
+  - `k=4 + crystal` 没有继续提升，更像更新过慢后的回摆
+  - `10x20` 仍未真正利用额外预算，问题继续指向 exit policy
+
+## 2026-03-28 Autoresearch 512-Step Foreground Update
+- Validation floor moved from 128-step to 512-step for all continuation-gain autoresearch verifies.
+- Retained best remains iteration 2: one-step continuation gain + loop progress + recent gain history + remaining budget features.
+- Best retained metric: mixed self_rollout_tail = 0.041015625.
+- Iterations 4-7 explored direct logit gating, two-step value, uncertainty-gated two-step, and richer gain-head dynamics.
+- None beat the retained setup while satisfying guards; the strongest mixed-only improvement (iteration 5, 0.0390625) failed persona_seed guard badly.
+- A pivot was logged after repeated non-keeps: abandon direct exit-logit gain gating and current two-step value variants; next strategy should keep one-step continuation gain and look for a different leverage point.
+
+## 2026-03-28 Guard 口径更新（persona_seed 降为软护栏）
+- 用户明确确认：
+  - `persona_seed` 不再作为硬 guard
+  - Luma 不需要完全像用户本人；人格种子更适合作为软约束与风格代价项
+- 新 guard 规则：
+  - 硬护栏：
+    - 参数量 `<= 0.35B`
+    - `math` 不掉
+    - `dialogue` 不明显恶化
+    - `emotion` 保持优势或不明显恶化
+    - `mixed` 不崩
+  - 软护栏：
+    - `persona_seed` 只做显式记录，不再一票否决
+- 对 autoresearch 结果的影响：
+  - `iteration 5` 在旧 guard 下被判 `discard`
+  - 在新 guard 下，应改读为：
+    - `alt-keep candidate`
+    - 因为它把 mixed `self_rollout_tail` 从 `0.041015625` 降到 `0.0390625`
+    - 但代价是 `persona_seed rollout_tail` 从 `0.361328125` 升到 `0.666015625`
+- 下次恢复运行的执行方案：
+  - 不从当前 retained `iteration 2` 继续
+  - 改为先恢复到 `iteration 5` 的代码分支语义
+  - 再在新 guard 口径下继续做后续实验
+- 当前代码状态说明：
+  - 工作树仍保持在“当前 retained 干净基线”上，便于人工 review
+  - 尚未真正把代码切回 `iteration 5`
+  - 等用户回来继续跑时，再执行恢复
+
+## 2026-03-28 20:20 CST — Iter9 JEPA Bundle (iter5-based) at 512-step
+- Restored the spirit of iter5 by reintroducing a light two-step continuation auxiliary, but kept it out of the exit logit itself.
+- Upgraded `full world JEPA` toward a more LeWorldModel-like form for this experiment:
+  - `structured` world mask
+  - simplified loss dominated by next-embedding cosine + SIGReg
+  - explicit `world_surprise` output
+- Added self/world JEPA coupling via a small projection from `delta_world_summary -> c_t space` and a cosine coupling term on `pred_delta_c`.
+- Added hierarchical rollout supervision by supervising only tiered horizons instead of every horizon equally.
+- Extended `run_luma_stage12.py` to expose the new experimental knobs and to emit `world_surprise_mean` in stage1/stage2 and bucket probes.
+- 512-step result (`autoresearch_iter9_jepa_bundle.json`):
+  - mixed `self_rollout_tail = 0.0390625` (better than retained iter2 `0.041015625`)
+  - dialogue improved (`0.041015625 -> 0.037109375`)
+  - emotion improved (`0.087890625 -> 0.080078125`)
+  - math regressed (`0.037109375 -> 0.041015625`)
+  - persona_seed worsened (`0.361328125 -> 0.61328125`), but persona is now soft guard only
+- Recorded as `discard` in autoresearch because the current hard guard still requires math not to regress.
+- Interpretation: this is a promising JEPA/world-model branch, not a dead end. The next refinement should preserve structured/simplified world JEPA and surprise, then recover math by weakening coupling or tightening hierarchical rollout supervision.
+- Completed 512-step A/B/C math-repair report: A/B/C all failed to recover math; B and C were clearly harmful. Report: docs/reports/Luma_ABC_Math_Repair_512_Report.md
+- Added optional light-structure experiment switches to the model and harness:
+  - `enable_math_adapter_lane`
+  - `enable_math_summary_gate`
+  - `enable_compression_mhc`
+- Added mixed-derived diagnostics for:
+  - `math_lane_score_mean`
+  - `math_summary_gate_mean`
+- Completed 512-step D/E/F experiments on iter9-bundle base:
+  - Exp D (`math adapter lane`) was best: mixed rollout tail 0.03125, math 0.041015625, dialogue 0.041015625, emotion 0.08984375, persona 0.298828125.
+  - Exp E (`math-aware gate`) improved persona but broke mixed/dialogue.
+  - Exp F (`compression MHC`) did not justify itself and hurt persona/mixed versus D.
+- Wrote formal comparison report: docs/reports/Luma_DEF_LightStructure_Compression_512_Report.md
+- Explored three `r_t` schemes on top of the current `D` line:
+  - `blend`: trust-weighted mix of `c_t` and `r_t` into the main stream
+  - `parallel`: keep `c_t` main, add trust-gated `r_t` side bias
+  - `predictor`: keep `r_t` out of the main stream and only feed predictor / exit-side logic
+- Found and fixed an observability bug: `r_t_history` and `r_t_trust_history` were being tracked internally but not returned in `aux`, which falsely made stage1 metrics read as zero.
+- After the fix, all three smoke variants showed nonzero `r_t_drift_mean` and `r_t_trust_mean`, confirming that `r_t` is genuinely alive in the loop.
+- Smoke results still landed far behind the current `D` baseline:
+  - `blend`: mixed rollout tail 0.5195, math rollout tail 0.7012
+  - `parallel`: mixed rollout tail 0.5234, math rollout tail 0.6250
+  - `predictor`: mixed rollout tail 0.5840, math rollout tail 0.5938
+- Wrote a dedicated smoke report:
+  - /home/kt/ai/docs/reports/Luma_rT_ThreeWays_Smoke_Report.md
+- Re-confirmed the math baseline comparison:
+  - `iter2` math rollout tail = 0.037109375
+  - `D` math rollout tail = 0.041015625
+  - so `D` is the best iter9-repair candidate, but still not better than `iter2` on math.
+- Decision for now: do not spend a 512-step official evaluation on `r_t`; treat this round as a useful concept check rather than a promising new mainline.
+- Clarified the current `r_t` design boundary:
+  - recurrent `r_t` update does not directly consume `world_summary` / masked world latents
+  - but bootstrap still consumes `compression_summary`, and the recurrence still uses `know_gap` rather than a cleaner `local_progress / recent gain` formulation
+  - therefore current `r_t` should be treated as a concept-validation variant, not yet the intended local-only reasoning state
+- Looked up `RaBitQ` and added it to the master plan as a retrieval-side candidate rather than a core training/module candidate:
+  - best fit for `Tape / Router / ANN memory retrieval`
+  - not recommended for the current JEPA / pretraining mainline
+
+- Ran 512-step local-recursive r_t experiments with sliding-window dynamic switch gate on top of full+depth2+self_check_k=2+ExpD-style math adapter lane.
+- Predictor and parallel variants both produced nontrivial routing signals (r_t drift/trust/switch all nonzero), so the local-router mechanism is alive.
+- Neither 512-step r_t variant beat iter2 or Exp D on core kept metrics; predictor was philosophically cleaner, parallel had lower mixed self tail but larger side effects.
+- Wrote /home/kt/ai/docs/reports/Luma_rT_LocalRouter_512_Report.md and re-stated the current role of introspection stream as slow global metacognitive state, Self-JEPA anchor, exit-side evidence source, and future know-gap source.

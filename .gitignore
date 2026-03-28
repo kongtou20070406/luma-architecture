@@ -1,0 +1,28 @@
+# private data
+luma_dataset/
+**/luma_dataset/
+
+# weights / checkpoints
+*.pth
+*.pt
+*.bin
+*.safetensors
+minimind/checkpoints/
+minimind/out/
+**/checkpoints/
+**/out/
+
+# env / caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# local experiment noise
+*.log
+wandb/
+
+# local artifacts not meant for sharing by default
+minimind/.wheels/

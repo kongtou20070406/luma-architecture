@@ -1,0 +1,130 @@
+{"event": "stage1_ct_kl", "ok": true, "value": 3.9912638664245605, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693255.5869396}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 6.875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693255.587166}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 19.859375, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693255.5872002}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.109375, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693255.587215}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.6640295386314392, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693255.5872266}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 0.00014678415027447045, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693255.5872371}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0006291667814366519, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693255.5872524}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.18630263209342957, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693255.5872633}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.46741557121276855, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693255.5872722}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 0.921875, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693310.5001945}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.157470703125, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693310.5004163}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.21484375, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693310.5004618}
+{"event": "stage2_delta_norm", "ok": true, "value": 13.530670166015625, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693310.5004795}
+{"event": "stage1_ct_kl", "ok": true, "value": 4.25571346282959, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693312.7381904}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 7.1875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693312.738573}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 16.0, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693312.738731}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.6875, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693312.7387722}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.43896520137786865, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693312.73879}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 0.00014904371346347034, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693312.738824}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0009555731667205691, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693312.7388368}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.11989182978868484, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693312.7388487}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.446424275636673, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693312.7388592}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 0.97265625, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693329.3307152}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.1533203125, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693329.330948}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.16015625, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693329.3309932}
+{"event": "stage2_delta_norm", "ok": true, "value": 8.9820556640625, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693329.3310115}
+{"event": "stage1_ct_kl", "ok": true, "value": 3.7268145084381104, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693331.5891912}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 6.5625, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693331.5896242}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 22.1875, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693331.5896738}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.1875, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693331.5896907}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.7420041561126709, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693331.589703}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 0.00014286083751358092, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693331.589715}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0005182453896850348, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693331.589727}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.2527134418487549, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693331.5897374}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.48840683698654175, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693331.589748}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 1.0390625, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693348.6899934}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.1064453125, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693348.6902843}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.146484375, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693348.6903665}
+{"event": "stage2_delta_norm", "ok": true, "value": 9.16033935546875, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693348.6904004}
+{"event": "stage1_ct_kl", "ok": true, "value": 3.0627663135528564, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693350.6920588}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 5.875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693350.6923344}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 3.5, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693350.6923883}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 1.6875, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693350.6924062}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.5637761354446411, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693350.6924186}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 4.0434224501950666e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693350.6924412}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0006170184933580458, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693350.6924589}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.01966145634651184, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693350.692469}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.4954020082950592, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693350.6924782}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 1.01171875, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693365.789186}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.0751953125, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693365.7894368}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.14453125, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693365.7894802}
+{"event": "stage2_delta_norm", "ok": true, "value": 11.78753662109375, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693365.789498}
+{"event": "stage1_ct_kl", "ok": true, "value": 2.3745713233947754, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693436.0087469}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 5.46875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693436.008992}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 1.109375, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693436.009062}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.109375, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693436.0090814}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.6292551159858704, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693436.0090952}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 8.85748813743703e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693436.0091085}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0003501477185636759, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693436.0091267}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.07384788990020752, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693436.0091376}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.5511521100997925, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693436.009149}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 0.984375, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693489.541524}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.19091796875, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693489.5418227}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.2265625, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693489.5419166}
+{"event": "stage2_delta_norm", "ok": true, "value": 12.53338623046875, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693489.5419476}
+{"event": "stage1_ct_kl", "ok": true, "value": 2.564812660217285, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693491.2725053}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 5.625, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693491.2728136}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 1.25, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693491.2728577}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.6875, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693491.2728744}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.7114834189414978, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693491.272888}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 7.816823199391365e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693491.272899}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0005226985667832196, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693491.272925}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.09305711090564728, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693491.272936}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.5713146328926086, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693491.2729473}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 1.091796875, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693507.5253887}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.120849609375, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693507.5258172}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.13671875, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693507.5259304}
+{"event": "stage2_delta_norm", "ok": true, "value": 7.9532470703125, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693507.5259602}
+{"event": "stage1_ct_kl", "ok": true, "value": 2.1843299865722656, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693509.3090801}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 5.34375, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693509.3093262}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 0.6875, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693509.309375}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.1875, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693509.3093925}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.3550838530063629, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693509.3094041}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 9.37062650336884e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693509.3094153}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 9.513397526461631e-05, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693509.3094769}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.05463866889476776, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693509.309509}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.5309895873069763, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693509.3095562}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 0.916015625, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693525.5288153}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.302734375, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693525.5291123}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.216796875, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693525.5291655}
+{"event": "stage2_delta_norm", "ok": true, "value": 8.046630859375, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693525.5291831}
+{"event": "stage1_ct_kl", "ok": true, "value": 3.7942707538604736, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693527.8950346}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 6.875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693527.8953435}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 3.6875, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693527.8953996}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 1.6875, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693527.895417}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.638696551322937, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693527.8954294}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 4.532281309366226e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693527.8954425}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.00039731201832182705, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693527.8954628}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.0546603724360466, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693527.895474}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.4827134907245636, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693527.8954837}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 1.021484375, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693544.4314492}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.095703125, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693544.43169}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.11328125, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693544.4317343}
+{"event": "stage2_delta_norm", "ok": true, "value": 8.684478759765625, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693544.4317524}
+{"event": "stage1_ct_kl", "ok": true, "value": 1.916154146194458, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693547.065183}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 3.890625, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693547.06538}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 0.1875, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693547.065424}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 1.5, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693547.065442}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.07997020334005356, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693547.065465}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 3.439938882365823e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693547.0654774}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.00040394868119619787, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693547.0654938}
+{"event": "stage1_two_step_improvement", "ok": true, "value": -0.14881466329097748, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693547.065504}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.4449666440486908, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693547.065514}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 0.8359375, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693561.9675403}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.05859375, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693561.967751}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.06640625, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693561.9677956}
+{"event": "stage2_delta_norm", "ok": true, "value": 6.5989990234375, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693561.967813}
+{"event": "stage1_ct_kl", "ok": true, "value": 2.3745713233947754, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774693565.4089854}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 5.46875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774693565.40933}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 1.109375, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774693565.4093783}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 1.859375, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774693565.4093966}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.6292551159858704, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774693565.4094102}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 8.85748813743703e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774693565.409423}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0003501477185636759, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774693565.4094415}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.07384788990020752, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774693565.409454}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.5511521100997925, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774693565.4094644}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 0.978515625, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774693579.4363558}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.2734375, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774693579.436653}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.26171875, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774693579.4367}
+{"event": "stage2_delta_norm", "ok": true, "value": 7.27978515625, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774693579.4367168}
