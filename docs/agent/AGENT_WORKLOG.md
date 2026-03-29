@@ -1262,3 +1262,14 @@
 - 2026-03-29: Added rollout_active_ratio / rollout_nonzero_ratio to stage2 validation and documented how to distinguish healthy rollout decline from supervision collapse.
 
 - 2026-03-29: Ran 2048-step comparison for iter2 / iter5 / iter2+predictor_progress / iter5+predictor_progress. iter5 did not justify promotion; the best new line was iter2+predictor_progress, but it still hurt dialogue/emotion/python_code enough that iter2 remains the formal long-run baseline. Report: docs/reports/Luma_Iter2_Iter5_Predictor_2048_Report.md
+
+- 2026-03-29: Ran 2048-step A2-predictor_progress follow-up with progress-shape vs local-consistency JEPA. `progress_full` (next improvement + trend + plateau) was the best balanced candidate; local consistency variants underperformed. Report: docs/reports/Luma_ProgressShape_LocalConsistency_2048_Report.md
+- Added explicit experiment-implementation documentation so reports now spell out concrete knobs and code-path semantics instead of only variant names.
+- Created [Luma_Experiment_Implementation_Checklist.md](/home/kt/ai/docs/reference/Luma_Experiment_Implementation_Checklist.md) as the canonical mapping from baseline/variant names to reproducible config switches.
+- Ran the `A2-progress_shape_v1` rollout A/B/C matrix at 2048 steps:
+  - baseline_progress_full_2048
+  - horizon3_2048
+  - horizon4_2048
+  - near3_weighted_2048
+  - self_span_mask_2048
+- Current rollout-matrix conclusion: `horizon3` is the best keep from this batch; `near3_weighted` restores rollout nonzero activity but at too high a bucket cost; current `self-flow span mask` is effectively a no-op.

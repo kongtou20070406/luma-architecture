@@ -12,6 +12,9 @@
 - [Luma_Rollout_Depth_Experiment_Report.md](/home/kt/ai/docs/reports/Luma_Rollout_Depth_Experiment_Report.md)
 - [Luma_SlowFastWorld_Experiment_Report.md](/home/kt/ai/docs/reports/Luma_SlowFastWorld_Experiment_Report.md)
 - [Luma_LeWorldModel_Comparison_Report.md](/home/kt/ai/docs/reports/Luma_LeWorldModel_Comparison_Report.md)
+- [Luma_ProgressShape_LocalConsistency_2048_Report.md](/home/kt/ai/docs/reports/Luma_ProgressShape_LocalConsistency_2048_Report.md)
+- [Luma_Rollout_ABC_Matrix_2048_Report.md](/home/kt/ai/docs/reports/Luma_Rollout_ABC_Matrix_2048_Report.md)
 
 ## Reference
 - [Luma_Loss_Reference.md](/home/kt/ai/docs/reference/Luma_Loss_Reference.md)
+- [Luma_Experiment_Implementation_Checklist.md](/home/kt/ai/docs/reference/Luma_Experiment_Implementation_Checklist.md)

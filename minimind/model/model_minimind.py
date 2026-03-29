@@ -394,6 +394,8 @@ class LumaConfig(PretrainedConfig):
         self.self_rollout_weight = kwargs.get("self_rollout_weight", 0.5)
         self.self_rollout_steps = kwargs.get("self_rollout_steps", 2)
         self.self_rollout_hierarchical = kwargs.get("self_rollout_hierarchical", False)
+        self.self_rollout_supervision_horizon = kwargs.get("self_rollout_supervision_horizon", 0)
+        self.self_rollout_weighting_mode = kwargs.get("self_rollout_weighting_mode", "legacy")
         self.self_progress_shape_weight = kwargs.get("self_progress_shape_weight", 0.0)
         self.self_progress_trend_weight = kwargs.get("self_progress_trend_weight", 0.0)
         self.self_progress_plateau_weight = kwargs.get("self_progress_plateau_weight", 0.0)
@@ -401,6 +403,7 @@ class LumaConfig(PretrainedConfig):
         self.self_local_delta_consistency_weight = kwargs.get("self_local_delta_consistency_weight", 0.0)
         self.self_local_curvature_weight = kwargs.get("self_local_curvature_weight", 0.0)
         self.self_loop_awareness_mode = kwargs.get("self_loop_awareness_mode", "none")
+        self.self_feature_span_mask_ratio = kwargs.get("self_feature_span_mask_ratio", 0.0)
         self.enable_self_check_ring = kwargs.get("enable_self_check_ring", False)
         self.self_check_dim = kwargs.get("self_check_dim", 16)
         self.self_check_k = kwargs.get("self_check_k", 1)
@@ -1062,6 +1065,21 @@ class SelfJEPAResidualPredictor(nn.Module):
         self.fc2 = nn.Linear(256, config.c_t_dim, bias=False)
         self.delta_scale = nn.Parameter(torch.tensor(0.1))
 
+    def _apply_feature_span_mask(self, x: torch.Tensor) -> torch.Tensor:
+        if (not self.training) or self.loop_awareness_mode == "none":
+            return x
+        ratio = getattr(self, "self_feature_span_mask_ratio", 0.0)
+        if ratio <= 0.0:
+            return x
+        width = max(1, min(x.shape[-1], int(round(x.shape[-1] * ratio))))
+        if width >= x.shape[-1]:
+            return torch.zeros_like(x)
+        starts = torch.randint(0, x.shape[-1] - width + 1, (x.shape[0],), device=x.device)
+        masked = x.clone()
+        for i, start in enumerate(starts.tolist()):
+            masked[i, start:start+width] = 0
+        return masked
+
     def forward(
         self,
         c_t: torch.Tensor,
@@ -1070,6 +1088,7 @@ class SelfJEPAResidualPredictor(nn.Module):
         loop_index: Optional[int] = None,
     ) -> torch.Tensor:
         x = torch.cat([c_t, delta_h], dim=-1)
+        x = self._apply_feature_span_mask(x)
         x = self.fc1(x)
         if loop_progress is not None and self.loop_awareness_mode in {"predictor_progress", "dual_phase"}:
             x = x + self.loop_progress_proj(loop_progress)
@@ -1851,6 +1870,7 @@ class LumaBackbone(nn.Module):
         # 自省流负责产出 `know_gap` 和 `c_t`。
         # SelfJEPAResidualPredictor 是叠在其上的独立 Self-JEPA 残差预测头。
         self.self_jepa_residual_predictor = SelfJEPAResidualPredictor(config)
+        self.self_jepa_progress_shape_head = SelfJEPAProgressShapeHead(config)
         self.reasoning_state_ring = TinyReasoningStateRing(config) if config.enable_reasoning_state_ring else None
         self.reasoning_state_to_hidden = nn.Linear(config.r_t_dim, config.hidden_size, bias=False) if config.enable_reasoning_state_ring else None
         if config.world_jepa_mode == "full":
@@ -1882,15 +1902,19 @@ class LumaBackbone(nn.Module):
         self.final_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def _hierarchical_rollout_horizons(self) -> set[int]:
+        max_horizon = self.config.self_rollout_supervision_horizon if self.config.self_rollout_supervision_horizon > 0 else self.config.self_rollout_steps
+        max_horizon = min(max_horizon, self.config.self_rollout_steps)
+        if max_horizon < 2:
+            return set()
         if not self.config.self_rollout_hierarchical:
-            return set(range(2, self.config.self_rollout_steps + 1))
+            return set(range(2, max_horizon + 1))
         horizons = {2}
         cursor = 4
-        while cursor < self.config.self_rollout_steps:
+        while cursor < max_horizon:
             horizons.add(cursor)
             cursor *= 2
-        horizons.add(self.config.self_rollout_steps)
-        return {h for h in horizons if h <= self.config.self_rollout_steps}
+        horizons.add(max_horizon)
+        return {h for h in horizons if h <= max_horizon}
 
     def forward(self, input_ids: torch.Tensor, disable_ct_injection: bool = False) -> Tuple[torch.Tensor, dict]:
         h = self.embedding(input_ids)
@@ -1942,11 +1966,15 @@ class LumaBackbone(nn.Module):
         current_self_error = h.new_tensor(1.0)
         current_rollout_error = h.new_tensor(1.0)
         coupling_terms: List[torch.Tensor] = []
+        progress_shape_terms: List[torch.Tensor] = []
+        local_consistency_terms: List[torch.Tensor] = []
         pending_rollout_preds: List[Tuple[int, torch.Tensor, int]] = []
+        pending_progress_preds: List[Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
         slow_step_idx = -1
         executed_loops = 0
         recent_joint_gains: List[torch.Tensor] = []
         recent_delta_improves: List[torch.Tensor] = []
+        pred_delta_history: List[torch.Tensor] = []
         prev_self_error_for_gain = h.new_tensor(1.0)
         prev_world_error_for_gain = h.new_tensor(1.0)
         prev_world_summary: Optional[torch.Tensor] = None
@@ -2033,7 +2061,19 @@ class LumaBackbone(nn.Module):
                 if matured_rollouts:
                     rollout_errs = []
                     for pred_state, horizon in matured_rollouts:
-                        horizon_weight = 1.0 if horizon <= 2 else (0.5 if horizon <= 4 else 0.25)
+                        if self.config.self_rollout_weighting_mode == "near3":
+                            if horizon == 2:
+                                horizon_weight = 1.0
+                            elif horizon == 3:
+                                horizon_weight = 0.5
+                            elif horizon == 4:
+                                horizon_weight = 0.2
+                            else:
+                                horizon_weight = 0.0
+                        else:
+                            horizon_weight = 1.0 if horizon <= 2 else (0.5 if horizon <= 4 else 0.25)
+                        if horizon_weight == 0.0:
+                            continue
                         rollout_errs.append(
                             horizon_weight
                             * (
@@ -2045,9 +2085,36 @@ class LumaBackbone(nn.Module):
                                 )
                             )
                         )
-                    rollout_err = torch.stack(rollout_errs).mean()
-                    rollout_loss_terms.append(rollout_err)
-                    current_rollout_error = rollout_err.detach()
+                    if rollout_errs:
+                        rollout_err = torch.stack(rollout_errs).mean()
+                        rollout_loss_terms.append(rollout_err)
+                        current_rollout_error = rollout_err.detach()
+                current_self_improve_scalar = (prev_self_error_for_gain - current_self_error).detach()
+                matured_progress = [
+                    (pred_next, pred_trend, pred_plateau, prev_improve)
+                    for target_idx, pred_next, pred_trend, pred_plateau, prev_improve in pending_progress_preds
+                    if target_idx == slow_step_idx
+                ]
+                if matured_progress:
+                    next_improve_target = h.new_full((batch_size,), float(current_self_improve_scalar.item()))
+                    for pred_next, pred_trend, pred_plateau, prev_improve in matured_progress:
+                        if self.config.self_progress_shape_weight > 0.0:
+                            progress_shape_terms.append(
+                                self.config.self_progress_shape_weight
+                                * F.smooth_l1_loss(pred_next, next_improve_target)
+                            )
+                        if self.config.self_progress_trend_weight > 0.0:
+                            trend_target = h.new_full((batch_size,), float((current_self_improve_scalar - prev_improve).item()))
+                            progress_shape_terms.append(
+                                self.config.self_progress_trend_weight
+                                * F.smooth_l1_loss(pred_trend, trend_target)
+                            )
+                        if self.config.self_progress_plateau_weight > 0.0:
+                            plateau_target = h.new_full((batch_size,), 1.0 if float(current_self_improve_scalar.item()) < self.config.self_plateau_margin else 0.0)
+                            progress_shape_terms.append(
+                                self.config.self_progress_plateau_weight
+                                * F.binary_cross_entropy_with_logits(pred_plateau, plateau_target)
+                            )
                 pending_rollout_preds = [
                     (target_idx, pred, horizon)
                     for target_idx, pred, horizon in pending_rollout_preds
@@ -2061,12 +2128,50 @@ class LumaBackbone(nn.Module):
                 local_progress = current_loop_progress
                 recent_self_improve_vec = h.new_full(
                     (batch_size, 1),
-                    float((prev_self_error_for_gain - current_self_error).item()),
+                    float(current_self_improve_scalar.item()),
                 )
                 recent_rollout_improve_vec = h.new_full(
                     (batch_size, 1),
                     float(max((current_self_error - current_rollout_error).item(), 0.0)),
                 )
+                if (
+                    self.config.self_progress_shape_weight > 0.0
+                    or self.config.self_progress_trend_weight > 0.0
+                    or self.config.self_progress_plateau_weight > 0.0
+                ):
+                    progress_pred = self.self_jepa_progress_shape_head(
+                        c_t,
+                        delta_h,
+                        current_loop_progress,
+                        recent_self_improve_vec,
+                        recent_rollout_improve_vec,
+                    )
+                    pending_progress_preds.append(
+                        (
+                            slow_step_idx + 1,
+                            progress_pred["pred_next_improve"],
+                            progress_pred["pred_trend"],
+                            progress_pred["pred_plateau_logit"],
+                            current_self_improve_scalar.detach(),
+                        )
+                    )
+                if self.config.self_local_delta_consistency_weight > 0.0 and pred_delta_history:
+                    prev_pred_delta = pred_delta_history[-1]
+                    local_consistency_terms.append(
+                        self.config.self_local_delta_consistency_weight
+                        * (1.0 - F.cosine_similarity(
+                            F.normalize(pred_delta_c, dim=-1),
+                            F.normalize(prev_pred_delta, dim=-1),
+                            dim=-1,
+                        ).mean())
+                    )
+                if self.config.self_local_curvature_weight > 0.0 and len(pred_delta_history) > 1:
+                    second_diff = pred_delta_c - 2.0 * pred_delta_history[-1] + pred_delta_history[-2]
+                    local_consistency_terms.append(
+                        self.config.self_local_curvature_weight
+                        * second_diff.norm(dim=-1).mean()
+                    )
+                pred_delta_history.append(pred_delta_c.detach())
                 did_self_check_update = (loop_idx % self.config.self_check_k == 0)
                 if self.self_check_ring is not None and self_check_state is not None and did_self_check_update:
                     self_check_state = self.self_check_ring(c_t, delta_h, know_gap, self_check_state)
@@ -2147,12 +2252,15 @@ class LumaBackbone(nn.Module):
 
         h = self.final_norm(h)
         world_aux = self.world_latent_jepa(h) if self.config.enable_world_jepa else self.world_latent_jepa.disabled_outputs(h)
+        progress_shape_loss = torch.stack(progress_shape_terms).mean() if progress_shape_terms else h.new_zeros(())
+        local_consistency_loss = torch.stack(local_consistency_terms).mean() if local_consistency_terms else h.new_zeros(())
         if self_jepa_terms:
             self_jepa_loss = torch.stack(self_jepa_terms).mean() + torch.stack(residual_reg_terms).mean()
             if coupling_terms:
                 self_jepa_loss = self_jepa_loss + self.config.self_world_coupling_weight * torch.stack(coupling_terms).mean()
+            self_jepa_loss = self_jepa_loss + progress_shape_loss + local_consistency_loss
         else:
-            self_jepa_loss = h.new_zeros(())
+            self_jepa_loss = h.new_zeros(()) + progress_shape_loss + local_consistency_loss
         self_rollout_loss = torch.stack(rollout_loss_terms).mean() if rollout_loss_terms else h.new_zeros(())
         return h, {
             "block_reprs": block_reprs,
@@ -2166,6 +2274,8 @@ class LumaBackbone(nn.Module):
             "pred_delta_c": pred_delta_c,
             "target_delta_c": target_delta_c,
             "self_jepa_loss": self_jepa_loss,
+            "self_progress_shape_loss": progress_shape_loss,
+            "self_local_consistency_loss": local_consistency_loss,
             "self_rollout_loss": self_rollout_loss,
             "slow_update_flags": slow_update_flags,
             "delta_h_history": delta_h_history,

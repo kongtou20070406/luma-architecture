@@ -305,6 +305,14 @@ def build_tiny_luma_config(
     r_t_dim: int,
     r_t_mode: str,
     self_loop_awareness_mode: str,
+    self_progress_shape_weight: float,
+    self_progress_trend_weight: float,
+    self_progress_plateau_weight: float,
+    self_local_delta_consistency_weight: float,
+    self_local_curvature_weight: float,
+    self_rollout_supervision_horizon: int,
+    self_rollout_weighting_mode: str,
+    self_feature_span_mask_ratio: float,
 ) -> LumaConfig:
     reason_loops = reason_loops or max(4, rollout_steps * 2)
     base_intermediate = 256
@@ -356,6 +364,14 @@ def build_tiny_luma_config(
         r_t_dim=r_t_dim,
         r_t_mode=r_t_mode,
         self_loop_awareness_mode=self_loop_awareness_mode,
+        self_progress_shape_weight=self_progress_shape_weight,
+        self_progress_trend_weight=self_progress_trend_weight,
+        self_progress_plateau_weight=self_progress_plateau_weight,
+        self_local_delta_consistency_weight=self_local_delta_consistency_weight,
+        self_local_curvature_weight=self_local_curvature_weight,
+        self_rollout_supervision_horizon=self_rollout_supervision_horizon,
+        self_rollout_weighting_mode=self_rollout_weighting_mode,
+        self_feature_span_mask_ratio=self_feature_span_mask_ratio,
         mamba_d_state=32,
         mamba_expand=2,
         mamba_headdim=32,
@@ -807,6 +823,14 @@ def main() -> None:
     parser.add_argument("--r-t-dim", type=int, default=16)
     parser.add_argument("--r-t-mode", choices=["blend", "parallel", "predictor"], default="blend")
     parser.add_argument("--self-loop-awareness-mode", choices=["none", "ct_progress", "predictor_progress", "dual_phase"], default="none")
+    parser.add_argument("--self-progress-shape-weight", type=float, default=0.0)
+    parser.add_argument("--self-progress-trend-weight", type=float, default=0.0)
+    parser.add_argument("--self-progress-plateau-weight", type=float, default=0.0)
+    parser.add_argument("--self-local-delta-consistency-weight", type=float, default=0.0)
+    parser.add_argument("--self-local-curvature-weight", type=float, default=0.0)
+    parser.add_argument("--self-rollout-supervision-horizon", type=int, default=0)
+    parser.add_argument("--self-rollout-weighting-mode", choices=["legacy", "near3"], default="legacy")
+    parser.add_argument("--self-feature-span-mask-ratio", type=float, default=0.0)
     parser.add_argument("--math-probe-rollout-steps", type=int, default=0)
     parser.add_argument("--math-probe-reason-loops", type=int, default=0)
     parser.add_argument("--math-probe-score-threshold", type=float, default=0.0)
@@ -887,6 +911,14 @@ def main() -> None:
         r_t_dim=args.r_t_dim,
         r_t_mode=args.r_t_mode,
         self_loop_awareness_mode=args.self_loop_awareness_mode,
+        self_progress_shape_weight=args.self_progress_shape_weight,
+        self_progress_trend_weight=args.self_progress_trend_weight,
+        self_progress_plateau_weight=args.self_progress_plateau_weight,
+        self_local_delta_consistency_weight=args.self_local_delta_consistency_weight,
+        self_local_curvature_weight=args.self_local_curvature_weight,
+        self_rollout_supervision_horizon=args.self_rollout_supervision_horizon,
+        self_rollout_weighting_mode=args.self_rollout_weighting_mode,
+        self_feature_span_mask_ratio=args.self_feature_span_mask_ratio,
     )
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     model = LumaForCausalLM(config).to(device=device, dtype=dtype)
@@ -944,6 +976,14 @@ def main() -> None:
         "exit_crystal_feature_weight": args.exit_crystal_feature_weight,
         "enable_math_adapter_lane": args.enable_math_adapter_lane,
         "enable_math_summary_gate": args.enable_math_summary_gate,
+        "self_progress_shape_weight": args.self_progress_shape_weight,
+        "self_progress_trend_weight": args.self_progress_trend_weight,
+        "self_progress_plateau_weight": args.self_progress_plateau_weight,
+        "self_local_delta_consistency_weight": args.self_local_delta_consistency_weight,
+        "self_local_curvature_weight": args.self_local_curvature_weight,
+        "self_rollout_supervision_horizon": args.self_rollout_supervision_horizon,
+        "self_rollout_weighting_mode": args.self_rollout_weighting_mode,
+        "self_feature_span_mask_ratio": args.self_feature_span_mask_ratio,
         "enable_compression_mhc": args.enable_compression_mhc,
         "enable_reasoning_state_ring": args.enable_reasoning_state_ring,
         "r_t_dim": args.r_t_dim,
