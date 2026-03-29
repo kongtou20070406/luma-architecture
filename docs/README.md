@@ -14,6 +14,9 @@
 - [Luma_LeWorldModel_Comparison_Report.md](/home/kt/ai/docs/reports/Luma_LeWorldModel_Comparison_Report.md)
 - [Luma_ProgressShape_LocalConsistency_2048_Report.md](/home/kt/ai/docs/reports/Luma_ProgressShape_LocalConsistency_2048_Report.md)
 - [Luma_Rollout_ABC_Matrix_2048_Report.md](/home/kt/ai/docs/reports/Luma_Rollout_ABC_Matrix_2048_Report.md)
+- [Luma_Dynamics_2048_Prescreen_Report.md](/home/kt/ai/docs/reports/Luma_Dynamics_2048_Prescreen_Report.md)
+- [Luma_Dynamics_Literature_Midcourse_Plan.md](/home/kt/ai/docs/reports/Luma_Dynamics_Literature_Midcourse_Plan.md)
+- [Luma_Dynamics_MidLong_Summary_20260329.md](/home/kt/ai/docs/reports/Luma_Dynamics_MidLong_Summary_20260329.md)
 
 ## Reference
 - [Luma_Loss_Reference.md](/home/kt/ai/docs/reference/Luma_Loss_Reference.md)

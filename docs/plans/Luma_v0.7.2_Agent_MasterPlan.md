@@ -492,51 +492,69 @@
 - Hugging Face 候选数据集池。
 
 **动作**
+- 工作区固定到：`/home/kt/ai/luma_dataset`
+- 目录固定为：
+  - `persona_seed/`
+  - `manifests/`
+  - `buckets/`
+  - `scripts/`
+  - `cache/`
+  - `raw/`
+  - `processed/`
 - 原则先重排：
   - `50%` 必须优先给“让 Luma 更聪明”的语料，而不是人格/风格语料。
   - 剩余 `50%` 再分给人格、情感、对话表现与回答对齐。
-- 最终 `DataMix v1` 按四层组织：
+  - 难数学确实应进入聪明桶，因为它更能拉动多步推进、局部一致性、anti-stupidness 与代码推理。
+  - 但 harder math 不能无限放大，否则会伤 `dialogue / emotion`，把 Luma 推成过冷的解题器。
+- 当前冻结的 `DataMix v1` 结构：
   - `A. 聪明桶（50%）`
-    - 目标：提升推理、代码、长链条解决问题能力。
-    - 子桶建议：
-      - `math_long_reasoning`：竞赛数学、多步解题、可验证推导链。
-      - `code_python`：高质量 Python 代码、解释、修复、重构、推理型代码问答。
-      - `logic_tool_use`：需要规划、约束满足、步骤执行的 agent/工具型样本。
-    - 采样建议：
-      - `math_long_reasoning = 20%`
-      - `code_python = 20%`
-      - `logic_tool_use = 10%`
-  - `B. 人格桶（15%）`
-    - 来源目录：`/home/kt/ai/luma_dataset`
+    - `smart_math_reasoning = 25%`
+      - `EleutherAI/hendrycks_math`
+      - `ricdomolm/MATH-500`
+      - `Maxwell-Jia/AIME_2024`
+      - `openai/gsm8k`（作为较易锚点）
+    - `smart_code_python = 15%`
+      - 本地 `minimind` Python 代码
+      - 本地 `parameter-golf` Python 代码
+      - `bigcode/the-stack` 的 Python 子集（仅在 permissive 过滤后进入正式混合）
+      - 预留 `pytorch_examples_seed`
+    - `smart_reasoning_dialogue = 10%`
+      - `OpenAssistant/oasst1`
+      - `HuggingFaceH4/ultrafeedback_binarized`
+      - 预留本地工具规划轨迹
+  - `B. 情感与支持桶（20%）`
+    - `facebook/empathetic_dialogues`
+    - `thu-coai/esconv`
+    - `LooksJuicy/Chinese-Emotional-Intelligence`
+    - `Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset`
+  - `C. 人格桶（15%）`
+    - 来源目录：`/home/kt/ai/luma_dataset/persona_seed`
     - 当前主要文件：
       - `wechat_pretrain.jsonl`
       - `pretrain.jsonl`
     - 目标：给 Luma 注入“来自你”的表达底色与连续人格线索，但不让它压过能力主线。
-  - `C. 情感与支持桶（20%）`
-    - Hugging Face 候选：
-      - `facebook/empathetic_dialogues`（共情表达）
-      - `thu-coai/esconv`（情绪支持对话策略）
-      - `LooksJuicy/Chinese-Emotional-Intelligence`（中文情绪表达增强）
-      - `Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset`（情绪类别覆盖）
-    - 目标：提升共情、支持性回应、情绪识别与表达。
   - `D. 对话质量与叙述桶（15%）`
-    - Hugging Face 候选：
-      - `OpenAssistant/oasst1`（多语言高质量助手树，含中文子集）
-      - `HuggingFaceH4/ultrafeedback_binarized`（偏好学习/回答质量对齐）
-      - `wangrui6/Zhihu-KOL`（中文长回答风格与叙述性）
-      - `BelleGroup/multiturn_chat_0.8M`（中文多轮对话规模补充）
-    - 目标：提高长回答结构、中文叙述感、多轮承接与回答质量。
+    - `OpenAssistant/oasst1`
+    - `HuggingFaceH4/ultrafeedback_binarized`
+    - `wangrui6/Zhihu-KOL`
+    - `BelleGroup/multiturn_chat_0.8M`（当前先 hold，等待 license 边界确认）
+- 当前数据工件固定为：
+  - `luma_dataset/manifests/datamix_v1.yaml`
+  - `luma_dataset/manifests/license_whitelist.md`
+  - `luma_dataset/manifests/datamix_stats.template.json`
 - `DataMix v1` 额外约束：
   - 人格桶是正式桶，不再只是后期 probe 时单独观察。
   - 但人格桶不能反客为主，不能压过“更聪明”这条主线。
+  - `code_python` 必须保持 Python / PyTorch 取向，而不是变成宽泛代码垃圾桶。
+  - `copyleft`、`unknown`、`research-only`、限制再分发的来源，在人工复核前不得进入最终混合。
   - 默认先做来源占比、采样温度、license 白名单与去重规则四件事，再冻结数据版本。
 
 **验收**
-- 产出可复现数据工件：`hf_mix_manifest.yaml`、`datamix_stats.json`。
+- 产出可复现数据工件：`datamix_v1.yaml`、`datamix_stats.json`。
 - 完成 license 与用途审查（非商用/署名/传播限制明确）。
 - `DataMix v1` 占比通过人工复核：
   - “聪明桶”总占比确认为 `50%`
-  - `luma_dataset` 已正式并入人格桶
+  - `luma_dataset/persona_seed` 已正式并入人格桶
 - 人格一致性抽样评估通过（人工 + 规则双检）。
 
 **失败回滚**
@@ -1237,6 +1255,47 @@
   - 这是当前最适合继续推进正式 trainer / 更长训练预算的稳定骨架
   - `iter9`、`iter9 + crystal`、`ExpD` 继续保留为研究分支，不删除
 
+#### 10.6.2 动力学主候选推进（2026-03-29）
+- 基于后续 `2048-step` 筛选，当前“最值得继续追的动力学强化线”更新为：
+  - `A2-progress_shape_v1-h3`
+- 它的语义是：
+  - 仍然挂在 `A2-core` 上
+  - 继续使用：
+    - `predictor_progress`
+    - `progress-shape`
+  - 但把 rollout 主监督拉回近端：
+    - `horizon = 3`
+- 当前判断：
+  - `A2-core`
+    - 仍然是正式长程基线
+  - `A2-progress_shape_v1-h3`
+    - 是当前最优先的动力学强化候选
+    - 适合在进入下一轮长程筛选前继续做 `2048/4096` 级验证
+- 不再优先的方向：
+  - 继续拉长 rollout horizon
+  - uncertainty 直接调 `two-step aux` 权重
+  - 更重的 local consistency penalty
+  - 重新扶正更重的并行状态流
+
+#### 10.6.3 下一批结构候选（从动力学文献回看后新增）
+- 在不改变 `A2-core` 正式长程基线地位的前提下，下一批值得进入筛选的结构候选为：
+  - `A2-progress_shape_v1-h3 + local_rollout_head`
+  - `A2-progress_shape_v1-h3 + progress_exit_readout`
+  - `A2-progress_shape_v1-h3 + dual_rate_self_predictor`
+  - `A2-progress_shape_v1-h3 + trajectory_health_probe`
+  - `A2-progress_shape_v1-h3 + backtrack_aware_progress`
+- 这些候选的共同原则：
+  - 优先改 predictor / readout / diagnostics
+  - 不优先新增更重的并行状态流
+  - 不优先继续把 horizon 拉长
+  - 不把 crystal / uncertainty 重新扶正成主监督角色
+- 执行顺序建议：
+  1. `local_rollout_head`
+  2. `progress_exit_readout`
+  3. `dual_rate_self_predictor`
+  4. `trajectory_health_probe`
+  5. `backtrack_aware_progress`
+
 ### 10.7 OPUS 数据选择路线（2026 候选）
 - 候选技术：
   - `OPUS = Optimizer-induced Projected Utility Selection`
@@ -1642,3 +1701,99 @@
   - 1 段职责说明
 - 每个复杂 forward：
   - 只在必要处加 1~3 条解释性注释
+
+---
+
+## 16. 2026-03-29 当前动力学主线推进
+
+### 16.1 当前真正站住的动力学强化候选
+
+在本轮 `2048 -> 4096 -> 10240` 动力学筛选后，当前最值得扶正为“动力学增强主候选”的不是旧的 token-selective 系列，而是：
+
+- `A2-progress_shape_v1-h3+progress_exit_readout`
+
+当前证据：
+- `4096` 通过，分数优于 `A2-progress_shape_v1-h3`
+- `10240` 通过，当前是唯一明确站住的长程增强线
+
+因此从今天开始，主规划中的动力学增强主候选更新为：
+- `A2-progress_shape_v1-h3+progress_exit_readout`
+
+### 16.2 当前保留/观察/淘汰口径
+
+保留：
+- `A2-progress_shape_v1-h3+progress_exit_readout`
+
+观察：
+- `A2-progress_shape_v1-h3`
+  - `4096` 通过
+  - `10240` 在 bucket probe 的 sampled exit 路径触发数值问题
+  - 仍保留为观察锚点，不直接删除
+
+当前实现版本先淘汰：
+- `A2-progress_shape_v1-h3+token_selective_ct_routing`
+- `A2-progress_shape_v1-h3+lowrank_hyperbias_ct`
+- `A2-progress_shape_v1-h3+modulewise_ct_gate`
+
+说明：
+- 这里的“淘汰”是指当前实现版本不再继续送中长程
+- 不等于对应思想来源永久放弃
+
+### 16.3 token-selective 家族的下一代替代方向
+
+基于当前结果，后续不再优先继续直推：
+- 直接 token-selective routing
+- 直接 low-rank hyper-bias c_t 注入
+- 直接 module-wise c_t gate
+
+改为优先实现并筛选下面三条更稳、更符合 Luma 的替代方案：
+
+1. `summary_conditioned_chunk_film`
+- `c_t` 先调 `chunk summary / block_repr / world_summary`
+- 再把控制量广播回 token
+- 这是当前最优先的 token-selective 替代案
+
+2. `hierarchical_block_token_ct_routing`
+- 先 block-level gate，再在被选中的 block 内做轻量 token gate
+- 属于更克制的分层 routing 版
+
+3. `progress_query_focus_routing`
+- 由 `c_t + progress-shape(next improvement / trend / plateau)` 共同生成 focus query
+- 让 routing 直接成为 progress-shape 的下游执行器
+
+### 16.4 后续赛制改为晋级继训练制
+
+从后续动力学筛选开始，默认不再让：
+- `2048`
+- `4096`
+- `10240`
+- `20480`
+全部 fresh start。
+
+默认改成：
+- `2048` 训练完成后保存候选 checkpoint
+- `4096` 从对应 `2048` checkpoint 继续
+- `10240` 从胜出的 `4096` checkpoint 继续
+- `20480` 从胜出的 `10240` checkpoint 继续
+
+理由：
+- 能显著节约重复训练时间
+- 更贴近 staged screening 的真实目标：
+  - 看短程站住的候选能否持续延伸到更长阶段
+- 也更适合当前动力学/exit policy 的研究节奏
+
+执行约束：
+- 仅在同一候选、同一配置、同一 seed、同一数据桶口径下允许继训练
+- 报告必须显式记录 checkpoint lineage
+
+### 16.5 当前仍需保留的实现级修复
+
+当前 `run_luma_stage12.py` 已新增：
+- exit score 的 `nan_to_num + clamp` 数值护栏
+- `stage2` 非有限值早停记录
+- `rollout_active_ratio / rollout_nonzero_ratio`
+
+同时已修复：
+- `stage2_validate` 缺少 `import math` 的实现 bug
+
+后续任何新的 mid/long 动力学 runner，都必须沿用这版脚本，不再用旧版无护栏 harness。

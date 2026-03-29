@@ -1273,3 +1273,43 @@
   - near3_weighted_2048
   - self_span_mask_2048
 - Current rollout-matrix conclusion: `horizon3` is the best keep from this batch; `near3_weighted` restores rollout nonzero activity but at too high a bucket cost; current `self-flow span mask` is effectively a no-op.
+- Reorganized `/home/kt/ai/luma_dataset` into a real pretraining workspace:
+  - moved private persona files into `persona_seed/`
+  - added `manifests/datamix_v1.yaml`
+  - added `manifests/license_whitelist.md`
+  - added bucket docs and `scripts/prepare_datamix_v1.py`
+- Updated `run_luma_stage12.py` so persona loading supports the new `persona_seed/` directory while keeping backward compatibility with legacy flat layout.
+- Updated the master plan DataMix section to match the new workspace and freeze `50% smarter-first` data composition.
+
+- 2026-03-29: Re-reviewed dynamics/world-model literature, expanded Luma_Dynamics_Literature_Midcourse_Plan with additional latent-reasoning and adaptive-stopping references, added structural candidates (local_rollout_head / progress_exit_readout / dual_rate_self_predictor / trajectory_health_probe / backtrack_aware_progress), and advanced MasterPlan sections 10.6.2-10.6.3 to distinguish A2-core from A2-progress_shape_v1-h3 as the current dynamics candidate.
+
+- 2026-03-29: Implemented the first full dynamics candidate batch in code inside /home/kt/ai/minimind: local_rollout_head, progress_exit_readout, dual_rate_self_predictor, trajectory_health_probe, modulewise_ct_gate, film_ct_modulation, plus candidate-overrides wiring in luma_stage0/dynamics_autoresearch_program.json.
+- Added a pure local watchdog runner at /home/kt/ai/minimind/scripts/run_dynamics_autoresearch_local.py so future screening does not depend on the flaky external Codex worker bootstrap chain.
+- Verified the candidate mapping path end-to-end with a CUDA smoke on A2-progress_shape_v1-h3+modulewise_ct_gate; noted that the current mamba/triton stack does not support CPU smoke.
+
+- 2026-03-29: Updated the dynamics screening rule so that 10240-step long-run promotion is now strict top-3 by 4096 midcourse result only; no extra structural wildcard is allowed into long-run.
+
+- 2026-03-29: Wrote the 2048 dynamics prescreen report at /home/kt/ai/docs/reports/Luma_Dynamics_2048_Prescreen_Report.md and promoted 5 candidates to 4096 midcourse: token_selective_ct_routing, lowrank_hyperbias_ct, modulewise_ct_gate, progress_exit_readout, and A2-progress_shape_v1-h3 baseline anchor.
+
+## 2026-03-29 Dynamics mid/long summary + token-selective successor planning
+- 阶段: 动力学候选中程/长程筛选收尾
+- 本步目标: 基于当前已完成的 `2048 -> 4096 -> 10240` 结果给出正式结论，并把 token-selective 家族改写成更适合 Luma 的下一代实现方案。
+- 已完成:
+  - 重新核对当前活跃 service / runner / 训练进程，确认 `20480` 当前无活跃训练进程，仅残留旧 runtime 文件，不计入正式结论。
+  - 确认有效赛果：
+    - `A2-progress_shape_v1-h3+progress_exit_readout` 通过 `4096` 与 `10240`
+    - `A2-progress_shape_v1-h3` 通过 `4096`、失败于 `10240`
+    - `token_selective_ct_routing / lowrank_hyperbias_ct / modulewise_ct_gate` 原始 `4096` 失败
+  - 发现并修复补测链实现 bug：`run_luma_stage12.py` 缺少 `import math`
+  - 新增总报告：`/home/kt/ai/docs/reports/Luma_Dynamics_MidLong_Summary_20260329.md`
+  - 更新动力学计划：`/home/kt/ai/docs/reports/Luma_Dynamics_Literature_Midcourse_Plan.md`
+  - 更新主规划：`/home/kt/ai/docs/plans/Luma_v0.7.2_Agent_MasterPlan.md`
+- 当前结论:
+  - 动力学增强主候选更新为：`A2-progress_shape_v1-h3+progress_exit_readout`
+  - `A2-progress_shape_v1-h3` 保留为观察锚点
+  - 当前实现版本的 `token_selective / lowrank_hyperbias / modulewise_ct_gate` 暂不继续送中长程
+  - token-selective 家族下一代优先级改为：
+    1. `summary_conditioned_chunk_film`
+    2. `hierarchical_block_token_ct_routing`
+    3. `progress_query_focus_routing`
+  - 后续赛制建议改为“晋级继训练制”：`2048 -> 4096 -> 10240 -> 20480` 默认沿同候选 checkpoint 继续训练。

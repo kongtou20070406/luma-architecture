@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import sys
 import urllib.request
 from pathlib import Path
@@ -150,24 +151,29 @@ def load_persona_seed_texts(persona_dir: Path, max_samples: int) -> list[str]:
     texts: list[str] = []
     if not persona_dir.exists():
         return texts
-    for file_name in ("wechat_pretrain.jsonl", "pretrain.jsonl"):
-        file_path = persona_dir / file_name
-        if not file_path.exists():
-            continue
-        with file_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    payload = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                text = str(payload.get("text", "")).strip()
-                if text:
-                    texts.append(text)
-                if len(texts) >= max_samples:
-                    return texts
+    candidate_dirs = [persona_dir]
+    nested = persona_dir / "persona_seed"
+    if nested.exists():
+        candidate_dirs.insert(0, nested)
+    for base_dir in candidate_dirs:
+        for file_name in ("wechat_pretrain.jsonl", "pretrain.jsonl"):
+            file_path = base_dir / file_name
+            if not file_path.exists():
+                continue
+            with file_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    text = str(payload.get("text", "")).strip()
+                    if text:
+                        texts.append(text)
+                    if len(texts) >= max_samples:
+                        return texts
     return texts
 
 
@@ -289,6 +295,7 @@ def build_tiny_luma_config(
     world_full_simplify_loss: bool,
     self_world_coupling_weight: float,
     self_rollout_hierarchical: bool,
+    enable_local_rollout_head: bool,
     exit_two_step_aux_weight: float,
     exit_uncertainty_two_step_weight: float,
     exit_uncertainty_two_step_mode: str,
@@ -301,6 +308,7 @@ def build_tiny_luma_config(
     enable_math_adapter_lane: bool,
     enable_math_summary_gate: bool,
     enable_compression_mhc: bool,
+    ct_modulation_mode: str,
     enable_reasoning_state_ring: bool,
     r_t_dim: int,
     r_t_mode: str,
@@ -308,8 +316,12 @@ def build_tiny_luma_config(
     self_progress_shape_weight: float,
     self_progress_trend_weight: float,
     self_progress_plateau_weight: float,
+    enable_progress_exit_readout: bool,
+    enable_backtrack_aware_progress: bool,
     self_local_delta_consistency_weight: float,
     self_local_curvature_weight: float,
+    enable_dual_rate_self_predictor: bool,
+    enable_trajectory_health_probe: bool,
     self_rollout_supervision_horizon: int,
     self_rollout_weighting_mode: str,
     self_feature_span_mask_ratio: float,
@@ -342,6 +354,7 @@ def build_tiny_luma_config(
         world_full_simplify_loss=world_full_simplify_loss,
         self_rollout_steps=rollout_steps,
         self_rollout_hierarchical=self_rollout_hierarchical,
+        enable_local_rollout_head=enable_local_rollout_head,
         self_world_coupling_weight=self_world_coupling_weight,
         enable_self_check_ring=enable_self_check_ring,
         self_check_dim=self_check_dim,
@@ -360,6 +373,7 @@ def build_tiny_luma_config(
         enable_math_adapter_lane=enable_math_adapter_lane,
         enable_math_summary_gate=enable_math_summary_gate,
         enable_compression_mhc=enable_compression_mhc,
+        ct_modulation_mode=ct_modulation_mode,
         enable_reasoning_state_ring=enable_reasoning_state_ring,
         r_t_dim=r_t_dim,
         r_t_mode=r_t_mode,
@@ -367,8 +381,12 @@ def build_tiny_luma_config(
         self_progress_shape_weight=self_progress_shape_weight,
         self_progress_trend_weight=self_progress_trend_weight,
         self_progress_plateau_weight=self_progress_plateau_weight,
+        enable_progress_exit_readout=enable_progress_exit_readout,
+        enable_backtrack_aware_progress=enable_backtrack_aware_progress,
         self_local_delta_consistency_weight=self_local_delta_consistency_weight,
         self_local_curvature_weight=self_local_curvature_weight,
+        enable_dual_rate_self_predictor=enable_dual_rate_self_predictor,
+        enable_trajectory_health_probe=enable_trajectory_health_probe,
         self_rollout_supervision_horizon=self_rollout_supervision_horizon,
         self_rollout_weighting_mode=self_rollout_weighting_mode,
         self_feature_span_mask_ratio=self_feature_span_mask_ratio,
@@ -594,6 +612,7 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     rollout_active_flags = []
     rollout_nonzero_flags = []
     delta_norms = []
+    aborted_on_nonfinite = False
 
     for step in range(steps):
         batch = samples[step % len(samples)].unsqueeze(0).to(device)
@@ -601,23 +620,42 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         outputs = model(input_ids=batch, labels=batch)
         loss = outputs.loss
         aux = model.last_aux
+        self_tensor = aux["self_jepa_loss"].detach()
+        rollout_tensor = aux["self_rollout_loss"].detach()
+        target_delta = aux["target_delta_c"].detach()
+        finite_ok = bool(
+            torch.isfinite(loss.detach()).item()
+            and torch.isfinite(self_tensor).item()
+            and torch.isfinite(rollout_tensor).item()
+            and torch.isfinite(target_delta).all().item()
+        )
+        if not finite_ok:
+            losses.append(float("nan"))
+            self_losses.append(float("nan"))
+            rollout_losses.append(float("nan"))
+            rollout_active_flags.append(1.0 if aux.get("rollout_error_history") else 0.0)
+            rollout_nonzero_flags.append(0.0)
+            delta_norms.append(float("nan"))
+            aborted_on_nonfinite = True
+            break
         loss.backward()
         optimizer.step()
         model.model.update_world_jepa_ema()
 
         losses.append(float(loss.detach()))
-        self_losses.append(float(aux["self_jepa_loss"].detach()))
-        rollout_value = float(aux["self_rollout_loss"].detach())
+        self_losses.append(float(self_tensor))
+        rollout_value = float(rollout_tensor)
         rollout_losses.append(rollout_value)
         rollout_active_flags.append(1.0 if aux.get("rollout_error_history") else 0.0)
         rollout_nonzero_flags.append(1.0 if abs(rollout_value) > 1e-12 else 0.0)
-        delta_norms.append(float(aux["target_delta_c"].norm(dim=-1).mean().detach()))
+        delta_norms.append(float(target_delta.norm(dim=-1).mean().detach()))
 
     head = sum(self_losses[: max(1, min(2, len(self_losses)))]) / max(1, min(2, len(self_losses)))
     tail = sum(self_losses[-max(1, min(2, len(self_losses))):]) / max(1, min(2, len(self_losses)))
     rollout_head = sum(rollout_losses[: max(1, min(2, len(rollout_losses)))]) / max(1, min(2, len(rollout_losses)))
     rollout_tail = sum(rollout_losses[-max(1, min(2, len(rollout_losses))):]) / max(1, min(2, len(rollout_losses)))
-    mean_delta_norm = sum(delta_norms) / len(delta_norms)
+    finite_delta_norms = [value for value in delta_norms if math.isfinite(value)]
+    mean_delta_norm = (sum(finite_delta_norms) / len(finite_delta_norms)) if finite_delta_norms else float("nan")
     rollout_active_ratio = sum(rollout_active_flags) / len(rollout_active_flags) if rollout_active_flags else 0.0
     rollout_nonzero_ratio = sum(rollout_nonzero_flags) / len(rollout_nonzero_flags) if rollout_nonzero_flags else 0.0
 
@@ -627,6 +665,7 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     metric(metrics_path, "stage2_rollout_active_ratio", rollout_active_ratio > 0.0, rollout_active_ratio, "Rollout supervision should activate at least sometimes / rollout 监督至少应在部分 step 上激活")
     metric(metrics_path, "stage2_rollout_nonzero_ratio", True, rollout_nonzero_ratio, "Fraction of non-zero rollout losses / 非零 rollout 损失占比")
     metric(metrics_path, "stage2_delta_norm", mean_delta_norm > 1e-5, mean_delta_norm, "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零")
+    metric(metrics_path, "stage2_nonfinite_abort", not aborted_on_nonfinite, 1.0 if aborted_on_nonfinite else 0.0, "Stage2 should avoid non-finite aborts / Stage2 不应因非有限值中止")
 
     return {
         "losses": losses,
@@ -639,6 +678,7 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         "self_loss_tail": tail,
         "self_rollout_head": rollout_head,
         "self_rollout_tail": rollout_tail,
+        "nonfinite_abort": aborted_on_nonfinite,
     }
 
 
@@ -776,6 +816,7 @@ def main() -> None:
     parser.add_argument("--stage2-steps", type=int, default=8)
     parser.add_argument("--metrics-out", type=str, default=str(ROOT / "artifacts" / "stage0_metrics.jsonl"))
     parser.add_argument("--json-out", type=str, default=str(ROOT / "artifacts" / "stage12_report.json"))
+    parser.add_argument("--candidate-name", type=str, default="")
     parser.add_argument(
         "--fixture-mode",
         choices=[
@@ -807,6 +848,7 @@ def main() -> None:
     parser.add_argument("--world-full-simplify-loss", action="store_true")
     parser.add_argument("--self-world-coupling-weight", type=float, default=0.0)
     parser.add_argument("--self-rollout-hierarchical", action="store_true")
+    parser.add_argument("--enable-local-rollout-head", action="store_true")
     parser.add_argument("--exit-two-step-aux-weight", type=float, default=0.0)
     parser.add_argument("--exit-uncertainty-two-step-weight", type=float, default=0.0)
     parser.add_argument("--exit-uncertainty-two-step-mode", choices=["multiplier", "clipped", "gate"], default="multiplier")
@@ -819,6 +861,7 @@ def main() -> None:
     parser.add_argument("--enable-math-adapter-lane", action="store_true")
     parser.add_argument("--enable-math-summary-gate", action="store_true")
     parser.add_argument("--enable-compression-mhc", action="store_true")
+    parser.add_argument("--ct-modulation-mode", choices=["additive", "modulewise_gate", "film", "lowrank_hyperbias", "token_selective"], default="additive")
     parser.add_argument("--enable-reasoning-state-ring", action="store_true")
     parser.add_argument("--r-t-dim", type=int, default=16)
     parser.add_argument("--r-t-mode", choices=["blend", "parallel", "predictor"], default="blend")
@@ -826,8 +869,12 @@ def main() -> None:
     parser.add_argument("--self-progress-shape-weight", type=float, default=0.0)
     parser.add_argument("--self-progress-trend-weight", type=float, default=0.0)
     parser.add_argument("--self-progress-plateau-weight", type=float, default=0.0)
+    parser.add_argument("--enable-progress-exit-readout", action="store_true")
+    parser.add_argument("--enable-backtrack-aware-progress", action="store_true")
     parser.add_argument("--self-local-delta-consistency-weight", type=float, default=0.0)
     parser.add_argument("--self-local-curvature-weight", type=float, default=0.0)
+    parser.add_argument("--enable-dual-rate-self-predictor", action="store_true")
+    parser.add_argument("--enable-trajectory-health-probe", action="store_true")
     parser.add_argument("--self-rollout-supervision-horizon", type=int, default=0)
     parser.add_argument("--self-rollout-weighting-mode", choices=["legacy", "near3"], default="legacy")
     parser.add_argument("--self-feature-span-mask-ratio", type=float, default=0.0)
@@ -895,6 +942,7 @@ def main() -> None:
         world_full_simplify_loss=args.world_full_simplify_loss,
         self_world_coupling_weight=args.self_world_coupling_weight,
         self_rollout_hierarchical=args.self_rollout_hierarchical,
+        enable_local_rollout_head=args.enable_local_rollout_head,
         exit_two_step_aux_weight=args.exit_two_step_aux_weight,
         exit_uncertainty_two_step_weight=args.exit_uncertainty_two_step_weight,
         exit_uncertainty_two_step_mode=args.exit_uncertainty_two_step_mode,
@@ -907,6 +955,7 @@ def main() -> None:
         enable_math_adapter_lane=args.enable_math_adapter_lane,
         enable_math_summary_gate=args.enable_math_summary_gate,
         enable_compression_mhc=args.enable_compression_mhc,
+        ct_modulation_mode=args.ct_modulation_mode,
         enable_reasoning_state_ring=args.enable_reasoning_state_ring,
         r_t_dim=args.r_t_dim,
         r_t_mode=args.r_t_mode,
@@ -914,8 +963,12 @@ def main() -> None:
         self_progress_shape_weight=args.self_progress_shape_weight,
         self_progress_trend_weight=args.self_progress_trend_weight,
         self_progress_plateau_weight=args.self_progress_plateau_weight,
+        enable_progress_exit_readout=args.enable_progress_exit_readout,
+        enable_backtrack_aware_progress=args.enable_backtrack_aware_progress,
         self_local_delta_consistency_weight=args.self_local_delta_consistency_weight,
         self_local_curvature_weight=args.self_local_curvature_weight,
+        enable_dual_rate_self_predictor=args.enable_dual_rate_self_predictor,
+        enable_trajectory_health_probe=args.enable_trajectory_health_probe,
         self_rollout_supervision_horizon=args.self_rollout_supervision_horizon,
         self_rollout_weighting_mode=args.self_rollout_weighting_mode,
         self_feature_span_mask_ratio=args.self_feature_span_mask_ratio,
@@ -944,6 +997,7 @@ def main() -> None:
         )
 
     report = {
+        "candidate_name": args.candidate_name or None,
         "fixture_path": str(fixture_path),
         "fixture_mode": args.fixture_mode,
         "rollout_steps": args.rollout_steps,
@@ -965,6 +1019,7 @@ def main() -> None:
         "world_full_simplify_loss": args.world_full_simplify_loss,
         "self_world_coupling_weight": args.self_world_coupling_weight,
         "self_rollout_hierarchical": args.self_rollout_hierarchical,
+        "enable_local_rollout_head": args.enable_local_rollout_head,
         "exit_two_step_aux_weight": args.exit_two_step_aux_weight,
         "exit_uncertainty_two_step_weight": args.exit_uncertainty_two_step_weight,
         "exit_uncertainty_two_step_mode": args.exit_uncertainty_two_step_mode,
@@ -976,11 +1031,16 @@ def main() -> None:
         "exit_crystal_feature_weight": args.exit_crystal_feature_weight,
         "enable_math_adapter_lane": args.enable_math_adapter_lane,
         "enable_math_summary_gate": args.enable_math_summary_gate,
+        "ct_modulation_mode": args.ct_modulation_mode,
         "self_progress_shape_weight": args.self_progress_shape_weight,
         "self_progress_trend_weight": args.self_progress_trend_weight,
         "self_progress_plateau_weight": args.self_progress_plateau_weight,
+        "enable_progress_exit_readout": args.enable_progress_exit_readout,
+        "enable_backtrack_aware_progress": args.enable_backtrack_aware_progress,
         "self_local_delta_consistency_weight": args.self_local_delta_consistency_weight,
         "self_local_curvature_weight": args.self_local_curvature_weight,
+        "enable_dual_rate_self_predictor": args.enable_dual_rate_self_predictor,
+        "enable_trajectory_health_probe": args.enable_trajectory_health_probe,
         "self_rollout_supervision_horizon": args.self_rollout_supervision_horizon,
         "self_rollout_weighting_mode": args.self_rollout_weighting_mode,
         "self_feature_span_mask_ratio": args.self_feature_span_mask_ratio,
