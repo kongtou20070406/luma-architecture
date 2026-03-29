@@ -394,11 +394,21 @@ class LumaConfig(PretrainedConfig):
         self.self_rollout_weight = kwargs.get("self_rollout_weight", 0.5)
         self.self_rollout_steps = kwargs.get("self_rollout_steps", 2)
         self.self_rollout_hierarchical = kwargs.get("self_rollout_hierarchical", False)
+        self.self_progress_shape_weight = kwargs.get("self_progress_shape_weight", 0.0)
+        self.self_progress_trend_weight = kwargs.get("self_progress_trend_weight", 0.0)
+        self.self_progress_plateau_weight = kwargs.get("self_progress_plateau_weight", 0.0)
+        self.self_plateau_margin = kwargs.get("self_plateau_margin", 0.02)
+        self.self_local_delta_consistency_weight = kwargs.get("self_local_delta_consistency_weight", 0.0)
+        self.self_local_curvature_weight = kwargs.get("self_local_curvature_weight", 0.0)
+        self.self_loop_awareness_mode = kwargs.get("self_loop_awareness_mode", "none")
         self.enable_self_check_ring = kwargs.get("enable_self_check_ring", False)
         self.self_check_dim = kwargs.get("self_check_dim", 16)
         self.self_check_k = kwargs.get("self_check_k", 1)
+        self.enable_introspection_uncertainty = kwargs.get("enable_introspection_uncertainty", False)
         self.enable_exit_jepa_crystal = kwargs.get("enable_exit_jepa_crystal", False)
         self.exit_jepa_crystal_temperature = kwargs.get("exit_jepa_crystal_temperature", 6.0)
+        self.exit_uncertainty_feature_weight = kwargs.get("exit_uncertainty_feature_weight", 0.0)
+        self.exit_crystal_feature_weight = kwargs.get("exit_crystal_feature_weight", 0.2)
         self.exit_delta_threshold = kwargs.get("exit_delta_threshold", 0.1)
         self.exit_self_threshold = kwargs.get("exit_self_threshold", 0.35)
         self.exit_rollout_threshold = kwargs.get("exit_rollout_threshold", 0.40)
@@ -410,6 +420,12 @@ class LumaConfig(PretrainedConfig):
         self.exit_gain_hidden_dim = kwargs.get("exit_gain_hidden_dim", 32)
         self.exit_gain_weight = kwargs.get("exit_gain_weight", 0.35)
         self.exit_two_step_aux_weight = kwargs.get("exit_two_step_aux_weight", 0.0)
+        self.exit_uncertainty_two_step_weight = kwargs.get("exit_uncertainty_two_step_weight", 0.0)
+        self.exit_uncertainty_two_step_mode = kwargs.get("exit_uncertainty_two_step_mode", "multiplier")
+        self.exit_uncertainty_two_step_cap = kwargs.get("exit_uncertainty_two_step_cap", 0.2)
+        self.exit_uncertainty_gate_threshold = kwargs.get("exit_uncertainty_gate_threshold", 0.75)
+        self.exit_crystal_two_step_weight = kwargs.get("exit_crystal_two_step_weight", 0.0)
+        self.exit_crystal_two_step_cap = kwargs.get("exit_crystal_two_step_cap", 0.1)
         self.exit_use_sampling = kwargs.get("exit_use_sampling", None)
         self.exit_train_use_sampling = kwargs.get("exit_train_use_sampling", True)
         self.exit_eval_use_sampling = kwargs.get("exit_eval_use_sampling", False)
@@ -932,7 +948,10 @@ class IntrospectionStateStream(nn.Module):
     def __init__(self, config: LumaConfig):
         super().__init__()
         self.chunk_size = 16
+        self.loop_awareness_mode = config.self_loop_awareness_mode
         self.meta_input = nn.Linear(config.hidden_size * 2, config.meta_dim, bias=False)
+        self.loop_progress_proj = nn.Linear(1, config.meta_dim, bias=False)
+        self.loop_phase_embed = nn.Embedding(config.reason_loops_max + 2, config.meta_dim)
         self.math_summary_gate = nn.Linear(config.hidden_size * 2, 1, bias=False) if config.enable_math_summary_gate else None
         self.state1_in = nn.Linear(config.meta_dim, config.meta_dim, bias=False)
         self.state2_in = nn.Linear(config.meta_dim, config.meta_dim, bias=False)
@@ -954,6 +973,7 @@ class IntrospectionStateStream(nn.Module):
         self.layer2 = Mamba3Block(meta_cfg)
         self.know_gap_head = nn.Linear(config.meta_dim, 1, bias=False)
         self.c_t_head = nn.Linear(config.meta_dim, config.c_t_dim, bias=False)
+        self.uncertainty_head = nn.Linear(config.meta_dim, 1, bias=False) if config.enable_introspection_uncertainty else None
 
     def init_slow_state(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> dict:
         """Luma begins the slow ring with quiet meta-state, then lets later loops write into it.
@@ -968,9 +988,17 @@ class IntrospectionStateStream(nn.Module):
             "meta_state_2": zeros_meta.clone(),
             "c_t": zeros_ct,
             "know_gap": zeros_gap,
+            "uncertainty": zeros_gap.clone(),
         }
 
-    def forward(self, h: torch.Tensor, block_reprs: List[torch.Tensor], slow_state: dict) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+    def forward(
+        self,
+        h: torch.Tensor,
+        block_reprs: List[torch.Tensor],
+        slow_state: dict,
+        loop_progress: Optional[torch.Tensor] = None,
+        loop_index: Optional[int] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
         h_pool = h.mean(dim=1)
         if block_reprs:
             last = torch.stack([r.mean(dim=1) for r in block_reprs[-2:]], dim=0).mean(dim=0)
@@ -981,6 +1009,11 @@ class IntrospectionStateStream(nn.Module):
             math_summary_gate = torch.sigmoid(self.math_summary_gate(torch.cat([h_pool, last], dim=-1)))
             last = last * math_summary_gate
         meta = self.meta_input(torch.cat([h_pool, last], dim=-1))
+        if loop_progress is not None and self.loop_awareness_mode in {"ct_progress", "dual_phase"}:
+            meta = meta + self.loop_progress_proj(loop_progress)
+        if loop_index is not None and self.loop_awareness_mode == "dual_phase":
+            loop_ids = torch.full((h.shape[0],), min(loop_index + 1, self.loop_phase_embed.num_embeddings - 1), device=h.device, dtype=torch.long)
+            meta = meta + self.loop_phase_embed(loop_ids)
         layer1_in = (meta + self.state1_in(slow_state["meta_state_1"])).unsqueeze(1)
         layer1_out = _run_mamba_with_padding(self.layer1, layer1_in, self.chunk_size)
         meta_last_1 = layer1_out[:, -1, :]
@@ -992,11 +1025,16 @@ class IntrospectionStateStream(nn.Module):
         next_state_2 = self.state2_norm(slow_state["meta_state_2"] + self.state2_out(meta_last))
         know_gap = torch.sigmoid(self.know_gap_head(meta_last))
         c_t = self.c_t_head(meta_last)
+        if self.uncertainty_head is not None:
+            uncertainty = torch.sigmoid(self.uncertainty_head(meta_last))
+        else:
+            uncertainty = torch.zeros_like(know_gap)
         next_slow_state = {
             "meta_state_1": next_state_1,
             "meta_state_2": next_state_2,
             "c_t": c_t,
             "know_gap": know_gap,
+            "uncertainty": uncertainty,
         }
         if math_summary_gate is not None:
             next_slow_state["math_summary_gate"] = math_summary_gate
@@ -1016,19 +1054,40 @@ class SelfJEPAResidualPredictor(nn.Module):
 
     def __init__(self, config: LumaConfig):
         super().__init__()
+        self.loop_awareness_mode = config.self_loop_awareness_mode
         self.fc1 = nn.Linear(config.c_t_dim + config.hidden_size, 256, bias=False)
+        self.loop_progress_proj = nn.Linear(1, 256, bias=False)
+        self.loop_phase_embed = nn.Embedding(config.reason_loops_max + 2, 256)
         self.norm = LumaZCRMSNorm(256, eps=config.rms_norm_eps)
         self.fc2 = nn.Linear(256, config.c_t_dim, bias=False)
         self.delta_scale = nn.Parameter(torch.tensor(0.1))
 
-    def forward(self, c_t: torch.Tensor, delta_h: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        c_t: torch.Tensor,
+        delta_h: torch.Tensor,
+        loop_progress: Optional[torch.Tensor] = None,
+        loop_index: Optional[int] = None,
+    ) -> torch.Tensor:
         x = torch.cat([c_t, delta_h], dim=-1)
         x = self.fc1(x)
+        if loop_progress is not None and self.loop_awareness_mode in {"predictor_progress", "dual_phase"}:
+            x = x + self.loop_progress_proj(loop_progress)
+        if loop_index is not None and self.loop_awareness_mode == "dual_phase":
+            loop_ids = torch.full((c_t.shape[0],), min(loop_index + 1, self.loop_phase_embed.num_embeddings - 1), device=c_t.device, dtype=torch.long)
+            x = x + self.loop_phase_embed(loop_ids)
         x = self.norm(x)
         x = F.silu(x)
         return self.fc2(x) * self.delta_scale
 
-    def rollout(self, c_t: torch.Tensor, delta_h: torch.Tensor, steps: int = 2) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    def rollout(
+        self,
+        c_t: torch.Tensor,
+        delta_h: torch.Tensor,
+        steps: int = 2,
+        loop_progress: Optional[torch.Tensor] = None,
+        loop_index: Optional[int] = None,
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Luma rolls residual cognitive dynamics forward: first predict delta, then integrate it into the next latent state.
         Luma 用残差动力学向前展开：先预测 delta，再把它积分成下一步认知状态。
         """
@@ -1037,11 +1096,42 @@ class SelfJEPAResidualPredictor(nn.Module):
         state_preds: List[torch.Tensor] = []
         current = c_t
         for _ in range(steps):
-            delta_c = self.forward(current, delta_h)
+            delta_c = self.forward(current, delta_h, loop_progress=loop_progress, loop_index=loop_index)
             current = current + delta_c
             delta_preds.append(delta_c)
             state_preds.append(current)
         return delta_preds, state_preds
+
+
+class SelfJEPAProgressShapeHead(nn.Module):
+    """Luma can also describe the shape of her local progress: whether the next step still improves, whether the trend is rising or flattening, and whether she is entering a plateau.
+    Luma 也可以描述自己局部推进的形状：下一步是否还会改进、趋势是在上升还是走平、是否正在进入平台期。
+    """
+
+    def __init__(self, config: LumaConfig):
+        super().__init__()
+        in_dim = config.c_t_dim + config.hidden_size + 3
+        self.fc1 = nn.Linear(in_dim, 128, bias=False)
+        self.norm = LumaZCRMSNorm(128, eps=config.rms_norm_eps)
+        self.improve_head = nn.Linear(128, 1, bias=False)
+        self.trend_head = nn.Linear(128, 1, bias=False)
+        self.plateau_head = nn.Linear(128, 1, bias=False)
+
+    def forward(
+        self,
+        c_t: torch.Tensor,
+        delta_h: torch.Tensor,
+        loop_progress: torch.Tensor,
+        recent_self_improve: torch.Tensor,
+        recent_rollout_improve: torch.Tensor,
+    ) -> dict:
+        x = torch.cat([c_t, delta_h, loop_progress, recent_self_improve, recent_rollout_improve], dim=-1)
+        x = F.silu(self.norm(self.fc1(x)))
+        return {
+            "pred_next_improve": self.improve_head(x).squeeze(-1),
+            "pred_trend": self.trend_head(x).squeeze(-1),
+            "pred_plateau_logit": self.plateau_head(x).squeeze(-1),
+        }
 
 
 class TinyReasoningStateRing(nn.Module):
@@ -1507,6 +1597,8 @@ class ExitController(nn.Module):
         jepa_crystal_temperature: float = 6.0,
         gain_hidden_dim: int = 32,
         gain_weight: float = 0.35,
+        uncertainty_feature_weight: float = 0.0,
+        crystal_feature_weight: float = 0.2,
     ):
         super().__init__()
         self.delta_threshold = delta_threshold
@@ -1523,6 +1615,7 @@ class ExitController(nn.Module):
         self.min_loops = min_loops
         self.enable_jepa_crystal = enable_jepa_crystal
         self.jepa_crystal_temperature = jepa_crystal_temperature
+        self.uncertainty_feature_weight = uncertainty_feature_weight
         self.gain_predictor = nn.Sequential(
             nn.Linear(11, gain_hidden_dim),
             nn.SiLU(),
@@ -1540,7 +1633,7 @@ class ExitController(nn.Module):
         self.rollout_weight = nn.Parameter(torch.tensor(0.5))
         self.world_weight = nn.Parameter(torch.tensor(0.5))
         self.self_check_weight = nn.Parameter(torch.tensor(0.25))
-        self.crystal_weight = nn.Parameter(torch.tensor(0.2))
+        self.crystal_weight = nn.Parameter(torch.tensor(crystal_feature_weight))
         self.gain_weight = nn.Parameter(torch.tensor(gain_weight))
         self.bias = nn.Parameter(torch.tensor(0.0))
 
@@ -1560,6 +1653,7 @@ class ExitController(nn.Module):
         recent_delta_improve_1: Optional[torch.Tensor] = None,
         recent_delta_improve_2: Optional[torch.Tensor] = None,
         reason_local_signal: Optional[torch.Tensor] = None,
+        uncertainty_score: Optional[torch.Tensor] = None,
     ) -> dict:
         if prev_h is None:
             delta_h = h.new_tensor(1.0)
@@ -1594,6 +1688,9 @@ class ExitController(nn.Module):
             recent_delta_improve_2 = h.new_zeros(())
         if reason_local_signal is None:
             reason_local_signal = h.new_zeros(())
+        if uncertainty_score is None:
+            uncertainty_score = h.new_zeros(())
+        centered_uncertainty = (uncertainty_score.clamp(0.0, 1.0) - 0.5) * 2.0
         gain_features = torch.stack(
             [
                 delta_signal.float(),
@@ -1621,6 +1718,7 @@ class ExitController(nn.Module):
             + self.world_weight * world_signal
             + self.self_check_weight * self_check_signal
             + self.crystal_weight * jepa_crystal_signal
+            + self.uncertainty_feature_weight * centered_uncertainty
             - self.gain_weight * predicted_gain
         )
         exit_score = torch.sigmoid(exit_logit)
@@ -1778,6 +1876,8 @@ class LumaBackbone(nn.Module):
             jepa_crystal_temperature=config.exit_jepa_crystal_temperature,
             gain_hidden_dim=config.exit_gain_hidden_dim,
             gain_weight=config.exit_gain_weight,
+            uncertainty_feature_weight=config.exit_uncertainty_feature_weight,
+            crystal_feature_weight=config.exit_crystal_feature_weight,
         )
         self.final_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -1801,6 +1901,7 @@ class LumaBackbone(nn.Module):
         loop_history: List[torch.Tensor] = []
         c_t_history: List[torch.Tensor] = []
         know_gap_history: List[torch.Tensor] = []
+        uncertainty_history: List[torch.Tensor] = []
         slow_update_flags: List[bool] = []
         prev_h: Optional[torch.Tensor] = None
         slow_state = self.introspection_state_stream.init_slow_state(batch_size, h.device, h.dtype)
@@ -1808,6 +1909,7 @@ class LumaBackbone(nn.Module):
         reasoning_state = self.reasoning_state_ring.init_state(batch_size, h.device, h.dtype) if self.reasoning_state_ring is not None else None
         c_t = slow_state["c_t"]
         know_gap = slow_state["know_gap"]
+        uncertainty = slow_state.get("uncertainty", h.new_zeros((batch_size, 1)))
         self_check_score = h.new_full((batch_size, 1), 0.5)
         pred_delta_c = torch.zeros_like(c_t)
         target_delta_c = torch.zeros_like(c_t)
@@ -1878,12 +1980,24 @@ class LumaBackbone(nn.Module):
             if did_slow_update:
                 slow_step_idx += 1
                 prev_c_t = c_t
-                know_gap, next_c_t, slow_state = self.introspection_state_stream(h, block_reprs, slow_state)
+                current_loop_progress = h.new_full(
+                    (batch_size, 1),
+                    float(loop_idx + 1) / float(max(1, self.config.reason_active_loops)),
+                )
+                know_gap, next_c_t, slow_state = self.introspection_state_stream(
+                    h,
+                    block_reprs,
+                    slow_state,
+                    loop_progress=current_loop_progress,
+                    loop_index=loop_idx,
+                )
                 delta_h = h.mean(dim=1).detach() if prev_h is None else (h - prev_h).mean(dim=1).detach()
                 rollout_delta_preds, rollout_state_preds = self.self_jepa_residual_predictor.rollout(
                     c_t,
                     delta_h,
                     steps=self.config.self_rollout_steps,
+                    loop_progress=current_loop_progress,
+                    loop_index=loop_idx,
                 )
                 pred_delta_c = rollout_delta_preds[0]
                 pred_c_next = rollout_state_preds[0]
@@ -1943,10 +2057,8 @@ class LumaBackbone(nn.Module):
                     pending_rollout_preds.append((slow_step_idx + horizon, pred_state, horizon + 1))
                 c_t = next_c_t
                 know_gap = slow_state["know_gap"]
-                local_progress = h.new_full(
-                    (batch_size, 1),
-                    float(loop_idx + 1) / float(max(1, self.config.reason_active_loops)),
-                )
+                uncertainty = slow_state.get("uncertainty", uncertainty)
+                local_progress = current_loop_progress
                 recent_self_improve_vec = h.new_full(
                     (batch_size, 1),
                     float((prev_self_error_for_gain - current_self_error).item()),
@@ -1990,6 +2102,7 @@ class LumaBackbone(nn.Module):
             loop_history.append(h.detach())
             c_t_history.append(c_t.detach())
             know_gap_history.append(know_gap.detach())
+            uncertainty_history.append(uncertainty.detach())
             slow_update_flags.append(did_slow_update)
             executed_loops = loop_idx + 1
             exit_stats = self.exit_controller(
@@ -2010,6 +2123,7 @@ class LumaBackbone(nn.Module):
                 recent_delta_improve_1=recent_delta_improves[-1] if recent_delta_improves else h.new_zeros(()),
                 recent_delta_improve_2=recent_delta_improves[-2] if len(recent_delta_improves) > 1 else h.new_zeros(()),
                 reason_local_signal=(reasoning_state["trust"].mean() if reasoning_state is not None else None),
+                uncertainty_score=uncertainty.mean(),
             )
             delta_h_history.append(exit_stats["delta_h"].detach())
             self_error_history.append(current_self_error.detach())
@@ -2047,6 +2161,8 @@ class LumaBackbone(nn.Module):
             "c_t_history": c_t_history,
             "know_gap": know_gap,
             "know_gap_history": know_gap_history,
+            "uncertainty": uncertainty,
+            "uncertainty_history": uncertainty_history,
             "pred_delta_c": pred_delta_c,
             "target_delta_c": target_delta_c,
             "self_jepa_loss": self_jepa_loss,
@@ -2180,9 +2296,37 @@ class LumaForCausalLM(PreTrainedModel):
             gain_terms.append(F.smooth_l1_loss(predicted_gain.float(), continuation_gain.float()))
             if self.config.exit_two_step_aux_weight > 0.0 and idx < len(joint_scores) - 2:
                 continuation_gain_2 = (joint_scores[idx] - joint_scores[idx + 2]).detach()
+                two_step_weight = self.config.exit_two_step_aux_weight
+                uncertainty_value = 0.0
+                crystal_value = 0.0
+                if idx < len(aux.get("uncertainty_history", [])):
+                    uncertainty_value = float(aux["uncertainty_history"][idx].float().mean().detach().item())
+                if idx < len(aux.get("jepa_crystal_history", [])):
+                    crystal_value = float(aux["jepa_crystal_history"][idx].float().mean().detach().item())
+                if self.config.exit_uncertainty_two_step_weight > 0.0:
+                    if self.config.exit_uncertainty_two_step_mode == "gate":
+                        if uncertainty_value >= self.config.exit_uncertainty_gate_threshold:
+                            two_step_weight = two_step_weight
+                        else:
+                            two_step_weight = 0.0
+                    elif self.config.exit_uncertainty_two_step_mode == "clipped":
+                        bump = min(
+                            self.config.exit_uncertainty_two_step_cap,
+                            self.config.exit_uncertainty_two_step_weight * uncertainty_value,
+                        )
+                        two_step_weight = two_step_weight * (1.0 + bump)
+                    else:
+                        two_step_weight = two_step_weight * (
+                            1.0 + self.config.exit_uncertainty_two_step_weight * uncertainty_value
+                        )
+                if self.config.exit_crystal_two_step_weight > 0.0:
+                    crystal_bump = min(
+                        self.config.exit_crystal_two_step_cap,
+                        self.config.exit_crystal_two_step_weight * crystal_value,
+                    )
+                    two_step_weight = two_step_weight * (1.0 + crystal_bump)
                 gain_terms.append(
-                    self.config.exit_two_step_aux_weight
-                    * F.smooth_l1_loss(predicted_gain2.float(), continuation_gain_2.float())
+                    two_step_weight * F.smooth_l1_loss(predicted_gain2.float(), continuation_gain_2.float())
                 )
 
         exit_aux_loss = torch.stack(gain_terms).mean() if gain_terms else labels.new_zeros((), dtype=torch.float32)

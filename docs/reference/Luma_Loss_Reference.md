@@ -295,6 +295,34 @@ L_rollout
 - 模型是在“真正有动力学地推理”
 - 还是“学会提前停住”
 
+### 什么时候 `rollout` 下降是真变好，什么时候只是被压扁
+
+不能只看 `self_rollout_tail` 越低越好。
+
+更健康的下降通常同时满足：
+
+- `L_self` 也在合理下降
+- `c_t` 仍然保持非塌缩方差
+- `hard_loop_var` 不是直接被压成死板常数
+- `rollout_active_ratio` 仍然明显大于 `0`
+
+其中：
+
+- `rollout_active_ratio`
+  - 有多少 step/样本真正形成了 rollout 监督
+- `rollout_nonzero_ratio`
+  - 形成的 rollout loss 里，有多少不是精确 `0`
+
+如果出现：
+
+- `self_rollout_tail` 接近 `0`
+- 但 `rollout_active_ratio` 也接近 `0`
+
+那更像是：
+
+- 没有形成足够多的有效 rollout supervision
+- 而不是模型真的把多步动力学全部学会了
+
 ### 风险
 
 rollout 太短：
@@ -314,6 +342,34 @@ rollout 太长：
 - `4-step` 比 `2-step` 更好
 - `5-step` 继续有收益
 - `10-step` 在当前长 horizon 验证里仍有价值
+
+### 如何判断 rollout 下降是“真的变好”还是“被压扁”
+
+`rollout_tail` 变低，不能单独解读。
+
+健康的 rollout 下降通常会同时伴随：
+
+- `self_tail` 也合理下降
+- `c_t` 仍然有非零漂移
+- `intermediate_state_variance` 保持非零
+- `world_summary_drift` 不会一起塌成静止
+- 各个 bucket 不会同时被压成同一种极端数值
+
+坏的 rollout 下降更像：
+
+- mixed 和各桶一起掉到接近 `0`
+- 伴随某个 gating / uncertainty / auxiliary 信号饱和
+- bucket 间差异突然消失
+
+这种情况通常不是“模型真的全学会了”，而是：
+
+- rollout supervision 被压扁了
+- 指标失去了区分能力
+
+所以：
+
+- 局部变低，可能是好事
+- 全桶同时贴近 `0`，要高度怀疑是不是坏信号
 
 ---
 
@@ -441,6 +497,43 @@ rollout 太长：
 - 帮退出控制不是纯硬规则
 - 当前新版本更具体地说：
   - 它在学习“继续一轮后的联合收益是否还值得”
+  - 当前默认口径已经不是“纯一步”，而是：
+    - `one-step continuation gain` 作为主监督
+    - `light two-step continuation auxiliary` 作为轻量辅助项
+
+### 当前默认的 `exit policy` 解释
+
+在最新 `512-step` A/B 里：
+
+- `one-step only`
+  - mixed `self_rollout_tail = 0.068359375`
+- `one-step + light two-step auxiliary`
+  - mixed `self_rollout_tail = 0.052734375`
+
+这说明当前更合理的默认不是：
+
+- 只学一步
+
+而是：
+
+- 一步做主
+- 两步做轻量辅助
+
+也就是说，当前默认 `L_exit_aux` 更像：
+
+```text
+L_exit_aux
+= L_gain_1step
++ w_2 * L_gain_2step_aux
+```
+
+其中：
+
+- `L_gain_1step`
+  - 负责稳定、直接的 continuation gain 主监督
+- `L_gain_2step_aux`
+  - 不直接接管退出决策
+  - 只作为“更远一步是否还有收益”的轻量辅助信号
 
 ---
 

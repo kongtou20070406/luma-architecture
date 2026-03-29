@@ -486,27 +486,57 @@
 **失败回滚**
 - 回滚到单区保守模式并定位边界错误。
 
-### 阶段0G：数据准备（X 清洗 + Hugging Face 人格对齐）
+### 阶段0G：数据准备（DataMix v1：先变聪明，再变像 Luma）
 **输入**
 - 你的 X 聊天/推文原始导出数据。
 - Hugging Face 候选数据集池。
 
 **动作**
-
-- Hugging Face 数据集池（按 Luma 人格属性筛选）：
-  - `facebook/empathetic_dialogues`（共情表达）
-  - `thu-coai/esconv`（情绪支持对话策略）
-  - `OpenAssistant/oasst1`（多语言高质量助手树，含中文子集）
-  - `HuggingFaceH4/ultrafeedback_binarized`（偏好学习/回答质量对齐）
-  - `wangrui6/Zhihu-KOL`（中文长回答风格与叙述性）
-  - `BelleGroup/multiturn_chat_0.8M`（中文多轮对话规模补充）
-  - `LooksJuicy/Chinese-Emotional-Intelligence`（中文情绪表达增强）
-  - `Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset`（情绪类别覆盖）
-- 形成最终 `DataMix v1`（来源占比、采样策略、license 白名单）。
+- 原则先重排：
+  - `50%` 必须优先给“让 Luma 更聪明”的语料，而不是人格/风格语料。
+  - 剩余 `50%` 再分给人格、情感、对话表现与回答对齐。
+- 最终 `DataMix v1` 按四层组织：
+  - `A. 聪明桶（50%）`
+    - 目标：提升推理、代码、长链条解决问题能力。
+    - 子桶建议：
+      - `math_long_reasoning`：竞赛数学、多步解题、可验证推导链。
+      - `code_python`：高质量 Python 代码、解释、修复、重构、推理型代码问答。
+      - `logic_tool_use`：需要规划、约束满足、步骤执行的 agent/工具型样本。
+    - 采样建议：
+      - `math_long_reasoning = 20%`
+      - `code_python = 20%`
+      - `logic_tool_use = 10%`
+  - `B. 人格桶（15%）`
+    - 来源目录：`/home/kt/ai/luma_dataset`
+    - 当前主要文件：
+      - `wechat_pretrain.jsonl`
+      - `pretrain.jsonl`
+    - 目标：给 Luma 注入“来自你”的表达底色与连续人格线索，但不让它压过能力主线。
+  - `C. 情感与支持桶（20%）`
+    - Hugging Face 候选：
+      - `facebook/empathetic_dialogues`（共情表达）
+      - `thu-coai/esconv`（情绪支持对话策略）
+      - `LooksJuicy/Chinese-Emotional-Intelligence`（中文情绪表达增强）
+      - `Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset`（情绪类别覆盖）
+    - 目标：提升共情、支持性回应、情绪识别与表达。
+  - `D. 对话质量与叙述桶（15%）`
+    - Hugging Face 候选：
+      - `OpenAssistant/oasst1`（多语言高质量助手树，含中文子集）
+      - `HuggingFaceH4/ultrafeedback_binarized`（偏好学习/回答质量对齐）
+      - `wangrui6/Zhihu-KOL`（中文长回答风格与叙述性）
+      - `BelleGroup/multiturn_chat_0.8M`（中文多轮对话规模补充）
+    - 目标：提高长回答结构、中文叙述感、多轮承接与回答质量。
+- `DataMix v1` 额外约束：
+  - 人格桶是正式桶，不再只是后期 probe 时单独观察。
+  - 但人格桶不能反客为主，不能压过“更聪明”这条主线。
+  - 默认先做来源占比、采样温度、license 白名单与去重规则四件事，再冻结数据版本。
 
 **验收**
 - 产出可复现数据工件：`hf_mix_manifest.yaml`、`datamix_stats.json`。
 - 完成 license 与用途审查（非商用/署名/传播限制明确）。
+- `DataMix v1` 占比通过人工复核：
+  - “聪明桶”总占比确认为 `50%`
+  - `luma_dataset` 已正式并入人格桶
 - 人格一致性抽样评估通过（人工 + 规则双检）。
 
 **失败回滚**
@@ -839,6 +869,38 @@
   - ZC-RMSNorm / Embedding / JEPA目标更新路径
 - 训练建议：前向 `E4M3`、反向 `E5M2`，并保留关键边界层 BF16。
 
+### 10.5A 规模路线重新定位（2026-03-29 更新）
+- 当前重新确认：`0.3B` 更适合作为架构验证基线，而不是最终形态。
+- 对 Luma 这种目标函数很重、同时追求推理/情感/人格/代码/中文长回答的系统来说：
+  - `0.3B`：适合机制筛选、loss/exit/world-self JEPA 验证、短中程 trainer 验证。
+  - `0.6B`：适合第一版正式预训练候选，开始进入“可认真使用”的区间。
+  - `1.2B+`：更接近你真正想要的完整 Luma 形态。
+- 因此当前规模判断改为：
+  - `0.3B = 架构验证基线`
+  - `0.6B = 第一版正式训练候选`
+  - `1.2B = 更可信的中期目标规模`
+- 需要诚实说明：
+  - `0.6B` 很可能仍然不是“最终足够”的规模，尤其在你希望 Luma 同时兼顾：
+    - 长推理
+    - 情感与支持性表达
+    - 中文叙述感
+    - 代码与数学
+    - 人格连续性
+  - 所以 `0.6B` 更像“认真可用版起点”，不是“最终就够了”。
+- 扩容顺序当前固定为：
+  - 先加深，再加宽。
+- 理由：
+  - 当前大量实验结论都建立在 `hidden=768` 的内部比例上；直接加宽会同时扰动 `meta_dim / c_t / head_dim / kv_heads / loss dynamics`。
+  - Luma 当前的收益更依赖层次、递推深度和共享推理 block 的表达能力，而不是先把单层做得更胖。
+  - 这也更符合 `Progressive Stacking` 的渐进扩容路线。
+- 当前推荐扩容路径：
+  1. `0.3B -> 0.6B`：优先加深（保持宽度不变或近似不变）
+  2. `0.6B -> 1.2B`：再考虑加宽
+  3. `1.2B -> 1.5B+`：再按目标资源和训练稳定性决定是否继续加宽/加深
+- 工程含义：
+  - 后续若开始准备正式预训练，不应把 `0.3B` 当作最终规模。
+  - `0.6B` 可以作为第一次正式 run 候选，但应提前接受：它大概率仍是通往 `1.2B+` 的过渡站。
+
 ### 10.5 参数补充锚点（0.3B默认）
 - `hidden=768, heads=12, kv_heads=3, ffn=3072`
 - 压缩区 `24` 层，推理循环训练 `1~6`（课程式），推理上限 `8`
@@ -954,6 +1016,21 @@
       - `self_check_k = 2`
       - `rollout_steps = 10`
       - `reason_loops = 15`
+  - `512-step` 的 one-step vs light two-step A/B 结论：
+    - 纯 `one-step` 已不再是最佳默认
+    - 当前更优默认应改为：
+      - `one-step continuation gain` 作为主监督
+      - `light two-step continuation auxiliary` 作为默认辅助
+    - 关键结果：
+      - mixed `self_rollout_tail`: `0.068359375 -> 0.052734375`
+      - math `self_rollout_tail`: `0.07421875 -> 0.0625`
+      - dialogue `self_rollout_tail`: `0.15625 -> 0.05859375`
+      - persona_seed `self_rollout_tail`: `0.3896484375 -> 0.24609375`
+      - emotion `self_rollout_tail` 略有回退：`0.10546875 -> 0.109375`
+    - 因此当前主线不再写成“只做一步”，而应写成：
+      - 一步主
+      - 两步辅
+      - 不让 two-step 直接接管 exit policy
   - `self_check_k` 的进一步对比（`1 / 2 / 3 / 2+crystal`）结论：
     - `k=2` 不是偶然点，确实优于 `k=1`
     - `k=3` 在 `dialogue / persona_seed` 方向更强，但 mixed 总体并未超过 `k=2`
@@ -966,6 +1043,23 @@
     - 默认继续保留 `self_check_k = 2`
     - `k=3` 作为“聊天伙伴感 / persona 优先”专项候选
     - `JEPA crystal` 作为退出策略专项研究项，不直接扶正；若继续追踪，优先 `k=3 + crystal`
+  - 新增自省流备选项：
+    - `introspection uncertainty`
+      - 定义：由自省流直接产出一个轻量 `uncertainty` 信号，表示“当前内部叙事到底有多不确定 / 多犹疑”
+      - 当前建议用途：
+        - 不直接接管 exit logit
+        - 只用于调节 `light two-step continuation auxiliary` 的权重
+      - 第一轮 `512-step` 试验结论：
+        - 信号本身是活的（stage1 uncertainty 非零）
+        - 但当前接法会把 mixed/per-bucket 的 `rollout_tail` 压到近零，说明权重过强且过早介入
+      - 后续三组降火力试验结论：
+        - `clipped uncertainty weighting`：失败，rollout 仍被压扁
+        - `uncertainty-as-gate`：失败，gate 因 uncertainty 饱和而几乎总开
+        - `crystal + uncertainty` 低火力版：mixed `self_tail` 更低，但 rollout 仍全桶归零
+      - 当前判断：
+        - 保留为 exit policy 研究备选
+        - 暂不扶正进默认基线
+        - 暂不再沿“直接调 two-step 辅助权重”这条支路继续深挖
 
 ### 10.6C JEPA predictor 的实现边界（必须诚实标记）
 - 当前 JEPA predictor 不是论文作者官方仓库直接实现。
@@ -1044,15 +1138,104 @@
   - 不应再直接因为 `persona_seed` 单项退化而判死
 - 当前直接影响：
   - `iteration 5`（light two-step continuation-value auxiliary）在旧 guard 下被判 discard
-  - 在新 guard 下，它应视为：
+  - 在新 guard 下，它先被视为：
     - “值得继续恢复并向下探索的候选分支”
     - 因为它把 mixed `self_rollout_tail` 从 `0.041015625` 降到 `0.0390625`
     - 但代价是 `persona_seed rollout_tail` 从 `0.361328125` 升到 `0.666015625`
-  - 但不是自动替代当前 retained 主线；恢复后仍需继续验证其对 `emotion / dialogue / mixed` 的长期稳定性
-  - 下一次 autoresearch 恢复点：
-    - 先恢复到 `iteration 5` 的代码语义
-    - 再以“`persona_seed` 为软护栏”的新规则继续向下迭代
-    - 当前 `iteration 2` 仍保留为最稳参考基线
+  - 随后又在统一的 `512-step` A/B 中被重新验证：
+    - `one-step only`:
+      - mixed `self_tail = 0.169921875`
+      - mixed `rollout_tail = 0.068359375`
+    - `one-step + light two-step auxiliary`:
+      - mixed `self_tail = 0.054443359375`
+      - mixed `rollout_tail = 0.052734375`
+      - `math` 也同步改善：`0.07421875 -> 0.0625`
+      - `dialogue` 同步改善：`0.15625 -> 0.05859375`
+      - `persona_seed` 也明显回收：`0.3896484375 -> 0.24609375`
+      - 仅 `emotion rollout_tail` 略有回退：`0.10546875 -> 0.109375`
+  - 因此当前正式基线更新为：
+    - `one-step continuation gain` 作为主监督
+    - `light two-step continuation auxiliary` 作为默认辅助监督
+    - 不再把“纯 one-step”当作默认 retained 主线
+  - 当前新的 retained 解释：
+    - `iteration 2` 代表“one-step continuation gain 的稳定骨架”
+    - `iteration 5` 代表“one-step main + light two-step auxiliary”的升级版默认基线
+  - 下一阶段 exit policy 优化应围绕这条新基线继续，而不是回退到纯 one-step
+
+#### 10.6.0 基线前缀命名规则（2026-03-29）
+- 从现在起，每一条正式实验线都挂在一个“基线前缀（baseline prefix）”下面。
+- 规则：
+  - 每当正式基线发生切换，就分配一个新的前缀。
+  - 后续所有实验都以 `前缀 + 变体名` 的方式记录。
+  - 这样可以把“这是谁的变体”与“它是在什么历史基线上长出来的”分开。
+- 当前建议命名：
+  - `A0`
+    - 早期纯 `one-step` continuation skeleton
+    - 对应历史里的 `one_step`
+  - `A1`
+    - `one-step main + light two-step auxiliary` 升级线
+    - 对应历史里的“512-step A/B 后被扶正的默认基线”
+    - 过去文档里常被口语化写成 `iter5` 的那条思想来源，但不再直接把 `iter5` 当正式基线名
+  - `A2`
+    - 当前正式长程基线
+    - 对应历史里的 `iter2` 长程扶正版本
+    - 结构定义：`full + depth2 + self_check_k=2 + one-step main + light two-step auxiliary`
+- 命名示例：
+  - `A2-predictor_progress`
+  - `A2-progress_shape_v1`
+  - `A2-local_consistency_v2`
+  - `A1-crystal_probe`
+- 旧名字回填说明：
+  - `iter2`
+    - 现在正式映射为 `A2-core`
+  - `iter5`
+    - 不再直接当作正式基线名使用
+    - 仅保留为历史口语标签，指向“`A1` 这代 one-step main + light two-step auxiliary 的升级思想来源”
+  - `iter9`
+    - 现在更准确地写成 `A2-iter9_bundle` 或 `A2-structured_world_bundle`
+    - 表示它是建立在 `A2` 主线附近发展出的研究分支，而不是独立新基线
+
+#### 10.6.1 10240-Step 长程基线重新扶正（2026-03-29）
+- 在 `10240-step` 中程验证后，当前正式长程基线重新明确为：
+  - `A2-core`（旧名：`iter2`）
+- 原因：
+  - `A2-core` / 旧 `iter2` 在长程里重新体现出最稳的 `mixed / math / python_code` 表现
+  - `iter9` 与 `iter9 + crystal` 在中程里更像把 rollout 动力学压平，而不是自然学好
+  - `ExpD` 保住了一部分 bucket 动态性，但还没有赢过 `iter2`
+- 当前正式长程基线配置：
+  - 架构底座：
+    - `full + depth2 + self_check`
+  - 自省与退出：
+    - `self_check_k = 2`
+    - `one-step continuation gain` 作为主监督
+    - `light two-step auxiliary` 作为默认辅助监督
+  - world JEPA：
+    - `world_jepa_mode = full`
+    - `world_mask_strategy = default`
+    - `world_full_simplify_loss = false`
+    - `enable_exit_jepa_crystal = false`
+  - 共享推理块：
+    - `reason_shared_depth = 2`
+  - 推理预算：
+    - `rollout_steps = 10`
+    - `reason_loops = 15`
+  - 长程验证数据桶：
+    - `fixture_mode = competition_math_dialogue_emotion`
+    - `enable_persona_seed = true`
+    - `enable_python_code = true`
+  - 长程验证训练口径：
+    - `seq_len = 256`
+    - `samples = 8`
+    - `stage2_steps = 10240`
+  - 未启用的研究分支：
+    - `math_adapter_lane = off`
+    - `math_summary_gate = off`
+    - `r_t reasoning ring = off`
+    - `uncertainty feature = off`
+    - `crystal feature = off`
+- 配置语义：
+  - 这是当前最适合继续推进正式 trainer / 更长训练预算的稳定骨架
+  - `iter9`、`iter9 + crystal`、`ExpD` 继续保留为研究分支，不删除
 
 ### 10.7 OPUS 数据选择路线（2026 候选）
 - 候选技术：

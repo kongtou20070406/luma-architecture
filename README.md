@@ -18,6 +18,30 @@
 - 本地虚拟环境
 - 运行缓存与日志残留
 
+## 基线前缀命名
+
+为了方便区分实验演进，这个仓现在采用“基线前缀 + 变体名”的记录方式。
+
+- `A0`
+  - 早期纯 `one-step` continuation skeleton
+- `A1`
+  - `one-step main + light two-step auxiliary` 升级线
+- `A2`
+  - 当前正式长程基线
+  - 对应旧文档里常写的 `iter2`
+
+命名示例：
+
+- `A2-core`
+- `A2-predictor_progress`
+- `A2-progress_shape_v1`
+- `A2-local_consistency_v2`
+
+这样可以一眼看出：
+
+- 它属于哪一代基线
+- 它是在那代基线下加了什么变体
+
 ## 当前内容
 
 - `docs/plans/`
@@ -37,10 +61,11 @@
 
 当前主线更接近：
 
+- `A2-core` 长程基线
 - `full world JEPA`
 - `depth2 shared reasoning block`
-- `self_check`
-- 以 `Exp D` 为当前结构修复主线
+- `self_check_k = 2`
+- `one-step main + light two-step auxiliary`
 
 但这仍然是**研究实现**，不是已经冻结的最终正式预训练版本。
 

@@ -1199,3 +1199,66 @@
 - Predictor and parallel variants both produced nontrivial routing signals (r_t drift/trust/switch all nonzero), so the local-router mechanism is alive.
 - Neither 512-step r_t variant beat iter2 or Exp D on core kept metrics; predictor was philosophically cleaner, parallel had lower mixed self tail but larger side effects.
 - Wrote /home/kt/ai/docs/reports/Luma_rT_LocalRouter_512_Report.md and re-stated the current role of introspection stream as slow global metacognitive state, Self-JEPA anchor, exit-side evidence source, and future know-gap source.
+
+## 2026-03-28 继续：512-step one-step vs light two-step continuation A/B
+- Re-ran the current full+depth2+self_check_k=2+ExpD-style line with a clean A/B:
+  - `one-step only`: `exit_two_step_aux_weight = 0.0`
+  - `one-step + light two-step auxiliary`: `exit_two_step_aux_weight = 0.25`
+- Result:
+  - the light two-step auxiliary clearly won the current 512-step comparison
+  - mixed:
+    - one-step only: `self_tail = 0.169921875`, `rollout_tail = 0.068359375`
+    - one-step + two-step aux: `self_tail = 0.054443359375`, `rollout_tail = 0.052734375`
+  - math:
+    - `0.07421875 -> 0.0625`
+  - dialogue:
+    - `0.15625 -> 0.05859375`
+  - persona_seed:
+    - `0.3896484375 -> 0.24609375`
+  - emotion rollout regressed slightly:
+    - `0.10546875 -> 0.109375`
+- Updated interpretation:
+  - `iteration 2` still captures the stable one-step continuation-gain skeleton
+  - but the current practical baseline should move to:
+    - one-step continuation gain as the main exit target
+    - light two-step continuation auxiliary as the default helper
+- This means “一步和两步全都要” is now the preferred default framing, but only in the form:
+  - one-step main
+  - two-step auxiliary
+  - not two-step takeover
+- Wrote the dedicated comparison report:
+  - `/home/kt/ai/docs/reports/Luma_OneStep_vs_TwoStepAux_512_Report.md`
+- Added a lightweight introspection-side `uncertainty` head as a research-only variant:
+  - the head lives in the introspection stream
+  - it does not directly rewrite the exit logit
+  - it only modulates the `light two-step continuation auxiliary`
+- Ran a `512-step` uncertainty-aware two-step experiment on top of the new default baseline.
+- Result:
+  - uncertainty itself is alive (`stage1 uncertainty_mean = 0.5795`)
+  - but the current weighting is too strong and saturates bucket probes (`uncertainty_mean ~ 0.96-1.0`)
+  - all per-bucket `rollout_tail` collapsed to `0.0`, which is not a healthy improvement signal
+- Conclusion:
+  - keep `introspection uncertainty` as an exit-policy research candidate
+  - do not promote the current implementation into the default baseline
+- Wrote:
+  - `/home/kt/ai/docs/reports/Luma_Uncertainty_TwoStep_512_Report.md`
+- Followed up with three lower-fire uncertainty variants at `512-step`:
+  - `clipped uncertainty weighting`
+  - `uncertainty-as-gate`
+  - `crystal + uncertainty` low-fire blend
+- Result:
+  - none of the three restored a healthy nonzero rollout profile
+  - all still collapsed `rollout_tail` toward `0.0` across buckets
+  - the problem is therefore not just “weight too large”; direct two-step-loss weighting by uncertainty appears to be the wrong insertion point for now
+- Wrote:
+  - `/home/kt/ai/docs/reports/Luma_Uncertainty_ThreeWays_512_Report.md`
+
+- 2026-03-29: Completed 10240-step midcourse comparison across iter2 / iter9 / iter9+crystal / ExpD with python_code bucket. Longrun results favored iter2 as the most stable baseline; iter9-family flattened rollout too aggressively; ExpD preserved more dynamics but did not beat iter2. Report: docs/reports/Luma_Longrun_10240_Report.md
+
+- 2026-03-29: Re-promoted iter2 as the formal 10240-step long-run baseline and recorded the exact baseline config in docs/plans/Luma_v0.7.2_Agent_MasterPlan.md after midcourse comparison.
+
+- 2026-03-29: Added 2048-step loop-awareness comparison (none / ct_progress / predictor_progress / dual_phase). `predictor_progress` was the best balanced variant; `dual_phase` over-constrained c_t and collapsed its variance. Report: docs/reports/Luma_LoopAware_2048_Report.md
+
+- 2026-03-29: Added rollout_active_ratio / rollout_nonzero_ratio to stage2 validation and documented how to distinguish healthy rollout decline from supervision collapse.
+
+- 2026-03-29: Ran 2048-step comparison for iter2 / iter5 / iter2+predictor_progress / iter5+predictor_progress. iter5 did not justify promotion; the best new line was iter2+predictor_progress, but it still hurt dialogue/emotion/python_code enough that iter2 remains the formal long-run baseline. Report: docs/reports/Luma_Iter2_Iter5_Predictor_2048_Report.md
