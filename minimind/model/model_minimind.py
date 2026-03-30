@@ -41,7 +41,12 @@ except Exception:
 
 from model.mamba3_module import Mamba3Block, Mamba3Config
 
-FLASH_LINEAR_ATTENTION_ROOT = Path(__file__).resolve().parents[2] / "flash-linear-attention"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FLASH_LINEAR_ATTENTION_CANDIDATES = [
+    REPO_ROOT / "flash-linear-attention",
+    REPO_ROOT / "third_party" / "flash-linear-attention",
+]
+FLASH_LINEAR_ATTENTION_ROOT = next((path for path in FLASH_LINEAR_ATTENTION_CANDIDATES if path.exists()), FLASH_LINEAR_ATTENTION_CANDIDATES[0])
 FLASH_LINEAR_ATTENTION_FLA_ROOT = FLASH_LINEAR_ATTENTION_ROOT / "fla"
 
 try:
@@ -467,6 +472,7 @@ class LumaConfig(PretrainedConfig):
         self.routing_min_local_share = kwargs.get("routing_min_local_share", 0.0)
         self.routing_tier_entropy_weight = kwargs.get("routing_tier_entropy_weight", 0.0)
         self.routing_min_local_share_weight = kwargs.get("routing_min_local_share_weight", 0.0)
+        self.routing_progress_weight = kwargs.get("routing_progress_weight", 0.3)
         self.rollout_zone_weight = kwargs.get("rollout_zone_weight", 0.0)
         self.rollout_nonzero_low = kwargs.get("rollout_nonzero_low", 0.05)
         self.rollout_nonzero_high = kwargs.get("rollout_nonzero_high", 0.80)
@@ -2027,6 +2033,7 @@ class LumaReasonCore(nn.Module):
         self.routing_tier_soft_only = bool(config.routing_tier_soft_only)
         self.routing_tier_entropy_floor = float(config.routing_tier_entropy_floor)
         self.routing_min_local_share = float(config.routing_min_local_share)
+        self.routing_progress_weight = float(config.routing_progress_weight)
         self.ct_injection = CTInjection(config.c_t_dim, config.hidden_size)
         self.r_injection = nn.Linear(config.r_t_dim, config.hidden_size, bias=False) if config.enable_reasoning_state_ring else None
         self.ct_lowrank_down = nn.Linear(config.c_t_dim, config.ct_lowrank_rank, bias=False) if config.ct_modulation_mode == "lowrank_hyperbias" else None
@@ -2159,6 +2166,10 @@ class LumaReasonCore(nn.Module):
             tensor = torch.cat([tensor, pad], dim=-1)
         return tensor
 
+    def _rms_normalize_summary(self, summary: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        denom = torch.rsqrt(summary.float().pow(2).mean(dim=-1, keepdim=True) + eps)
+        return (summary.float() * denom).to(dtype=summary.dtype)
+
     def _apply_dynamics_experiment(
         self,
         h: torch.Tensor,
@@ -2172,11 +2183,12 @@ class LumaReasonCore(nn.Module):
         device, dtype = h.device, h.dtype
         mode = self.dynamics_experiment
         chunk_summary, spans = self._chunk_summaries(h)
+        chunk_summary = self._rms_normalize_summary(chunk_summary)
         num_chunks = chunk_summary.shape[1]
-        global_summary = chunk_summary.mean(dim=1)
-        recent_block = self._context_hidden(context, "recent_block_repr", bsz, hidden_size, device, dtype)
-        world_summary = self._context_hidden(context, "world_summary", bsz, hidden_size, device, dtype)
-        loop_history_summary = self._context_hidden(context, "loop_history_summary", bsz, hidden_size, device, dtype)
+        global_summary = self._rms_normalize_summary(chunk_summary.mean(dim=1))
+        recent_block = self._rms_normalize_summary(self._context_hidden(context, "recent_block_repr", bsz, hidden_size, device, dtype))
+        world_summary = self._rms_normalize_summary(self._context_hidden(context, "world_summary", bsz, hidden_size, device, dtype))
+        loop_history_summary = self._rms_normalize_summary(self._context_hidden(context, "loop_history_summary", bsz, hidden_size, device, dtype))
         scalar_ctx = self._context_scalars(context, bsz, device, dtype)
 
         is_summary_v1 = "summary_chunk_film_v1_core" in mode
@@ -2206,6 +2218,9 @@ class LumaReasonCore(nn.Module):
         block_expand = recent_block[:, None, :].expand(-1, num_chunks, -1)
         global_expand = global_summary[:, None, :].expand(-1, num_chunks, -1)
         loop_expand = loop_history_summary[:, None, :].expand(-1, num_chunks, -1)
+        progress_weight = float(self.routing_progress_weight)
+        if use_progress and progress_weight != 1.0:
+            scalar_ctx = scalar_ctx * progress_weight
         progress_expand = scalar_ctx[:, None, :].expand(-1, num_chunks, -1) if use_progress else torch.zeros((bsz, num_chunks, 3), device=device, dtype=dtype)
         third_expand = global_expand if is_hici else (loop_expand if is_memory_tier else torch.zeros_like(global_expand))
         chunk_feat = torch.cat([chunk_summary, block_expand, third_expand, c_expand, progress_expand], dim=-1)
@@ -2235,10 +2250,11 @@ class LumaReasonCore(nn.Module):
         sparse_gain = torch.tensor(sparse_gain_value, device=device, dtype=dtype)
         quarter = torch.tensor(0.25, device=device, dtype=dtype)
         half = torch.tensor(0.5, device=device, dtype=dtype)
-        beta_tanh = torch.tanh(beta_tok).clamp(-self.routing_modulation_ceiling, self.routing_modulation_ceiling)
-        gamma_tanh = torch.tanh(gamma_tok).clamp(-self.routing_modulation_ceiling, self.routing_modulation_ceiling)
+        beta_tanh = 0.1 * torch.tanh(beta_tok)
+        gamma = 1.0 + 0.1 * torch.tanh(gamma_tok)
+        gamma_delta = gamma - 1.0
         weak_dense = dense_gain * (torch.tanh(c_bias) + quarter * beta_tanh)
-        strong_summary = sparse_gain * (half * beta_tanh + half * gamma_tanh)
+        strong_summary = sparse_gain * (beta_tanh + gamma_delta)
 
         selected_chunk_mask = torch.ones((bsz, num_chunks), device=device, dtype=torch.bool)
         selected_mass = chunk_gate.new_ones((bsz,))

@@ -430,6 +430,7 @@ def build_tiny_luma_config(
     routing_min_local_share: float,
     routing_tier_entropy_weight: float,
     routing_min_local_share_weight: float,
+    routing_progress_weight: float,
     rollout_zone_weight: float,
     rollout_nonzero_low: float,
     rollout_nonzero_high: float,
@@ -524,6 +525,7 @@ def build_tiny_luma_config(
         routing_min_local_share=routing_min_local_share,
         routing_tier_entropy_weight=routing_tier_entropy_weight,
         routing_min_local_share_weight=routing_min_local_share_weight,
+        routing_progress_weight=routing_progress_weight,
         rollout_zone_weight=rollout_zone_weight,
         rollout_nonzero_low=rollout_nonzero_low,
         rollout_nonzero_high=rollout_nonzero_high,
@@ -1225,6 +1227,7 @@ def main() -> None:
     parser.add_argument("--routing-min-local-share", type=float, default=0.0)
     parser.add_argument("--routing-tier-entropy-weight", type=float, default=0.0)
     parser.add_argument("--routing-min-local-share-weight", type=float, default=0.0)
+    parser.add_argument("--routing-progress-weight", type=float, default=0.3)
     parser.add_argument("--rollout-zone-weight", type=float, default=0.0)
     parser.add_argument("--rollout-nonzero-low", type=float, default=0.05)
     parser.add_argument("--rollout-nonzero-high", type=float, default=0.80)
@@ -1352,6 +1355,7 @@ def main() -> None:
         routing_min_local_share=args.routing_min_local_share,
         routing_tier_entropy_weight=args.routing_tier_entropy_weight,
         routing_min_local_share_weight=args.routing_min_local_share_weight,
+        routing_progress_weight=args.routing_progress_weight,
         rollout_zone_weight=args.rollout_zone_weight,
         rollout_nonzero_low=args.rollout_nonzero_low,
         rollout_nonzero_high=args.rollout_nonzero_high,
@@ -1484,6 +1488,7 @@ def main() -> None:
         "routing_min_local_share": args.routing_min_local_share,
         "routing_tier_entropy_weight": args.routing_tier_entropy_weight,
         "routing_min_local_share_weight": args.routing_min_local_share_weight,
+        "routing_progress_weight": args.routing_progress_weight,
         "rollout_zone_weight": args.rollout_zone_weight,
         "rollout_nonzero_low": args.rollout_nonzero_low,
         "rollout_nonzero_high": args.rollout_nonzero_high,

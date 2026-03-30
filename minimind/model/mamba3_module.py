@@ -2,7 +2,13 @@ import torch
 from torch import nn
 from dataclasses import dataclass
 import warnings
+from pathlib import Path
+import sys
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_MAMBA_LOCAL = _REPO_ROOT / "third_party" / "mamba-official"
+if _MAMBA_LOCAL.exists() and str(_MAMBA_LOCAL) not in sys.path:
+    sys.path.insert(0, str(_MAMBA_LOCAL))
 from mamba_ssm.modules.mamba3 import Mamba3
 
 

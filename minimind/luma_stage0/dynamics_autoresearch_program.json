@@ -168,7 +168,8 @@
     "enable_progress_exit_readout": true,
     "ct_modulation_mode": "additive",
     "routing_weak_gain": 0.03,
-    "routing_strong_gain": 0.1
+    "routing_strong_gain": 0.1,
+    "routing_progress_weight": 0.3
   },
   "score_formula": {
     "direction": "lower",
