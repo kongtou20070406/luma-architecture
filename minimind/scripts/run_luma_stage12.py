@@ -31,10 +31,13 @@ HENDRYCKS_ROWS_URL = "https://datasets-server.huggingface.co/first-rows?dataset=
 ESCONV_ROWS_URL = "https://datasets-server.huggingface.co/first-rows?dataset=thu-coai%2Fesconv&config=default&split=train"
 AIME_ROWS_URL = "https://datasets-server.huggingface.co/first-rows?dataset=Maxwell-Jia%2FAIME_2024&config=default&split=train"
 MATH500_ROWS_URL = "https://datasets-server.huggingface.co/first-rows?dataset=ricdomolm%2FMATH-500&config=default&split=train"
+MBPP_ROWS_URL = "https://datasets-server.huggingface.co/first-rows?dataset=google-research-datasets%2Fmbpp&config=full&split=train"
+CHOLLET_ARC_TRAINING_LIST_URL = "https://api.github.com/repos/fchollet/ARC-AGI/contents/data/training"
 
 
 def _fetch_json(url: str) -> dict:
-    with urllib.request.urlopen(url) as resp:
+    req = urllib.request.Request(url, headers={"User-Agent": "luma-stage12-eval/1.0"})
+    with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -177,9 +180,33 @@ def load_persona_seed_texts(persona_dir: Path, max_samples: int) -> list[str]:
     return texts
 
 
-def load_python_code_texts(max_samples: int) -> list[str]:
-    """Luma treats local Python source as a dedicated code bucket so reasoning quality can be checked on executable structure, not only prose.
-    Luma 会把本地 Python 源码当成单独代码桶，这样我们测到的是可执行结构上的推理质量，而不只是自然语言。
+def load_public_python_code_texts(max_samples: int) -> list[str]:
+    """Luma uses a public Python set for the code bucket so cross-run evaluation is reproducible without private data.
+    Luma 把 code 桶切到公开 Python 数据，确保跨轮评估可复现且不依赖私有数据。
+    """
+
+    payload = _fetch_json(MBPP_ROWS_URL)
+    texts: list[str] = []
+    for row in payload.get("rows", [])[: max_samples * 2]:
+        item = row.get("row", {})
+        prompt = str(item.get("text", "")).strip()
+        code = str(item.get("code", "")).strip()
+        tests = item.get("test_list", []) or []
+        if not code:
+            continue
+        test_hint = ""
+        if tests:
+            test_hint = "\n# tests:\n" + "\n".join(str(x).strip() for x in tests[:3] if str(x).strip())
+        record = f"# public_dataset: google-research-datasets/mbpp\n# prompt: {prompt}\n{code}{test_hint}"
+        texts.append(record)
+        if len(texts) >= max_samples:
+            break
+    return texts
+
+
+def load_local_python_code_texts(max_samples: int) -> list[str]:
+    """Luma can still read local Python files when explicitly requested for private/internal diagnostics.
+    Luma 仅在显式要求时才读取本地 Python 代码，用于私有内部诊断。
     """
 
     roots = [ROOT, ROOT.parent / "parameter-golf"]
@@ -214,6 +241,58 @@ def load_python_code_texts(max_samples: int) -> list[str]:
     return texts
 
 
+def load_python_code_texts(max_samples: int, source: str = "public_mbpp") -> list[str]:
+    if source == "local_repo":
+        return load_local_python_code_texts(max_samples)
+    return load_public_python_code_texts(max_samples)
+
+
+def _grid_to_text(grid: list[list[int]]) -> str:
+    return "\n".join(" ".join(str(cell) for cell in row) for row in grid)
+
+
+def load_chollet_arc_agi_texts(max_samples: int) -> list[str]:
+    """Luma uses Chollet ARC-AGI tasks as text-linearized abstraction puzzles for bucket-level intelligence probing.
+    Luma 使用 Chollet ARC-AGI 任务的文本线性化版本，作为抽象推理桶进行智能水平探测。
+    """
+
+    listing = _fetch_json(CHOLLET_ARC_TRAINING_LIST_URL)
+    texts: list[str] = []
+    for item in listing:
+        download_url = str(item.get("download_url", "")).strip()
+        task_id = str(item.get("name", "")).replace(".json", "").strip()
+        if not download_url:
+            continue
+        try:
+            task = _fetch_json(download_url)
+        except Exception:
+            continue
+        train_pairs = task.get("train", []) or []
+        test_pairs = task.get("test", []) or []
+        if not train_pairs or not test_pairs:
+            continue
+        prompt_lines = [f"# benchmark: Chollet ARC-AGI", f"# task_id: {task_id}", "User: Infer the transformation from training pairs."]
+        for idx, pair in enumerate(train_pairs[:3], start=1):
+            inp = pair.get("input", [])
+            out = pair.get("output", [])
+            if not inp or not out:
+                continue
+            prompt_lines.append(f"Train-{idx} input:\n{_grid_to_text(inp)}")
+            prompt_lines.append(f"Train-{idx} output:\n{_grid_to_text(out)}")
+        test = test_pairs[0]
+        test_in = test.get("input", [])
+        test_out = test.get("output", [])
+        if not test_in or not test_out:
+            continue
+        prompt_lines.append(f"Test input:\n{_grid_to_text(test_in)}")
+        prompt_lines.append("Assistant: Let's reason carefully about the abstract grid transformation.")
+        prompt_lines.append(f"Answer grid:\n{_grid_to_text(test_out)}")
+        texts.append("\n".join(prompt_lines))
+        if len(texts) >= max_samples:
+            break
+    return texts
+
+
 def build_sample_groups(
     tokenizer: AutoTokenizer,
     fixture_path: Path,
@@ -222,6 +301,8 @@ def build_sample_groups(
     persona_dir: Path | None = None,
     enable_persona_seed: bool = False,
     enable_python_code: bool = False,
+    python_code_source: str = "public_mbpp",
+    enable_arc_agi: bool = False,
 ) -> dict[str, list[torch.Tensor]]:
     payload = json.loads(fixture_path.read_text(encoding="utf-8"))
     groups: dict[str, list[str]] = {
@@ -256,7 +337,7 @@ def build_sample_groups(
                     mixed.append(f"{payload['emotion'][idx]}\n\n{persona_seed[idx]}")
                     mixed.append(f"{persona_seed[idx]}\n\n{payload['emotion'][idx]}")
     if enable_python_code:
-        python_code = load_python_code_texts(max_samples)
+        python_code = load_python_code_texts(max_samples, source=python_code_source)
         if python_code:
             groups["python_code"] = python_code
             if payload.get("math"):
@@ -265,6 +346,11 @@ def build_sample_groups(
             if payload.get("dialogue"):
                 for idx in range(min(len(python_code), len(payload.get("dialogue", [])))):
                     mixed.append(f"{payload['dialogue'][idx]}\n\n{python_code[idx]}")
+    if enable_arc_agi:
+        arc_agi = load_chollet_arc_agi_texts(max_samples)
+        if not arc_agi:
+            raise RuntimeError("ARC-AGI enabled but no Chollet ARC-AGI samples were loaded.")
+        groups["arc_agi"] = arc_agi
     groups["mixed"] = mixed
 
     encoded = {name: _encode_windows(tokenizer, texts, seq_len, max_samples) for name, texts in groups.items()}
@@ -325,6 +411,35 @@ def build_tiny_luma_config(
     self_rollout_supervision_horizon: int,
     self_rollout_weighting_mode: str,
     self_feature_span_mask_ratio: float,
+    dynamics_experiment: str,
+    routing_chunk_size: int,
+    routing_topk_blocks: int,
+    routing_topk_tokens: int,
+    routing_top_p_coarse: float,
+    routing_top_p_fine: float,
+    routing_budget_min: float,
+    routing_budget_max: float,
+    routing_weak_gain: float,
+    routing_strong_gain: float,
+    routing_local_floor: float,
+    routing_modulation_floor: float,
+    routing_modulation_ceiling: float,
+    routing_world_summary_cap: float,
+    routing_tier_soft_only: bool,
+    routing_tier_entropy_floor: float,
+    routing_min_local_share: float,
+    routing_tier_entropy_weight: float,
+    routing_min_local_share_weight: float,
+    rollout_zone_weight: float,
+    rollout_nonzero_low: float,
+    rollout_nonzero_high: float,
+    rollout_active_low: float,
+    rollout_active_high: float,
+    rollout_future_var_low: float,
+    rollout_future_var_high: float,
+    trajectory_vitality_weight: float,
+    trajectory_c_t_drift_floor: float,
+    trajectory_world_drift_floor: float,
 ) -> LumaConfig:
     reason_loops = reason_loops or max(4, rollout_steps * 2)
     base_intermediate = 256
@@ -390,6 +505,35 @@ def build_tiny_luma_config(
         self_rollout_supervision_horizon=self_rollout_supervision_horizon,
         self_rollout_weighting_mode=self_rollout_weighting_mode,
         self_feature_span_mask_ratio=self_feature_span_mask_ratio,
+        dynamics_experiment=dynamics_experiment,
+        routing_chunk_size=routing_chunk_size,
+        routing_topk_blocks=routing_topk_blocks,
+        routing_topk_tokens=routing_topk_tokens,
+        routing_top_p_coarse=routing_top_p_coarse,
+        routing_top_p_fine=routing_top_p_fine,
+        routing_budget_min=routing_budget_min,
+        routing_budget_max=routing_budget_max,
+        routing_weak_gain=routing_weak_gain,
+        routing_strong_gain=routing_strong_gain,
+        routing_local_floor=routing_local_floor,
+        routing_modulation_floor=routing_modulation_floor,
+        routing_modulation_ceiling=routing_modulation_ceiling,
+        routing_world_summary_cap=routing_world_summary_cap,
+        routing_tier_soft_only=routing_tier_soft_only,
+        routing_tier_entropy_floor=routing_tier_entropy_floor,
+        routing_min_local_share=routing_min_local_share,
+        routing_tier_entropy_weight=routing_tier_entropy_weight,
+        routing_min_local_share_weight=routing_min_local_share_weight,
+        rollout_zone_weight=rollout_zone_weight,
+        rollout_nonzero_low=rollout_nonzero_low,
+        rollout_nonzero_high=rollout_nonzero_high,
+        rollout_active_low=rollout_active_low,
+        rollout_active_high=rollout_active_high,
+        rollout_future_var_low=rollout_future_var_low,
+        rollout_future_var_high=rollout_future_var_high,
+        trajectory_vitality_weight=trajectory_vitality_weight,
+        trajectory_c_t_drift_floor=trajectory_c_t_drift_floor,
+        trajectory_world_drift_floor=trajectory_world_drift_floor,
         mamba_d_state=32,
         mamba_expand=2,
         mamba_headdim=32,
@@ -411,6 +555,13 @@ def metric(path: Path, event: str, ok: bool, value: float, note: str) -> None:
             timestamp=now(),
         ),
     )
+
+
+def tail_float(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    width = max(1, min(2, len(values)))
+    return float(sum(values[-width:]) / width)
 
 
 def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device: torch.device, metrics_path: Path) -> dict:
@@ -445,13 +596,23 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     state_variances = []
     ct_drifts = []
     world_summary_drifts = []
+    c_t_delta_norm_means = []
+    c_t_delta_norm_stds = []
+    pred_delta_c_cos_adjacent_means = []
     math_lane_scores = []
     math_summary_gates = []
     r_t_drifts = []
     r_t_trusts = []
-    uncertainties = []
-    uncertainties = []
-    uncertainties = []
+    progress_next_values = []
+    progress_trend_values = []
+    progress_plateau_values = []
+    progress_rollout_pairs = []
+    progress_exit_pairs = []
+    exit_invalid_counts = []
+    exit_clamped_ratios = []
+    bernoulli_invalid_prevented = []
+    nan_to_num_triggers = []
+    modulation_stats: dict[str, list[float]] = {}
     r_t_switches = []
     with torch.no_grad():
         for sample in samples:
@@ -503,6 +664,13 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
                 for prev_summary, next_summary in zip(aux_on["world_summary_history"][:-1], aux_on["world_summary_history"][1:]):
                     drifts.append((next_summary.float() - prev_summary.float()).norm(dim=-1).mean())
                 world_summary_drifts.append(torch.stack(drifts).mean())
+            if aux_on.get("c_t_delta_norm_history"):
+                delta_norm_hist = torch.stack(aux_on["c_t_delta_norm_history"]).float()
+                c_t_delta_norm_means.append(delta_norm_hist.mean())
+                c_t_delta_norm_stds.append(delta_norm_hist.std(unbiased=False))
+            if aux_on.get("pred_delta_c_cos_adjacent_history"):
+                pred_cos_hist = torch.stack(aux_on["pred_delta_c_cos_adjacent_history"]).float()
+                pred_delta_c_cos_adjacent_means.append(pred_cos_hist.mean())
             if aux_on.get("math_lane_score_history"):
                 math_lane_scores.append(torch.stack(aux_on["math_lane_score_history"]).float().mean())
             if aux_on.get("math_summary_gate_history"):
@@ -516,6 +684,31 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
                 for prev_r, next_r in zip(aux_on["r_t_history"][:-1], aux_on["r_t_history"][1:]):
                     drifts.append((next_r.float() - prev_r.float()).norm(dim=-1).mean())
                 r_t_drifts.append(torch.stack(drifts).mean())
+            if aux_on.get("progress_next_history"):
+                next_hist = torch.stack(aux_on["progress_next_history"]).float()
+                trend_hist = torch.stack(aux_on.get("progress_trend_history", [])).float() if aux_on.get("progress_trend_history") else torch.zeros_like(next_hist)
+                plateau_hist = torch.stack(aux_on.get("progress_plateau_history", [])).float() if aux_on.get("progress_plateau_history") else torch.zeros_like(next_hist)
+                progress_next_values.append(next_hist.mean())
+                progress_trend_values.append(trend_hist.mean())
+                progress_plateau_values.append(plateau_hist.mean())
+                if aux_on.get("rollout_error_history"):
+                    rollout_mean = torch.stack(aux_on["rollout_error_history"]).float().mean()
+                    progress_rollout_pairs.append((next_hist.mean(), rollout_mean))
+                if aux_on.get("exit_score_history"):
+                    exit_mean = torch.stack(aux_on["exit_score_history"]).float().mean()
+                    progress_exit_pairs.append((next_hist.mean(), exit_mean))
+            if aux_on.get("exit_score_preclamp_nonfinite_history"):
+                exit_invalid_counts.append(torch.stack(aux_on["exit_score_preclamp_nonfinite_history"]).float().sum())
+            if aux_on.get("exit_score_postfix_clamped_ratio_history"):
+                exit_clamped_ratios.append(torch.stack(aux_on["exit_score_postfix_clamped_ratio_history"]).float().mean())
+            if aux_on.get("bernoulli_invalid_prevented_history"):
+                bernoulli_invalid_prevented.append(torch.stack(aux_on["bernoulli_invalid_prevented_history"]).float().sum())
+            if aux_on.get("nan_to_num_trigger_history"):
+                nan_to_num_triggers.append(torch.stack(aux_on["nan_to_num_trigger_history"]).float().sum())
+            if aux_on.get("dynamics_modulation_summary"):
+                for key, value in aux_on["dynamics_modulation_summary"].items():
+                    tensor = value if isinstance(value, torch.Tensor) else torch.tensor(float(value))
+                    modulation_stats.setdefault(key, []).append(float(tensor.float().mean().item()))
 
             model.model.exit_controller.use_sampling = True
             model.model.exit_controller.sampling_temperature = 0.75
@@ -538,11 +731,46 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     intermediate_state_variance = torch.stack(state_variances).mean().item() if state_variances else 0.0
     c_t_drift_mean = torch.stack(ct_drifts).mean().item() if ct_drifts else 0.0
     world_summary_drift_mean = torch.stack(world_summary_drifts).mean().item() if world_summary_drifts else 0.0
+    world_summary_drift_std = torch.stack(world_summary_drifts).std(unbiased=False).item() if len(world_summary_drifts) > 1 else 0.0
+    c_t_delta_norm_mean = torch.stack(c_t_delta_norm_means).mean().item() if c_t_delta_norm_means else 0.0
+    c_t_delta_norm_std = torch.stack(c_t_delta_norm_stds).mean().item() if c_t_delta_norm_stds else 0.0
+    pred_delta_c_cos_adjacent = torch.stack(pred_delta_c_cos_adjacent_means).mean().item() if pred_delta_c_cos_adjacent_means else 0.0
     math_lane_score_mean = torch.stack(math_lane_scores).mean().item() if math_lane_scores else 0.0
     math_summary_gate_mean = torch.stack(math_summary_gates).mean().item() if math_summary_gates else 0.0
     r_t_drift_mean = torch.stack(r_t_drifts).mean().item() if r_t_drifts else 0.0
     r_t_trust_mean = torch.stack(r_t_trusts).mean().item() if r_t_trusts else 0.0
     r_t_switch_mean = torch.stack(r_t_switches).mean().item() if r_t_switches else 0.0
+    progress_next_mean = torch.stack(progress_next_values).mean().item() if progress_next_values else 0.0
+    progress_next_std = torch.stack(progress_next_values).std(unbiased=False).item() if len(progress_next_values) > 1 else 0.0
+    progress_trend_mean = torch.stack(progress_trend_values).mean().item() if progress_trend_values else 0.0
+    progress_trend_std = torch.stack(progress_trend_values).std(unbiased=False).item() if len(progress_trend_values) > 1 else 0.0
+    progress_plateau_mean = torch.stack(progress_plateau_values).mean().item() if progress_plateau_values else 0.0
+    progress_plateau_std = torch.stack(progress_plateau_values).std(unbiased=False).item() if len(progress_plateau_values) > 1 else 0.0
+    exit_invalid_count = torch.stack(exit_invalid_counts).sum().item() if exit_invalid_counts else 0.0
+    exit_clamped_ratio = torch.stack(exit_clamped_ratios).mean().item() if exit_clamped_ratios else 0.0
+    bernoulli_invalid_count = torch.stack(bernoulli_invalid_prevented).sum().item() if bernoulli_invalid_prevented else 0.0
+    nan_to_num_count = torch.stack(nan_to_num_triggers).sum().item() if nan_to_num_triggers else 0.0
+
+    def _corr(pairs: list[tuple[torch.Tensor, torch.Tensor]]) -> float:
+        if len(pairs) < 2:
+            return 0.0
+        x = torch.stack([item[0].float() for item in pairs])
+        y = torch.stack([item[1].float() for item in pairs])
+        x = x - x.mean()
+        y = y - y.mean()
+        denom = torch.sqrt((x.pow(2).mean() * y.pow(2).mean()).clamp_min(1e-8))
+        return float((x.mul(y).mean() / denom).item())
+
+    progress_vs_rollout_corr = _corr(progress_rollout_pairs)
+    progress_vs_exit_corr = _corr(progress_exit_pairs)
+    modulation_summary = {
+        key: {
+            "mean": float(sum(values) / len(values)),
+            "std": float(torch.tensor(values).std(unbiased=False).item()) if len(values) > 1 else 0.0,
+        }
+        for key, values in modulation_stats.items()
+        if values
+    }
 
     metric(metrics_path, "stage1_ct_kl", mean_kl > 1e-6, mean_kl, "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL")
     metric(metrics_path, "stage1_ct_hidden_delta", mean_hidden_delta > 1e-5, mean_hidden_delta, "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移")
@@ -559,11 +787,17 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     metric(metrics_path, "stage1_intermediate_state_variance", True, intermediate_state_variance, "Intermediate state variance / 中间状态方差")
     metric(metrics_path, "stage1_c_t_drift_mean", True, c_t_drift_mean, "Mean c_t drift / c_t 漂移均值")
     metric(metrics_path, "stage1_world_summary_drift_mean", True, world_summary_drift_mean, "Mean world summary drift / world summary 漂移均值")
+    metric(metrics_path, "stage1_c_t_delta_norm_mean", True, c_t_delta_norm_mean, "Mean c_t delta norm / c_t 相邻步差分范数均值")
+    metric(metrics_path, "stage1_pred_delta_c_cos_adjacent", True, pred_delta_c_cos_adjacent, "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值")
     metric(metrics_path, "stage1_math_lane_score_mean", True, math_lane_score_mean, "Mean math adapter lane score / math adapter lane 分数均值")
     metric(metrics_path, "stage1_math_summary_gate_mean", True, math_summary_gate_mean, "Mean math summary gate / math summary gate 均值")
     metric(metrics_path, "stage1_r_t_drift_mean", True, r_t_drift_mean, "Mean r_t drift / r_t 漂移均值")
     metric(metrics_path, "stage1_r_t_trust_mean", True, r_t_trust_mean, "Mean r_t trust / r_t 信任均值")
     metric(metrics_path, "stage1_r_t_switch_mean", True, r_t_switch_mean, "Mean c_t/r_t switch gate / c_t/r_t 切换门均值")
+    metric(metrics_path, "stage1_progress_vs_rollout_corr", True, progress_vs_rollout_corr, "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性")
+    metric(metrics_path, "stage1_progress_vs_exit_corr", True, progress_vs_exit_corr, "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性")
+    metric(metrics_path, "stage1_exit_invalid_count", exit_invalid_count <= 0.0, exit_invalid_count, "Invalid exit-score count should stay zero / exit 非有限计数应为零")
+    metric(metrics_path, "stage1_nan_to_num_trigger_count", True, nan_to_num_count, "nan_to_num trigger count / nan_to_num 触发次数")
 
     return {
         "mean_kl": mean_kl,
@@ -581,11 +815,28 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         "intermediate_state_variance": intermediate_state_variance,
         "c_t_drift_mean": c_t_drift_mean,
         "world_summary_drift_mean": world_summary_drift_mean,
+        "world_summary_drift_std": world_summary_drift_std,
+        "c_t_delta_norm_mean": c_t_delta_norm_mean,
+        "c_t_delta_norm_std": c_t_delta_norm_std,
+        "pred_delta_c_cos_adjacent": pred_delta_c_cos_adjacent,
         "math_lane_score_mean": math_lane_score_mean,
         "math_summary_gate_mean": math_summary_gate_mean,
         "r_t_drift_mean": r_t_drift_mean,
         "r_t_trust_mean": r_t_trust_mean,
         "r_t_switch_mean": r_t_switch_mean,
+        "progress_next_mean": progress_next_mean,
+        "progress_next_std": progress_next_std,
+        "progress_trend_mean": progress_trend_mean,
+        "progress_trend_std": progress_trend_std,
+        "progress_plateau_mean": progress_plateau_mean,
+        "progress_plateau_std": progress_plateau_std,
+        "progress_vs_rollout_corr": progress_vs_rollout_corr,
+        "progress_vs_exit_corr": progress_vs_exit_corr,
+        "exit_invalid_count": exit_invalid_count,
+        "exit_score_postfix_clamped_ratio": exit_clamped_ratio,
+        "bernoulli_invalid_prevented_count": bernoulli_invalid_count,
+        "nan_to_num_trigger_count": nan_to_num_count,
+        "modulation_summary": modulation_summary,
     }
 
 
@@ -612,6 +863,12 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     rollout_active_flags = []
     rollout_nonzero_flags = []
     delta_norms = []
+    rollout_zone_losses = []
+    routing_entropy_losses = []
+    trajectory_vitality_losses = []
+    rollout_zone_losses = []
+    routing_entropy_losses = []
+    trajectory_vitality_losses = []
     aborted_on_nonfinite = False
 
     for step in range(steps):
@@ -623,6 +880,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         self_tensor = aux["self_jepa_loss"].detach()
         rollout_tensor = aux["self_rollout_loss"].detach()
         target_delta = aux["target_delta_c"].detach()
+        rollout_zone_tensor = aux.get("rollout_activity_zone_loss", torch.zeros_like(loss.detach())).detach()
+        routing_entropy_tensor = aux.get("routing_entropy_loss", torch.zeros_like(loss.detach())).detach()
+        trajectory_vitality_tensor = aux.get("trajectory_vitality_loss", torch.zeros_like(loss.detach())).detach()
         finite_ok = bool(
             torch.isfinite(loss.detach()).item()
             and torch.isfinite(self_tensor).item()
@@ -636,6 +896,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
             rollout_active_flags.append(1.0 if aux.get("rollout_error_history") else 0.0)
             rollout_nonzero_flags.append(0.0)
             delta_norms.append(float("nan"))
+            rollout_zone_losses.append(float("nan"))
+            routing_entropy_losses.append(float("nan"))
+            trajectory_vitality_losses.append(float("nan"))
             aborted_on_nonfinite = True
             break
         loss.backward()
@@ -649,6 +912,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         rollout_active_flags.append(1.0 if aux.get("rollout_error_history") else 0.0)
         rollout_nonzero_flags.append(1.0 if abs(rollout_value) > 1e-12 else 0.0)
         delta_norms.append(float(target_delta.norm(dim=-1).mean().detach()))
+        rollout_zone_losses.append(float(rollout_zone_tensor))
+        routing_entropy_losses.append(float(routing_entropy_tensor))
+        trajectory_vitality_losses.append(float(trajectory_vitality_tensor))
 
     head = sum(self_losses[: max(1, min(2, len(self_losses)))]) / max(1, min(2, len(self_losses)))
     tail = sum(self_losses[-max(1, min(2, len(self_losses))):]) / max(1, min(2, len(self_losses)))
@@ -666,6 +932,15 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     metric(metrics_path, "stage2_rollout_nonzero_ratio", True, rollout_nonzero_ratio, "Fraction of non-zero rollout losses / 非零 rollout 损失占比")
     metric(metrics_path, "stage2_delta_norm", mean_delta_norm > 1e-5, mean_delta_norm, "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零")
     metric(metrics_path, "stage2_nonfinite_abort", not aborted_on_nonfinite, 1.0 if aborted_on_nonfinite else 0.0, "Stage2 should avoid non-finite aborts / Stage2 不应因非有限值中止")
+    finite_zone = [value for value in rollout_zone_losses if math.isfinite(value)]
+    finite_entropy = [value for value in routing_entropy_losses if math.isfinite(value)]
+    finite_vitality = [value for value in trajectory_vitality_losses if math.isfinite(value)]
+    zone_tail = tail_float(finite_zone)
+    entropy_tail = tail_float(finite_entropy)
+    vitality_tail = tail_float(finite_vitality)
+    metric(metrics_path, "stage2_rollout_zone_loss_tail", True, zone_tail, "Tail rollout zone loss / rollout 活性区间损失尾值")
+    metric(metrics_path, "stage2_routing_entropy_loss_tail", True, entropy_tail, "Tail routing entropy loss / routing 熵损失尾值")
+    metric(metrics_path, "stage2_trajectory_vitality_loss_tail", True, vitality_tail, "Tail trajectory vitality loss / 轨迹活性损失尾值")
 
     return {
         "losses": losses,
@@ -678,6 +953,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         "self_loss_tail": tail,
         "self_rollout_head": rollout_head,
         "self_rollout_tail": rollout_tail,
+        "rollout_zone_loss_tail": zone_tail,
+        "routing_entropy_loss_tail": entropy_tail,
+        "trajectory_vitality_loss_tail": vitality_tail,
         "nonfinite_abort": aborted_on_nonfinite,
     }
 
@@ -722,6 +1000,9 @@ def bucket_probe_from_mixed_model(
     rollout_active_flags = []
     rollout_nonzero_flags = []
     delta_norms = []
+    rollout_zone_losses = []
+    routing_entropy_losses = []
+    trajectory_vitality_losses = []
     surprises = []
     state_variances = []
     ct_drifts = []
@@ -731,6 +1012,12 @@ def bucket_probe_from_mixed_model(
     r_t_drifts = []
     r_t_trusts = []
     uncertainties = []
+    progress_next_values = []
+    progress_trend_values = []
+    progress_plateau_values = []
+    exit_invalid_counts = []
+    nan_to_num_triggers = []
+    modulation_stats: dict[str, list[float]] = {}
     with torch.no_grad():
         for sample in samples:
             batch = sample.unsqueeze(0).to(device)
@@ -743,6 +1030,9 @@ def bucket_probe_from_mixed_model(
             rollout_active_flags.append(1.0 if aux.get("rollout_error_history") else 0.0)
             rollout_nonzero_flags.append(1.0 if abs(rollout_value) > 1e-12 else 0.0)
             delta_norms.append(float(aux["target_delta_c"].norm(dim=-1).mean().detach()))
+            rollout_zone_losses.append(float(aux.get("rollout_activity_zone_loss", torch.zeros((), device=device)).detach()))
+            routing_entropy_losses.append(float(aux.get("routing_entropy_loss", torch.zeros((), device=device)).detach()))
+            trajectory_vitality_losses.append(float(aux.get("trajectory_vitality_loss", torch.zeros((), device=device)).detach()))
             if aux.get("world_surprise_history"):
                 surprises.append(float(torch.stack(aux["world_surprise_history"]).float().mean().detach()))
             if aux.get("uncertainty_history"):
@@ -760,6 +1050,20 @@ def bucket_probe_from_mixed_model(
                 for prev_summary, next_summary in zip(aux["world_summary_history"][:-1], aux["world_summary_history"][1:]):
                     drifts.append((next_summary.float() - prev_summary.float()).norm(dim=-1).mean())
                 world_summary_drifts.append(float(torch.stack(drifts).mean().detach()))
+            if aux.get("progress_next_history"):
+                progress_next_values.append(float(torch.stack(aux["progress_next_history"]).float().mean().detach()))
+            if aux.get("progress_trend_history"):
+                progress_trend_values.append(float(torch.stack(aux["progress_trend_history"]).float().mean().detach()))
+            if aux.get("progress_plateau_history"):
+                progress_plateau_values.append(float(torch.stack(aux["progress_plateau_history"]).float().mean().detach()))
+            if aux.get("exit_score_preclamp_nonfinite_history"):
+                exit_invalid_counts.append(float(torch.stack(aux["exit_score_preclamp_nonfinite_history"]).float().sum().detach()))
+            if aux.get("nan_to_num_trigger_history"):
+                nan_to_num_triggers.append(float(torch.stack(aux["nan_to_num_trigger_history"]).float().sum().detach()))
+            if aux.get("dynamics_modulation_summary"):
+                for key, value in aux["dynamics_modulation_summary"].items():
+                    tensor = value if isinstance(value, torch.Tensor) else torch.tensor(float(value))
+                    modulation_stats.setdefault(key, []).append(float(tensor.float().mean().item()))
 
     def _edge_mean(values: list[float]) -> tuple[float, float]:
         if not values:
@@ -779,6 +1083,19 @@ def bucket_probe_from_mixed_model(
     mean_ct_drift = sum(ct_drifts) / len(ct_drifts) if ct_drifts else 0.0
     mean_world_summary_drift = sum(world_summary_drifts) / len(world_summary_drifts) if world_summary_drifts else 0.0
     mean_uncertainty = sum(uncertainties) / len(uncertainties) if uncertainties else 0.0
+    progress_next_mean = sum(progress_next_values) / len(progress_next_values) if progress_next_values else 0.0
+    progress_trend_mean = sum(progress_trend_values) / len(progress_trend_values) if progress_trend_values else 0.0
+    progress_plateau_mean = sum(progress_plateau_values) / len(progress_plateau_values) if progress_plateau_values else 0.0
+    exit_invalid_count = sum(exit_invalid_counts) if exit_invalid_counts else 0.0
+    nan_to_num_count = sum(nan_to_num_triggers) if nan_to_num_triggers else 0.0
+    modulation_summary = {
+        key: {
+            "mean": float(sum(values) / len(values)),
+            "std": float(torch.tensor(values).std(unbiased=False).item()) if len(values) > 1 else 0.0,
+        }
+        for key, values in modulation_stats.items()
+        if values
+    }
 
     stage2_probe = {
         "losses": losses,
@@ -791,11 +1108,20 @@ def bucket_probe_from_mixed_model(
         "self_loss_tail": self_tail,
         "self_rollout_head": rollout_head,
         "self_rollout_tail": rollout_tail,
+        "rollout_zone_loss_tail": tail_float([x for x in rollout_zone_losses if math.isfinite(x)]),
+        "routing_entropy_loss_tail": tail_float([x for x in routing_entropy_losses if math.isfinite(x)]),
+        "trajectory_vitality_loss_tail": tail_float([x for x in trajectory_vitality_losses if math.isfinite(x)]),
         "world_surprise_mean": mean_surprise,
         "intermediate_state_variance": mean_state_variance,
         "c_t_drift_mean": mean_ct_drift,
         "world_summary_drift_mean": mean_world_summary_drift,
         "uncertainty_mean": mean_uncertainty,
+        "progress_next_mean": progress_next_mean,
+        "progress_trend_mean": progress_trend_mean,
+        "progress_plateau_mean": progress_plateau_mean,
+        "exit_invalid_count": exit_invalid_count,
+        "nan_to_num_trigger_count": nan_to_num_count,
+        "modulation_summary": modulation_summary,
         "probe_from_mixed_model": True,
     }
 
@@ -817,6 +1143,8 @@ def main() -> None:
     parser.add_argument("--metrics-out", type=str, default=str(ROOT / "artifacts" / "stage0_metrics.jsonl"))
     parser.add_argument("--json-out", type=str, default=str(ROOT / "artifacts" / "stage12_report.json"))
     parser.add_argument("--candidate-name", type=str, default="")
+    parser.add_argument("--load-checkpoint", type=str, default="")
+    parser.add_argument("--save-checkpoint", type=str, default="")
     parser.add_argument(
         "--fixture-mode",
         choices=[
@@ -878,12 +1206,43 @@ def main() -> None:
     parser.add_argument("--self-rollout-supervision-horizon", type=int, default=0)
     parser.add_argument("--self-rollout-weighting-mode", choices=["legacy", "near3"], default="legacy")
     parser.add_argument("--self-feature-span-mask-ratio", type=float, default=0.0)
+    parser.add_argument("--dynamics-experiment", type=str, default="")
+    parser.add_argument("--routing-chunk-size", type=int, default=32)
+    parser.add_argument("--routing-topk-blocks", type=int, default=2)
+    parser.add_argument("--routing-topk-tokens", type=int, default=32)
+    parser.add_argument("--routing-top-p-coarse", type=float, default=0.50)
+    parser.add_argument("--routing-top-p-fine", type=float, default=0.25)
+    parser.add_argument("--routing-budget-min", type=float, default=0.10)
+    parser.add_argument("--routing-budget-max", type=float, default=0.60)
+    parser.add_argument("--routing-weak-gain", type=float, default=0.03)
+    parser.add_argument("--routing-strong-gain", type=float, default=0.10)
+    parser.add_argument("--routing-local-floor", type=float, default=0.0)
+    parser.add_argument("--routing-modulation-floor", type=float, default=0.0)
+    parser.add_argument("--routing-modulation-ceiling", type=float, default=1.0)
+    parser.add_argument("--routing-world-summary-cap", type=float, default=1.0)
+    parser.add_argument("--routing-tier-soft-only", action="store_true")
+    parser.add_argument("--routing-tier-entropy-floor", type=float, default=0.0)
+    parser.add_argument("--routing-min-local-share", type=float, default=0.0)
+    parser.add_argument("--routing-tier-entropy-weight", type=float, default=0.0)
+    parser.add_argument("--routing-min-local-share-weight", type=float, default=0.0)
+    parser.add_argument("--rollout-zone-weight", type=float, default=0.0)
+    parser.add_argument("--rollout-nonzero-low", type=float, default=0.05)
+    parser.add_argument("--rollout-nonzero-high", type=float, default=0.80)
+    parser.add_argument("--rollout-active-low", type=float, default=0.05)
+    parser.add_argument("--rollout-active-high", type=float, default=0.90)
+    parser.add_argument("--rollout-future-var-low", type=float, default=1e-6)
+    parser.add_argument("--rollout-future-var-high", type=float, default=0.50)
+    parser.add_argument("--trajectory-vitality-weight", type=float, default=0.0)
+    parser.add_argument("--trajectory-c-t-drift-floor", type=float, default=0.02)
+    parser.add_argument("--trajectory-world-drift-floor", type=float, default=0.01)
     parser.add_argument("--math-probe-rollout-steps", type=int, default=0)
     parser.add_argument("--math-probe-reason-loops", type=int, default=0)
     parser.add_argument("--math-probe-score-threshold", type=float, default=0.0)
     parser.add_argument("--math-probe-min-loops", type=int, default=0)
     parser.add_argument("--enable-persona-seed", action="store_true")
     parser.add_argument("--enable-python-code", action="store_true")
+    parser.add_argument("--python-code-source", choices=["public_mbpp", "local_repo"], default="public_mbpp")
+    parser.add_argument("--enable-arc-agi", action="store_true")
     parser.add_argument("--persona-dir", type=str, default=str(Path("/home/kt/ai/luma_dataset")))
     args = parser.parse_args()
 
@@ -919,6 +1278,8 @@ def main() -> None:
         persona_dir=Path(args.persona_dir),
         enable_persona_seed=args.enable_persona_seed,
         enable_python_code=args.enable_python_code,
+        python_code_source=args.python_code_source,
+        enable_arc_agi=args.enable_arc_agi,
     )
     mixed_samples = sample_groups["mixed"]
     config = build_tiny_luma_config(
@@ -972,15 +1333,70 @@ def main() -> None:
         self_rollout_supervision_horizon=args.self_rollout_supervision_horizon,
         self_rollout_weighting_mode=args.self_rollout_weighting_mode,
         self_feature_span_mask_ratio=args.self_feature_span_mask_ratio,
+        dynamics_experiment=args.dynamics_experiment,
+        routing_chunk_size=args.routing_chunk_size,
+        routing_topk_blocks=args.routing_topk_blocks,
+        routing_topk_tokens=args.routing_topk_tokens,
+        routing_top_p_coarse=args.routing_top_p_coarse,
+        routing_top_p_fine=args.routing_top_p_fine,
+        routing_budget_min=args.routing_budget_min,
+        routing_budget_max=args.routing_budget_max,
+        routing_weak_gain=args.routing_weak_gain,
+        routing_strong_gain=args.routing_strong_gain,
+        routing_local_floor=args.routing_local_floor,
+        routing_modulation_floor=args.routing_modulation_floor,
+        routing_modulation_ceiling=args.routing_modulation_ceiling,
+        routing_world_summary_cap=args.routing_world_summary_cap,
+        routing_tier_soft_only=args.routing_tier_soft_only,
+        routing_tier_entropy_floor=args.routing_tier_entropy_floor,
+        routing_min_local_share=args.routing_min_local_share,
+        routing_tier_entropy_weight=args.routing_tier_entropy_weight,
+        routing_min_local_share_weight=args.routing_min_local_share_weight,
+        rollout_zone_weight=args.rollout_zone_weight,
+        rollout_nonzero_low=args.rollout_nonzero_low,
+        rollout_nonzero_high=args.rollout_nonzero_high,
+        rollout_active_low=args.rollout_active_low,
+        rollout_active_high=args.rollout_active_high,
+        rollout_future_var_low=args.rollout_future_var_low,
+        rollout_future_var_high=args.rollout_future_var_high,
+        trajectory_vitality_weight=args.trajectory_vitality_weight,
+        trajectory_c_t_drift_floor=args.trajectory_c_t_drift_floor,
+        trajectory_world_drift_floor=args.trajectory_world_drift_floor,
     )
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     model = LumaForCausalLM(config).to(device=device, dtype=dtype)
-    base_state = copy.deepcopy(model.state_dict())
+    loaded_checkpoint_meta = None
+    if args.load_checkpoint:
+        checkpoint_path = Path(args.load_checkpoint)
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        state_dict = checkpoint["model_state_dict"] if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint else checkpoint
+        model.load_state_dict(state_dict)
+        if isinstance(checkpoint, dict):
+            loaded_checkpoint_meta = {
+                "path": str(checkpoint_path),
+                "candidate_name": checkpoint.get("candidate_name"),
+                "stage_name": checkpoint.get("stage_name"),
+                "stage2_steps": checkpoint.get("stage2_steps"),
+                "seed": checkpoint.get("seed"),
+                "fixture_mode": checkpoint.get("fixture_mode"),
+                "config": checkpoint.get("config"),
+                "lineage": checkpoint.get("lineage", []),
+            }
 
     stage1 = stage1_validate(model, mixed_samples, device, Path(args.metrics_out))
     stage2 = stage2_validate(model, mixed_samples, device, Path(args.metrics_out), args.stage2_steps)
     per_task = {}
     mixed_trained_state = copy.deepcopy(model.state_dict())
+    checkpoint_lineage = list(loaded_checkpoint_meta.get("lineage", [])) if loaded_checkpoint_meta else []
+    if args.load_checkpoint:
+        checkpoint_lineage.append(
+            {
+                "path": args.load_checkpoint,
+                "stage_name": loaded_checkpoint_meta.get("stage_name") if loaded_checkpoint_meta else None,
+                "stage2_steps": loaded_checkpoint_meta.get("stage2_steps") if loaded_checkpoint_meta else None,
+                "candidate_name": loaded_checkpoint_meta.get("candidate_name") if loaded_checkpoint_meta else None,
+            }
+        )
     for name, task_samples in sample_groups.items():
         task_model = LumaForCausalLM(config).to(device=device, dtype=dtype)
         task_model.load_state_dict(mixed_trained_state)
@@ -998,8 +1414,13 @@ def main() -> None:
 
     report = {
         "candidate_name": args.candidate_name or None,
+        "seed": 42,
         "fixture_path": str(fixture_path),
         "fixture_mode": args.fixture_mode,
+        "load_checkpoint": args.load_checkpoint or None,
+        "save_checkpoint": args.save_checkpoint or None,
+        "checkpoint_lineage": checkpoint_lineage,
+        "loaded_checkpoint_meta": loaded_checkpoint_meta,
         "rollout_steps": args.rollout_steps,
         "slow_k": args.slow_k,
         "reason_loops": config.reason_active_loops,
@@ -1044,6 +1465,35 @@ def main() -> None:
         "self_rollout_supervision_horizon": args.self_rollout_supervision_horizon,
         "self_rollout_weighting_mode": args.self_rollout_weighting_mode,
         "self_feature_span_mask_ratio": args.self_feature_span_mask_ratio,
+        "dynamics_experiment": args.dynamics_experiment,
+        "routing_chunk_size": args.routing_chunk_size,
+        "routing_topk_blocks": args.routing_topk_blocks,
+        "routing_topk_tokens": args.routing_topk_tokens,
+        "routing_top_p_coarse": args.routing_top_p_coarse,
+        "routing_top_p_fine": args.routing_top_p_fine,
+        "routing_budget_min": args.routing_budget_min,
+        "routing_budget_max": args.routing_budget_max,
+        "routing_weak_gain": args.routing_weak_gain,
+        "routing_strong_gain": args.routing_strong_gain,
+        "routing_local_floor": args.routing_local_floor,
+        "routing_modulation_floor": args.routing_modulation_floor,
+        "routing_modulation_ceiling": args.routing_modulation_ceiling,
+        "routing_world_summary_cap": args.routing_world_summary_cap,
+        "routing_tier_soft_only": args.routing_tier_soft_only,
+        "routing_tier_entropy_floor": args.routing_tier_entropy_floor,
+        "routing_min_local_share": args.routing_min_local_share,
+        "routing_tier_entropy_weight": args.routing_tier_entropy_weight,
+        "routing_min_local_share_weight": args.routing_min_local_share_weight,
+        "rollout_zone_weight": args.rollout_zone_weight,
+        "rollout_nonzero_low": args.rollout_nonzero_low,
+        "rollout_nonzero_high": args.rollout_nonzero_high,
+        "rollout_active_low": args.rollout_active_low,
+        "rollout_active_high": args.rollout_active_high,
+        "rollout_future_var_low": args.rollout_future_var_low,
+        "rollout_future_var_high": args.rollout_future_var_high,
+        "trajectory_vitality_weight": args.trajectory_vitality_weight,
+        "trajectory_c_t_drift_floor": args.trajectory_c_t_drift_floor,
+        "trajectory_world_drift_floor": args.trajectory_world_drift_floor,
         "enable_compression_mhc": args.enable_compression_mhc,
         "enable_reasoning_state_ring": args.enable_reasoning_state_ring,
         "r_t_dim": args.r_t_dim,
@@ -1055,6 +1505,8 @@ def main() -> None:
         "math_probe_min_loops": args.math_probe_min_loops,
         "enable_persona_seed": args.enable_persona_seed,
         "enable_python_code": args.enable_python_code,
+        "python_code_source": args.python_code_source,
+        "enable_arc_agi": args.enable_arc_agi,
         "persona_dir": args.persona_dir,
         "num_samples": len(mixed_samples),
         "stage1": stage1,
@@ -1062,6 +1514,38 @@ def main() -> None:
         "per_task_from_mixed": True,
         "per_task": per_task,
     }
+    if args.save_checkpoint:
+        checkpoint_path = Path(args.save_checkpoint)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "model_state_dict": mixed_trained_state,
+                "candidate_name": args.candidate_name or None,
+                "stage_name": "stage12_eval",
+                "stage2_steps": args.stage2_steps,
+                "seed": 42,
+                "fixture_mode": args.fixture_mode,
+                "config": {
+                    "world_jepa_mode": config.world_jepa_mode,
+                    "reason_loops": config.reason_active_loops,
+                    "reason_shared_depth": config.reason_shared_depth,
+                    "rollout_steps": config.self_rollout_steps,
+                    "self_check_k": config.self_check_k,
+                    "ct_modulation_mode": config.ct_modulation_mode,
+                    "dynamics_experiment": config.dynamics_experiment,
+                    "self_loop_awareness_mode": config.self_loop_awareness_mode,
+                    "enable_progress_exit_readout": config.enable_progress_exit_readout,
+                    "routing_local_floor": config.routing_local_floor,
+                    "routing_world_summary_cap": config.routing_world_summary_cap,
+                    "routing_tier_entropy_floor": config.routing_tier_entropy_floor,
+                    "routing_min_local_share": config.routing_min_local_share,
+                    "rollout_zone_weight": config.rollout_zone_weight,
+                    "trajectory_vitality_weight": config.trajectory_vitality_weight,
+                },
+                "lineage": checkpoint_lineage,
+            },
+            checkpoint_path,
+        )
     Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.json_out).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))

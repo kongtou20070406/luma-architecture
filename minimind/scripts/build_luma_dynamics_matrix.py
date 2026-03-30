@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Luma freezes a rescue-first dynamics matrix before reruns so conclusions stay auditable.
+
+Luma 会先冻结“抢救优先”实验矩阵，再重跑，避免中途改口径。
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+DOCS_ROOT = ROOT.parent / "docs" / "reports"
+JSON_OUT = DOCS_ROOT / "Luma_Dynamics_Experiment_Matrix_20260330.generated.json"
+MD_OUT = DOCS_ROOT / "Luma_Dynamics_Experiment_Matrix_20260330.generated.md"
+
+
+def build_matrix() -> dict:
+    baseline = {
+        "name": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1",
+        "status": "provisional_keep",
+        "reason": "Only line that reached mid in previous nightly run; now treated as rescue anchor, not final keep.",
+        "fixed_eval_args": {
+            "world_jepa_mode": "full",
+            "enable_self_check_ring": True,
+            "self_check_k": 2,
+            "reason_shared_depth": 2,
+            "rollout_steps": 10,
+            "reason_loops": 15,
+            "self_loop_awareness_mode": "predictor_progress",
+            "self_progress_shape_weight": 0.10,
+            "self_progress_trend_weight": 0.05,
+            "self_progress_plateau_weight": 0.02,
+            "self_rollout_supervision_horizon": 3,
+            "exit_two_step_aux_weight": 0.25,
+            "enable_progress_exit_readout": True,
+            "routing_weak_gain": 0.03,
+            "routing_strong_gain": 0.10,
+            "enable_arc_agi": True,
+        },
+    }
+
+    experiments = [
+        {
+            "id": "P0",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout",
+            "family": "formal_pretrain_readiness_anchor",
+            "priority_tier": "anchor",
+            "design": "No extra routing family enabled; validates readiness of the new baseline itself for formal pretrain lock.",
+            "target_signal": "clean baseline dynamics before add-on controls",
+        },
+        {
+            "id": "R0",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1",
+            "family": "memory_tiered_rescue_anchor",
+            "priority_tier": "anchor",
+            "design": "Unmodified v1 anchor, used only as rescue baseline for 4096 comparison.",
+            "target_signal": "anchor reference",
+        },
+        {
+            "id": "M1",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite",
+            "family": "memory_tiered_rescue",
+            "priority_tier": "tier1",
+            "design": "Soft tier weighting, world_summary cap, local share floor, no winner-take-most.",
+            "target_signal": "anti early single-tier collapse",
+        },
+        {
+            "id": "M2",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse",
+            "family": "memory_tiered_rescue",
+            "priority_tier": "tier1",
+            "design": "M1 plus explicit entropy/local-share guards with regularized tier selection.",
+            "target_signal": "tier entropy retention",
+        },
+        {
+            "id": "M3",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+zone_loss",
+            "family": "memory_tiered_rescue",
+            "priority_tier": "tier1",
+            "design": "M1 + rollout vitality zone loss on nonzero/active/future-var ranges.",
+            "target_signal": "rollout activity band preservation",
+        },
+        {
+            "id": "M4",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse+entropy_guard",
+            "family": "memory_tiered_rescue",
+            "priority_tier": "tier1",
+            "design": "M2 + stronger entropy floor and minimum local share penalties.",
+            "target_signal": "dominant-tier suppression",
+        },
+        {
+            "id": "M5",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+vitality_loss",
+            "family": "memory_tiered_rescue",
+            "priority_tier": "tier2",
+            "design": "M1 + trajectory vitality loss from c_t/world drift floors.",
+            "target_signal": "trajectory anti-freeze",
+        },
+        {
+            "id": "M6",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+local_floor",
+            "family": "memory_tiered_rescue",
+            "priority_tier": "tier2",
+            "design": "M1 + stronger local-floor routing so unmodulated local path cannot be eaten.",
+            "target_signal": "local baseline preservation",
+        },
+        {
+            "id": "M7",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse+anti_budget",
+            "family": "memory_tiered_rescue",
+            "priority_tier": "tier2",
+            "design": "M2 + anti-collapse budget floor (minimum active controlled mass).",
+            "target_signal": "non-zero control budget floor",
+        },
+        {
+            "id": "S1",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_lite_control",
+            "family": "summary_rescue",
+            "priority_tier": "tier1",
+            "design": "Lower gamma/beta gain, residual-branch-first modulation, avoid direct dominance.",
+            "target_signal": "summary over-control mitigation",
+        },
+        {
+            "id": "S2",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor",
+            "family": "summary_rescue",
+            "priority_tier": "tier1",
+            "design": "Summary control with stronger unmodulated local baseline floor.",
+            "target_signal": "summary-local balance",
+        },
+        {
+            "id": "S3",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+hici_construct_integrate_broadcast_v1+s_lite_control",
+            "family": "summary_rescue",
+            "priority_tier": "tier2",
+            "design": "HiCI route with lite-control modulation and capped gain.",
+            "target_signal": "HiCI stability under weak control",
+        },
+        {
+            "id": "S4",
+            "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+hici_construct_integrate_broadcast_v1+s_local_floor",
+            "family": "summary_rescue",
+            "priority_tier": "tier2",
+            "design": "HiCI route with local-floor preservation on non-selected chunks.",
+            "target_signal": "HiCI anti-collapse local dynamics",
+        },
+    ]
+
+    required_metrics = {
+        "A_basic": [
+            "math/dialogue/emotion/persona_seed/python_code/arc_agi/mixed",
+            "self_tail",
+            "rollout_tail",
+            "self_loss_tail",
+            "mean_loss",
+            "hard_loop_var",
+            "avg_loop_depth",
+            "exit_invalid_count",
+        ],
+        "B_rollout_progress": [
+            "rollout_nonzero_ratio",
+            "rollout_active_ratio",
+            "progress_next_mean/std",
+            "progress_trend_mean/std",
+            "progress_plateau_mean/std",
+            "progress_vs_rollout_corr",
+            "progress_vs_exit_corr",
+            "rollout_zone_loss_tail",
+        ],
+        "C_state_dynamics": [
+            "c_t_var",
+            "c_t_delta_norm_mean/std",
+            "pred_delta_c_cos_adjacent",
+            "world_summary_drift_mean/std",
+            "trajectory_vitality_loss_tail",
+        ],
+        "D_control_stats": [
+            "gate_mean/std/saturation_ratio/nonfinite_gate_count",
+            "selected_chunk_ratio",
+            "modulated_chunk_ratio",
+            "chunk_gamma_mean/std",
+            "chunk_beta_mean/std",
+            "modulation_gain_low/mid/high_ratio",
+            "unmodulated_path_energy",
+            "tier_weight_local/loop_history/block_repr/world_summary",
+            "tier_entropy",
+            "dominant_tier_ratio",
+            "tier_switch_rate",
+            "routing_entropy_loss_tail",
+        ],
+        "E_numeric_safety": [
+            "exit_score_preclamp_nonfinite_count",
+            "exit_score_postfix_clamped_ratio",
+            "bernoulli_invalid_prevented_count",
+            "nan_to_num_trigger_count",
+        ],
+    }
+
+    screening = {
+        "ladder": [
+            {"stage": "cuda_smoke", "steps": 128, "policy": "single candidate sanity only, must include a hierarchical path"},
+            {"stage": "mid_rescreen", "steps": 4096, "promote_top_k": 5},
+            {"stage": "long_round1", "steps": 10240, "promote_top_k": 2},
+            {"stage": "long_confirm", "steps": 20480, "promote_top_k": 1},
+        ],
+        "lineage_rule": [
+            "10240 inherits from same-candidate 4096 checkpoint",
+            "20480 inherits from same-candidate 10240 checkpoint",
+            "No fresh-start rerun across promoted stages",
+        ],
+        "result_boundary": [
+            "4096 and above are valid keep/kill evidence in this cycle",
+            "Any failed:1 with implementation traceback is marked bug-contaminated, not structural failure",
+            "No stale runtime file can be used as alive-process evidence without service+process confirmation",
+        ],
+    }
+
+    return {
+        "generated_from": "build_luma_dynamics_matrix.py",
+        "date": "2026-03-30",
+        "baseline": baseline,
+        "experiments": experiments,
+        "required_metrics": required_metrics,
+        "screening": screening,
+    }
+
+
+def render_markdown(matrix: dict) -> str:
+    lines = [
+        "# Luma Dynamics Rescue Matrix (Generated)",
+        "",
+        "## Baseline",
+        f"- `{matrix['baseline']['name']}`",
+        f"- status: `{matrix['baseline']['status']}`",
+        f"- reason: {matrix['baseline']['reason']}",
+        "",
+        "## Screening Ladder",
+    ]
+    for stage in matrix["screening"]["ladder"]:
+        line = f"- `{stage['stage']}`: `{stage['steps']}`"
+        if "promote_top_k" in stage:
+            line += f", promote top `{stage['promote_top_k']}`"
+        policy = stage.get("policy")
+        if policy:
+            line += f", {policy}"
+        lines.append(line)
+    lines.extend(["", "## Result Boundary"])
+    for item in matrix["screening"]["result_boundary"]:
+        lines.append(f"- {item}")
+    lines.extend(["", "## Experiments"])
+    for exp in matrix["experiments"]:
+        lines.extend(
+            [
+                f"### {exp['id']} `{exp['candidate']}`",
+                f"- family: `{exp['family']}`",
+                f"- priority tier: `{exp['priority_tier']}`",
+                f"- design: {exp['design']}",
+                f"- target signal: {exp['target_signal']}",
+                "",
+            ]
+        )
+    lines.extend(["## Required Metrics"])
+    for section, metrics in matrix["required_metrics"].items():
+        lines.append(f"### {section}")
+        for metric_name in metrics:
+            lines.append(f"- {metric_name}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def main() -> None:
+    matrix = build_matrix()
+    JSON_OUT.parent.mkdir(parents=True, exist_ok=True)
+    JSON_OUT.write_text(json.dumps(matrix, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    MD_OUT.write_text(render_markdown(matrix), encoding="utf-8")
+    print(f"Wrote {JSON_OUT}")
+    print(f"Wrote {MD_OUT}")
+
+
+if __name__ == "__main__":
+    main()

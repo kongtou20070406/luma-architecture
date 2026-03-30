@@ -1,0 +1,196 @@
+{
+  "program_name": "luma_dynamics_rescue_screening_v3_4096",
+  "primary_repo": "/home/kt/ai/minimind",
+  "baseline_candidate": "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1",
+  "stages": {
+    "short_prescreen_steps": 4096,
+    "mid_rescreen_steps": 10240,
+    "long_round1_steps": 20480,
+    "long_confirm_steps": 20480
+  },
+  "promotions": {
+    "to_mid_top_k": 5,
+    "to_long_top_k": 2,
+    "to_confirm_top_k": 1
+  },
+  "timeouts_sec": {
+    "4096": 14400,
+    "10240": 43200,
+    "20480": 64800
+  },
+  "candidate_priority": [
+    "A2-progress_shape_v1-h3+progress_exit_readout",
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1",
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite",
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse",
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+zone_loss",
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse+entropy_guard",
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+vitality_loss",
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+local_floor",
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse+anti_budget",
+    "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_lite_control",
+    "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor",
+    "A2-progress_shape_v1-h3+progress_exit_readout+hici_construct_integrate_broadcast_v1+s_lite_control",
+    "A2-progress_shape_v1-h3+progress_exit_readout+hici_construct_integrate_broadcast_v1+s_local_floor"
+  ],
+  "candidate_overrides": {
+    "A2-progress_shape_v1-h3+progress_exit_readout": {
+      "dynamics_experiment": null
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1": {
+      "dynamics_experiment": "memory_tiered_routing_v1",
+      "routing_chunk_size": 32,
+      "routing_topk_blocks": 2
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite": {
+      "dynamics_experiment": "memory_tiered_routing_v1+m1_lite",
+      "routing_chunk_size": 32,
+      "routing_topk_blocks": 2,
+      "routing_world_summary_cap": 0.45,
+      "routing_min_local_share": 0.2,
+      "routing_tier_soft_only": true
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse": {
+      "dynamics_experiment": "memory_tiered_routing_v1+m1_anti_collapse",
+      "routing_chunk_size": 32,
+      "routing_topk_blocks": 2,
+      "routing_world_summary_cap": 0.45,
+      "routing_min_local_share": 0.2,
+      "routing_tier_soft_only": true,
+      "routing_tier_entropy_floor": 1.0,
+      "routing_tier_entropy_weight": 0.02,
+      "routing_min_local_share_weight": 0.02
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+zone_loss": {
+      "dynamics_experiment": "memory_tiered_routing_v1+m1_lite+zone_loss",
+      "routing_chunk_size": 32,
+      "routing_topk_blocks": 2,
+      "routing_world_summary_cap": 0.45,
+      "routing_min_local_share": 0.2,
+      "routing_tier_soft_only": true,
+      "rollout_zone_weight": 0.05,
+      "rollout_nonzero_low": 0.05,
+      "rollout_nonzero_high": 0.80,
+      "rollout_active_low": 0.05,
+      "rollout_active_high": 0.90,
+      "rollout_future_var_low": 1e-06,
+      "rollout_future_var_high": 0.5
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse+entropy_guard": {
+      "dynamics_experiment": "memory_tiered_routing_v1+m1_anti_collapse+entropy_guard",
+      "routing_chunk_size": 32,
+      "routing_topk_blocks": 2,
+      "routing_world_summary_cap": 0.45,
+      "routing_min_local_share": 0.2,
+      "routing_tier_soft_only": true,
+      "routing_tier_entropy_floor": 1.0,
+      "routing_tier_entropy_weight": 0.05,
+      "routing_min_local_share_weight": 0.05
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+vitality_loss": {
+      "dynamics_experiment": "memory_tiered_routing_v1+m1_lite+vitality_loss",
+      "routing_chunk_size": 32,
+      "routing_topk_blocks": 2,
+      "routing_world_summary_cap": 0.45,
+      "routing_min_local_share": 0.2,
+      "routing_tier_soft_only": true,
+      "trajectory_vitality_weight": 0.03,
+      "trajectory_c_t_drift_floor": 0.02,
+      "trajectory_world_drift_floor": 0.01
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+local_floor": {
+      "dynamics_experiment": "memory_tiered_routing_v1+m1_lite+local_floor",
+      "routing_chunk_size": 32,
+      "routing_topk_blocks": 2,
+      "routing_world_summary_cap": 0.45,
+      "routing_min_local_share": 0.2,
+      "routing_local_floor": 0.20,
+      "routing_tier_soft_only": true
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_anti_collapse+anti_budget": {
+      "dynamics_experiment": "memory_tiered_routing_v1+m1_anti_collapse+anti_budget",
+      "routing_chunk_size": 32,
+      "routing_topk_blocks": 2,
+      "routing_world_summary_cap": 0.45,
+      "routing_min_local_share": 0.2,
+      "routing_local_floor": 0.20,
+      "routing_tier_soft_only": true,
+      "routing_tier_entropy_floor": 1.0,
+      "routing_tier_entropy_weight": 0.03,
+      "routing_min_local_share_weight": 0.03
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_lite_control": {
+      "dynamics_experiment": "summary_chunk_film_v2_progress+s_lite_control",
+      "routing_chunk_size": 32,
+      "routing_modulation_ceiling": 0.6
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor": {
+      "dynamics_experiment": "summary_chunk_film_v2_progress+s_local_floor",
+      "routing_chunk_size": 32,
+      "routing_local_floor": 0.2,
+      "routing_modulation_ceiling": 0.7
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+hici_construct_integrate_broadcast_v1+s_lite_control": {
+      "dynamics_experiment": "hici_construct_integrate_broadcast_v1+s_lite_control",
+      "routing_chunk_size": 32,
+      "routing_modulation_ceiling": 0.6
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+hici_construct_integrate_broadcast_v1+s_local_floor": {
+      "dynamics_experiment": "hici_construct_integrate_broadcast_v1+s_local_floor",
+      "routing_chunk_size": 32,
+      "routing_local_floor": 0.2,
+      "routing_modulation_ceiling": 0.7
+    }
+  },
+  "fixed_eval_args": {
+    "device": "cuda",
+    "seq_len": 48,
+    "samples": 8,
+    "fixture_mode": "competition_math_dialogue_emotion",
+    "enable_persona_seed": true,
+    "enable_python_code": true,
+    "python_code_source": "public_mbpp",
+    "enable_arc_agi": true,
+    "persona_dir": "/home/kt/ai/luma_dataset",
+    "rollout_steps": 10,
+    "reason_loops": 15,
+    "world_jepa_mode": "full",
+    "enable_self_check_ring": true,
+    "self_check_k": 2,
+    "reason_shared_depth": 2,
+    "exit_two_step_aux_weight": 0.25,
+    "self_loop_awareness_mode": "predictor_progress",
+    "self_progress_shape_weight": 0.1,
+    "self_progress_trend_weight": 0.05,
+    "self_progress_plateau_weight": 0.02,
+    "self_rollout_supervision_horizon": 3,
+    "self_rollout_weighting_mode": "legacy",
+    "enable_progress_exit_readout": true,
+    "ct_modulation_mode": "additive",
+    "routing_weak_gain": 0.03,
+    "routing_strong_gain": 0.1
+  },
+  "score_formula": {
+    "direction": "lower",
+    "weights": {
+      "math_self_tail": 0.3,
+      "python_code_self_tail": 0.2,
+      "mixed_self_tail": 0.2,
+      "dialogue_self_tail": 0.1,
+      "emotion_self_tail": 0.1,
+      "arc_agi_self_tail": 0.1
+    }
+  },
+  "guard_rules": {
+    "min_c_t_var": 0.2,
+    "min_any_rollout_nonzero_ratio": 0.05,
+    "max_dialogue_self_tail": 1.5,
+    "max_emotion_self_tail": 0.6
+  },
+  "notes": [
+    "This cycle starts from 4096-stage screening first; no 2048 prescreen.",
+    "Promotion uses checkpoint lineage: 4096 -> 10240 -> 20480 for the same candidate.",
+    "When failed:1 appears, inspect logs first and separate implementation bug vs structural failure.",
+    "Do not use stale runtime files as alive-process evidence."
+  ]
+}

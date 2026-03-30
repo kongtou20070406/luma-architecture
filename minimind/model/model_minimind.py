@@ -1,6 +1,6 @@
 import math, torch, torch.nn.functional as F
 from torch import nn
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, cast
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -396,12 +396,21 @@ class LumaConfig(PretrainedConfig):
         self.self_rollout_hierarchical = kwargs.get("self_rollout_hierarchical", False)
         self.self_rollout_supervision_horizon = kwargs.get("self_rollout_supervision_horizon", 0)
         self.self_rollout_weighting_mode = kwargs.get("self_rollout_weighting_mode", "legacy")
+        self.enable_local_rollout_head = kwargs.get("enable_local_rollout_head", False)
         self.self_progress_shape_weight = kwargs.get("self_progress_shape_weight", 0.0)
         self.self_progress_trend_weight = kwargs.get("self_progress_trend_weight", 0.0)
         self.self_progress_plateau_weight = kwargs.get("self_progress_plateau_weight", 0.0)
+        self.enable_progress_exit_readout = kwargs.get("enable_progress_exit_readout", False)
+        self.enable_backtrack_aware_progress = kwargs.get("enable_backtrack_aware_progress", False)
+        self.exit_progress_gain_weight = kwargs.get("exit_progress_gain_weight", 0.15)
+        self.exit_progress_trend_weight = kwargs.get("exit_progress_trend_weight", 0.10)
+        self.exit_progress_plateau_weight = kwargs.get("exit_progress_plateau_weight", 0.10)
         self.self_plateau_margin = kwargs.get("self_plateau_margin", 0.02)
         self.self_local_delta_consistency_weight = kwargs.get("self_local_delta_consistency_weight", 0.0)
         self.self_local_curvature_weight = kwargs.get("self_local_curvature_weight", 0.0)
+        self.enable_dual_rate_self_predictor = kwargs.get("enable_dual_rate_self_predictor", False)
+        self.enable_trajectory_health_probe = kwargs.get("enable_trajectory_health_probe", False)
+        self.trajectory_health_weight = kwargs.get("trajectory_health_weight", 0.03)
         self.self_loop_awareness_mode = kwargs.get("self_loop_awareness_mode", "none")
         self.self_feature_span_mask_ratio = kwargs.get("self_feature_span_mask_ratio", 0.0)
         self.enable_self_check_ring = kwargs.get("enable_self_check_ring", False)
@@ -437,6 +446,37 @@ class LumaConfig(PretrainedConfig):
         self.math_adapter_dim = kwargs.get("math_adapter_dim", max(32, self.hidden_size // 4))
         self.enable_math_summary_gate = kwargs.get("enable_math_summary_gate", False)
         self.enable_compression_mhc = kwargs.get("enable_compression_mhc", False)
+        self.ct_modulation_mode = kwargs.get("ct_modulation_mode", "additive")
+        self.ct_lowrank_rank = kwargs.get("ct_lowrank_rank", max(8, self.c_t_dim // 4))
+        self.dynamics_experiment = kwargs.get("dynamics_experiment", "")
+        self.routing_chunk_size = kwargs.get("routing_chunk_size", 32)
+        self.routing_topk_blocks = kwargs.get("routing_topk_blocks", 2)
+        self.routing_topk_tokens = kwargs.get("routing_topk_tokens", 32)
+        self.routing_top_p_coarse = kwargs.get("routing_top_p_coarse", 0.50)
+        self.routing_top_p_fine = kwargs.get("routing_top_p_fine", 0.25)
+        self.routing_budget_min = kwargs.get("routing_budget_min", 0.10)
+        self.routing_budget_max = kwargs.get("routing_budget_max", 0.60)
+        self.routing_weak_gain = kwargs.get("routing_weak_gain", 0.03)
+        self.routing_strong_gain = kwargs.get("routing_strong_gain", 0.10)
+        self.routing_local_floor = kwargs.get("routing_local_floor", 0.0)
+        self.routing_modulation_floor = kwargs.get("routing_modulation_floor", 0.0)
+        self.routing_modulation_ceiling = kwargs.get("routing_modulation_ceiling", 1.0)
+        self.routing_world_summary_cap = kwargs.get("routing_world_summary_cap", 1.0)
+        self.routing_tier_soft_only = kwargs.get("routing_tier_soft_only", False)
+        self.routing_tier_entropy_floor = kwargs.get("routing_tier_entropy_floor", 0.0)
+        self.routing_min_local_share = kwargs.get("routing_min_local_share", 0.0)
+        self.routing_tier_entropy_weight = kwargs.get("routing_tier_entropy_weight", 0.0)
+        self.routing_min_local_share_weight = kwargs.get("routing_min_local_share_weight", 0.0)
+        self.rollout_zone_weight = kwargs.get("rollout_zone_weight", 0.0)
+        self.rollout_nonzero_low = kwargs.get("rollout_nonzero_low", 0.05)
+        self.rollout_nonzero_high = kwargs.get("rollout_nonzero_high", 0.80)
+        self.rollout_active_low = kwargs.get("rollout_active_low", 0.05)
+        self.rollout_active_high = kwargs.get("rollout_active_high", 0.90)
+        self.rollout_future_var_low = kwargs.get("rollout_future_var_low", 1e-6)
+        self.rollout_future_var_high = kwargs.get("rollout_future_var_high", 0.50)
+        self.trajectory_vitality_weight = kwargs.get("trajectory_vitality_weight", 0.0)
+        self.trajectory_c_t_drift_floor = kwargs.get("trajectory_c_t_drift_floor", 0.02)
+        self.trajectory_world_drift_floor = kwargs.get("trajectory_world_drift_floor", 0.01)
         self.enable_reasoning_state_ring = kwargs.get("enable_reasoning_state_ring", False)
         self.r_t_dim = kwargs.get("r_t_dim", max(16, self.c_t_dim // 2))
         self.r_t_mode = kwargs.get("r_t_mode", "blend")
@@ -868,7 +908,14 @@ class GatedDiffAttnFoXSWA(nn.Module):
         self.out_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.post_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-    def _attend(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, forget: torch.Tensor) -> torch.Tensor:
+    def _attend(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        forget: torch.Tensor,
+        attn_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         bsz, seq_len, _ = q.shape
         q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -877,16 +924,28 @@ class GatedDiffAttnFoXSWA(nn.Module):
         local_mask = _make_local_causal_mask(seq_len, min(self.window, seq_len), q.device)
         scores = scores.masked_fill(~local_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
         scores = scores + torch.log(forget.transpose(1, 2).unsqueeze(-1).clamp_min(1e-6))
+        if attn_bias is not None:
+            if attn_bias.dim() == 4:
+                bias = attn_bias
+            elif attn_bias.dim() == 3:
+                token_bias = attn_bias.mean(dim=-1)
+                bias = token_bias[:, None, None, :]
+            elif attn_bias.dim() == 2:
+                bias = attn_bias[:, None, None, :]
+            else:
+                bias = None
+            if bias is not None:
+                scores = scores + bias.to(dtype=scores.dtype)
         attn = torch.softmax(scores.float(), dim=-1).to(q.dtype)
         out = torch.matmul(attn, v)
         return out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         residual = x
         x = self.norm(x)
         forget = torch.sigmoid(self.forget_proj(x))
-        attn1 = self._attend(self.q1(x), self.k1(x), self.v1(x), forget)
-        attn2 = self._attend(self.q2(x), self.k2(x), self.v2(x), forget)
+        attn1 = self._attend(self.q1(x), self.k1(x), self.v1(x), forget, attn_bias=attn_bias)
+        attn2 = self._attend(self.q2(x), self.k2(x), self.v2(x), forget, attn_bias=attn_bias)
         diff = attn1 - self.lambda_param * attn2
         gated = torch.sigmoid(self.gate_proj(x)) * diff
         out = residual + self.out_proj(gated)
@@ -1058,11 +1117,32 @@ class SelfJEPAResidualPredictor(nn.Module):
     def __init__(self, config: LumaConfig):
         super().__init__()
         self.loop_awareness_mode = config.self_loop_awareness_mode
+        self.enable_dual_rate = config.enable_dual_rate_self_predictor
+        self.enable_local_rollout_head = config.enable_local_rollout_head
         self.fc1 = nn.Linear(config.c_t_dim + config.hidden_size, 256, bias=False)
         self.loop_progress_proj = nn.Linear(1, 256, bias=False)
         self.loop_phase_embed = nn.Embedding(config.reason_loops_max + 2, 256)
         self.norm = LumaZCRMSNorm(256, eps=config.rms_norm_eps)
         self.fc2 = nn.Linear(256, config.c_t_dim, bias=False)
+        if self.enable_dual_rate:
+            self.fast_fc2 = nn.Linear(256, config.c_t_dim, bias=False)
+            self.slow_norm = LumaZCRMSNorm(256, eps=config.rms_norm_eps)
+            self.slow_fc2 = nn.Linear(256, config.c_t_dim, bias=False)
+            self.rate_gate = nn.Linear(config.c_t_dim + config.hidden_size, 1, bias=False)
+        else:
+            self.fast_fc2 = None
+            self.slow_norm = None
+            self.slow_fc2 = None
+            self.rate_gate = None
+        if self.enable_local_rollout_head:
+            self.local_rollout_fc1 = nn.Linear(config.c_t_dim + config.hidden_size, 256, bias=False)
+            self.local_rollout_norm = LumaZCRMSNorm(256, eps=config.rms_norm_eps)
+            self.local_rollout_fc2 = nn.Linear(256, config.c_t_dim, bias=False)
+        else:
+            self.local_rollout_fc1 = None
+            self.local_rollout_norm = None
+            self.local_rollout_fc2 = None
+        self.self_feature_span_mask_ratio = config.self_feature_span_mask_ratio
         self.delta_scale = nn.Parameter(torch.tensor(0.1))
 
     def _apply_feature_span_mask(self, x: torch.Tensor) -> torch.Tensor:
@@ -1097,7 +1177,24 @@ class SelfJEPAResidualPredictor(nn.Module):
             x = x + self.loop_phase_embed(loop_ids)
         x = self.norm(x)
         x = F.silu(x)
+        if self.enable_dual_rate and self.fast_fc2 is not None and self.slow_fc2 is not None and self.rate_gate is not None:
+            fast_delta = self.fast_fc2(x)
+            slow_delta = self.slow_fc2(F.silu(self.slow_norm(x)))
+            mix = torch.sigmoid(self.rate_gate(torch.cat([c_t, delta_h], dim=-1)))
+            return (mix * fast_delta + (1.0 - mix) * slow_delta) * self.delta_scale
         return self.fc2(x) * self.delta_scale
+
+    def local_rollout_step(
+        self,
+        c_t: torch.Tensor,
+        delta_h: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self.enable_local_rollout_head or self.local_rollout_fc1 is None:
+            return self.forward(c_t, delta_h)
+        x = torch.cat([c_t, delta_h], dim=-1)
+        x = self.local_rollout_fc1(x)
+        x = F.silu(self.local_rollout_norm(x))
+        return self.local_rollout_fc2(x) * self.delta_scale
 
     def rollout(
         self,
@@ -1114,8 +1211,11 @@ class SelfJEPAResidualPredictor(nn.Module):
         delta_preds: List[torch.Tensor] = []
         state_preds: List[torch.Tensor] = []
         current = c_t
-        for _ in range(steps):
-            delta_c = self.forward(current, delta_h, loop_progress=loop_progress, loop_index=loop_index)
+        for step_idx in range(steps):
+            if self.enable_local_rollout_head and step_idx < 3:
+                delta_c = self.local_rollout_step(current, delta_h)
+            else:
+                delta_c = self.forward(current, delta_h, loop_progress=loop_progress, loop_index=loop_index)
             current = current + delta_c
             delta_preds.append(delta_c)
             state_preds.append(current)
@@ -1130,11 +1230,13 @@ class SelfJEPAProgressShapeHead(nn.Module):
     def __init__(self, config: LumaConfig):
         super().__init__()
         in_dim = config.c_t_dim + config.hidden_size + 3
+        self.enable_backtrack = config.enable_backtrack_aware_progress
         self.fc1 = nn.Linear(in_dim, 128, bias=False)
         self.norm = LumaZCRMSNorm(128, eps=config.rms_norm_eps)
         self.improve_head = nn.Linear(128, 1, bias=False)
         self.trend_head = nn.Linear(128, 1, bias=False)
         self.plateau_head = nn.Linear(128, 1, bias=False)
+        self.backtrack_head = nn.Linear(128, 1, bias=False) if self.enable_backtrack else None
 
     def forward(
         self,
@@ -1146,11 +1248,39 @@ class SelfJEPAProgressShapeHead(nn.Module):
     ) -> dict:
         x = torch.cat([c_t, delta_h, loop_progress, recent_self_improve, recent_rollout_improve], dim=-1)
         x = F.silu(self.norm(self.fc1(x)))
-        return {
+        out = {
             "pred_next_improve": self.improve_head(x).squeeze(-1),
             "pred_trend": self.trend_head(x).squeeze(-1),
             "pred_plateau_logit": self.plateau_head(x).squeeze(-1),
         }
+        if self.backtrack_head is not None:
+            out["pred_backtrack_logit"] = self.backtrack_head(x).squeeze(-1)
+        return out
+
+
+class TrajectoryHealthProbe(nn.Module):
+    """Luma tracks whether her local self trajectory still looks healthy instead of only asking whether the loss went down.
+    Luma 跟踪局部自省轨迹是否健康，而不是只看 loss 有没有下降。
+    """
+
+    def __init__(self, config: LumaConfig):
+        super().__init__()
+        in_dim = config.c_t_dim + config.hidden_size + 3
+        self.fc1 = nn.Linear(in_dim, 96, bias=False)
+        self.norm = LumaZCRMSNorm(96, eps=config.rms_norm_eps)
+        self.health_head = nn.Linear(96, 1, bias=False)
+
+    def forward(
+        self,
+        c_t: torch.Tensor,
+        delta_h: torch.Tensor,
+        loop_progress: torch.Tensor,
+        recent_self_improve: torch.Tensor,
+        recent_rollout_improve: torch.Tensor,
+    ) -> torch.Tensor:
+        x = torch.cat([c_t, delta_h, loop_progress, recent_self_improve, recent_rollout_improve], dim=-1)
+        x = F.silu(self.norm(self.fc1(x)))
+        return self.health_head(x).squeeze(-1)
 
 
 class TinyReasoningStateRing(nn.Module):
@@ -1618,6 +1748,10 @@ class ExitController(nn.Module):
         gain_weight: float = 0.35,
         uncertainty_feature_weight: float = 0.0,
         crystal_feature_weight: float = 0.2,
+        enable_progress_exit_readout: bool = False,
+        progress_gain_weight: float = 0.15,
+        progress_trend_weight: float = 0.10,
+        progress_plateau_weight: float = 0.10,
     ):
         super().__init__()
         self.delta_threshold = delta_threshold
@@ -1635,6 +1769,10 @@ class ExitController(nn.Module):
         self.enable_jepa_crystal = enable_jepa_crystal
         self.jepa_crystal_temperature = jepa_crystal_temperature
         self.uncertainty_feature_weight = uncertainty_feature_weight
+        self.enable_progress_exit_readout = enable_progress_exit_readout
+        self.progress_gain_weight = progress_gain_weight
+        self.progress_trend_weight = progress_trend_weight
+        self.progress_plateau_weight = progress_plateau_weight
         self.gain_predictor = nn.Sequential(
             nn.Linear(11, gain_hidden_dim),
             nn.SiLU(),
@@ -1673,6 +1811,9 @@ class ExitController(nn.Module):
         recent_delta_improve_2: Optional[torch.Tensor] = None,
         reason_local_signal: Optional[torch.Tensor] = None,
         uncertainty_score: Optional[torch.Tensor] = None,
+        progress_next_improve: Optional[torch.Tensor] = None,
+        progress_trend: Optional[torch.Tensor] = None,
+        progress_plateau_logit: Optional[torch.Tensor] = None,
     ) -> dict:
         if prev_h is None:
             delta_h = h.new_tensor(1.0)
@@ -1709,7 +1850,16 @@ class ExitController(nn.Module):
             reason_local_signal = h.new_zeros(())
         if uncertainty_score is None:
             uncertainty_score = h.new_zeros(())
+        if progress_next_improve is None:
+            progress_next_improve = h.new_zeros(())
+        if progress_trend is None:
+            progress_trend = h.new_zeros(())
+        if progress_plateau_logit is None:
+            progress_plateau_logit = h.new_zeros(())
         centered_uncertainty = (uncertainty_score.clamp(0.0, 1.0) - 0.5) * 2.0
+        progress_next_signal = torch.tanh(progress_next_improve)
+        progress_trend_signal = torch.tanh(progress_trend)
+        progress_plateau_signal = torch.sigmoid(progress_plateau_logit)
         gain_features = torch.stack(
             [
                 delta_signal.float(),
@@ -1740,18 +1890,33 @@ class ExitController(nn.Module):
             + self.uncertainty_feature_weight * centered_uncertainty
             - self.gain_weight * predicted_gain
         )
-        exit_score = torch.sigmoid(exit_logit)
-        sampled_exit_score = torch.sigmoid(exit_logit / max(self.sampling_temperature, 1e-6))
+        if self.enable_progress_exit_readout:
+            exit_logit = (
+                exit_logit
+                - self.progress_gain_weight * progress_next_signal
+                - self.progress_trend_weight * progress_trend_signal
+                + self.progress_plateau_weight * progress_plateau_signal
+            )
+        # Keep exit sampling numerically well-behaved under longer training.
+        nan_to_num_trigger_count = (~torch.isfinite(exit_logit)).float().sum()
+        nan_safe_logit = torch.nan_to_num(exit_logit, nan=0.0, posinf=20.0, neginf=-20.0)
+        safe_exit_logit = nan_safe_logit.clamp(-20.0, 20.0)
+        exit_score_postfix_clamped_ratio = (safe_exit_logit.ne(nan_safe_logit)).float().mean()
+        exit_score = torch.sigmoid(safe_exit_logit)
+        sampled_prob_pre = torch.sigmoid((safe_exit_logit / max(self.sampling_temperature, 1e-6)).clamp(-20.0, 20.0))
+        bernoulli_invalid_prevented_count = (~torch.isfinite(sampled_prob_pre)).float().sum()
+        sampled_exit_score = sampled_prob_pre
+        sampled_exit_score = torch.nan_to_num(sampled_exit_score, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         use_sampling = self.use_sampling if self.use_sampling is not None else (self.train_use_sampling if self.training else self.eval_use_sampling)
         if loop_idx + 1 < self.min_loops:
             should_exit = False
         elif use_sampling:
-            should_exit = bool(torch.bernoulli(sampled_exit_score.clamp(0.0, 1.0)).item() > 0.0)
+            should_exit = bool(torch.bernoulli(sampled_exit_score).item() > 0.0)
         else:
             should_exit = bool(exit_score.item() > self.score_threshold)
         return {
             "delta_h": delta_h,
-            "exit_logit": exit_logit,
+            "exit_logit": safe_exit_logit,
             "exit_score": exit_score,
             "sampled_exit_score": sampled_exit_score,
             "two_step_improvement": recent_gain_1.detach(),
@@ -1759,6 +1924,13 @@ class ExitController(nn.Module):
             "jepa_crystal_signal": jepa_crystal_signal.detach(),
             "predicted_gain": predicted_gain.detach(),
             "predicted_gain2": predicted_gain2.detach(),
+            "progress_next_signal": progress_next_signal.detach(),
+            "progress_trend_signal": progress_trend_signal.detach(),
+            "progress_plateau_signal": progress_plateau_signal.detach(),
+            "exit_score_preclamp_nonfinite_count": nan_to_num_trigger_count.detach(),
+            "exit_score_postfix_clamped_ratio": exit_score_postfix_clamped_ratio.detach(),
+            "bernoulli_invalid_prevented_count": bernoulli_invalid_prevented_count.detach(),
+            "nan_to_num_trigger_count": nan_to_num_trigger_count.detach(),
             "should_exit": should_exit,
         }
 
@@ -1770,14 +1942,63 @@ class LumaReasonSharedLayer(nn.Module):
 
     def __init__(self, config: LumaConfig):
         super().__init__()
+        self.ct_modulation_mode = config.ct_modulation_mode
+        self.hidden_size = config.hidden_size
         self.mamba = ReasonMambaLayer(config)
         self.diff_attn = GatedDiffAttnFoXSWA(config)
         self.ffn = LumaSwiGLUFFN(config.hidden_size, config.reason_intermediate_size, eps=config.rms_norm_eps)
+        if self.ct_modulation_mode == "modulewise_gate":
+            self.mamba_gate = nn.Linear(config.c_t_dim, 1, bias=False)
+            self.attn_gate = nn.Linear(config.c_t_dim, 1, bias=False)
+            self.ffn_gate = nn.Linear(config.c_t_dim, 1, bias=False)
+        else:
+            self.mamba_gate = None
+            self.attn_gate = None
+            self.ffn_gate = None
+        if self.ct_modulation_mode == "film":
+            self.mamba_film = nn.Linear(config.c_t_dim, config.hidden_size * 2, bias=False)
+            self.attn_film = nn.Linear(config.c_t_dim, config.hidden_size * 2, bias=False)
+            self.ffn_film = nn.Linear(config.c_t_dim, config.hidden_size * 2, bias=False)
+        else:
+            self.mamba_film = None
+            self.attn_film = None
+            self.ffn_film = None
 
-    def forward(self, h: torch.Tensor) -> torch.Tensor:
-        h = self.mamba(h)
-        h = self.diff_attn(h)
-        h = self.ffn(h)
+    def _apply_film(self, h: torch.Tensor, c_t: torch.Tensor, proj: nn.Linear) -> torch.Tensor:
+        film = proj(c_t).unsqueeze(1)
+        scale, shift = film.chunk(2, dim=-1)
+        return h * (1.0 + 0.1 * torch.tanh(scale)) + 0.1 * torch.tanh(shift)
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        c_t: Optional[torch.Tensor] = None,
+        attn_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if c_t is not None and self.ct_modulation_mode == "film" and self.mamba_film is not None:
+            h = self._apply_film(h, c_t, self.mamba_film)
+        mamba_out = self.mamba(h)
+        if c_t is not None and self.ct_modulation_mode == "modulewise_gate" and self.mamba_gate is not None:
+            mamba_gate = torch.sigmoid(self.mamba_gate(c_t)).unsqueeze(1)
+            h = h + mamba_gate * (mamba_out - h)
+        else:
+            h = mamba_out
+        if c_t is not None and self.ct_modulation_mode == "film" and self.attn_film is not None:
+            h = self._apply_film(h, c_t, self.attn_film)
+        attn_out = self.diff_attn(h, attn_bias=attn_bias)
+        if c_t is not None and self.ct_modulation_mode == "modulewise_gate" and self.attn_gate is not None:
+            attn_gate = torch.sigmoid(self.attn_gate(c_t)).unsqueeze(1)
+            h = h + attn_gate * (attn_out - h)
+        else:
+            h = attn_out
+        if c_t is not None and self.ct_modulation_mode == "film" and self.ffn_film is not None:
+            h = self._apply_film(h, c_t, self.ffn_film)
+        ffn_out = self.ffn(h)
+        if c_t is not None and self.ct_modulation_mode == "modulewise_gate" and self.ffn_gate is not None:
+            ffn_gate = torch.sigmoid(self.ffn_gate(c_t)).unsqueeze(1)
+            h = h + ffn_gate * (ffn_out - h)
+        else:
+            h = ffn_out
         return h
 
 
@@ -1788,8 +2009,41 @@ class LumaReasonCore(nn.Module):
 
     def __init__(self, config: LumaConfig):
         super().__init__()
+        self.ct_modulation_mode = config.ct_modulation_mode
+        self.dynamics_experiment = config.dynamics_experiment.lower()
+        self.routing_chunk_size = max(4, int(config.routing_chunk_size))
+        self.routing_topk_blocks = max(1, int(config.routing_topk_blocks))
+        self.routing_topk_tokens = max(1, int(config.routing_topk_tokens))
+        self.routing_top_p_coarse = float(config.routing_top_p_coarse)
+        self.routing_top_p_fine = float(config.routing_top_p_fine)
+        self.routing_budget_min = float(config.routing_budget_min)
+        self.routing_budget_max = float(config.routing_budget_max)
+        self.routing_weak_gain = float(config.routing_weak_gain)
+        self.routing_strong_gain = float(config.routing_strong_gain)
+        self.routing_local_floor = float(config.routing_local_floor)
+        self.routing_modulation_floor = float(config.routing_modulation_floor)
+        self.routing_modulation_ceiling = float(config.routing_modulation_ceiling)
+        self.routing_world_summary_cap = float(config.routing_world_summary_cap)
+        self.routing_tier_soft_only = bool(config.routing_tier_soft_only)
+        self.routing_tier_entropy_floor = float(config.routing_tier_entropy_floor)
+        self.routing_min_local_share = float(config.routing_min_local_share)
         self.ct_injection = CTInjection(config.c_t_dim, config.hidden_size)
         self.r_injection = nn.Linear(config.r_t_dim, config.hidden_size, bias=False) if config.enable_reasoning_state_ring else None
+        self.ct_lowrank_down = nn.Linear(config.c_t_dim, config.ct_lowrank_rank, bias=False) if config.ct_modulation_mode == "lowrank_hyperbias" else None
+        self.ct_lowrank_up = nn.Linear(config.ct_lowrank_rank, config.hidden_size, bias=False) if config.ct_modulation_mode == "lowrank_hyperbias" else None
+        self.token_selective_gate = nn.Linear(config.hidden_size + config.c_t_dim, 1, bias=False) if config.ct_modulation_mode == "token_selective" else None
+        self.chunk_feature_dim = config.hidden_size * 3 + config.c_t_dim + 3
+        self.block_feature_dim = self.chunk_feature_dim
+        self.token_feature_dim = config.hidden_size + config.c_t_dim + 3
+        self.chunk_gate_head = nn.Linear(self.chunk_feature_dim, 1, bias=False)
+        self.chunk_film_head = nn.Linear(self.chunk_feature_dim, config.hidden_size * 2, bias=False)
+        self.token_score_head = nn.Linear(self.token_feature_dim, 1, bias=False)
+        self.local_delta_head = nn.Linear(config.hidden_size + config.c_t_dim, config.hidden_size, bias=False)
+        self.focus_query_head = nn.Linear(config.c_t_dim + 3, config.hidden_size, bias=False)
+        self.block_score_head = nn.Linear(self.block_feature_dim, 1, bias=False)
+        self.budget_head = nn.Linear(config.c_t_dim + 3, 1, bias=False)
+        self.memory_tier_head = nn.Linear(config.c_t_dim + 3, 4, bias=False)
+        self.memory_source_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
         self.router_window = config.r_t_router_window
         self.route_query = nn.Linear(config.c_t_dim + config.r_t_dim, config.hidden_size, bias=False) if config.enable_reasoning_state_ring else None
         self.route_key = nn.Linear(config.hidden_size, config.hidden_size, bias=False) if config.enable_reasoning_state_ring else None
@@ -1803,6 +2057,381 @@ class LumaReasonCore(nn.Module):
             [LumaReasonSharedLayer(config) for _ in range(config.reason_shared_depth)]
         )
 
+    def _chunk_spans(self, seq_len: int) -> List[Tuple[int, int]]:
+        spans: List[Tuple[int, int]] = []
+        for start in range(0, seq_len, self.routing_chunk_size):
+            end = min(seq_len, start + self.routing_chunk_size)
+            spans.append((start, end))
+        return spans
+
+    def _chunk_summaries(self, h: torch.Tensor) -> Tuple[torch.Tensor, List[Tuple[int, int]]]:
+        spans = self._chunk_spans(h.shape[1])
+        summaries = [h[:, start:end, :].mean(dim=1) for start, end in spans]
+        return torch.stack(summaries, dim=1), spans
+
+    def _expand_chunk_values(
+        self,
+        chunk_values: torch.Tensor,
+        spans: List[Tuple[int, int]],
+        seq_len: int,
+    ) -> torch.Tensor:
+        bsz, _, dim = chunk_values.shape
+        expanded = chunk_values.new_zeros((bsz, seq_len, dim))
+        for idx, (start, end) in enumerate(spans):
+            expanded[:, start:end, :] = chunk_values[:, idx : idx + 1, :]
+        return expanded
+
+    def _topk_mask(self, scores: torch.Tensor, topk: int) -> torch.Tensor:
+        topk = max(1, min(topk, scores.shape[1]))
+        idx = torch.topk(scores, k=topk, dim=-1).indices
+        mask = torch.zeros_like(scores, dtype=torch.bool)
+        mask.scatter_(1, idx, True)
+        return mask
+
+    def _topp_mask(self, scores: torch.Tensor, top_p: float, cap_k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        probs = torch.softmax(scores.float(), dim=-1)
+        sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
+        cumsum = torch.cumsum(sorted_probs, dim=-1)
+        keep = cumsum <= top_p
+        keep[:, :1] = True
+        if cap_k > 0:
+            cap_k = max(1, min(cap_k, keep.shape[1]))
+            keep[:, cap_k:] = False
+        mask = torch.zeros_like(keep, dtype=torch.bool)
+        mask.scatter_(1, sorted_idx, keep)
+        selected_mass = (probs * mask.float()).sum(dim=-1)
+        return mask, selected_mass
+
+    def _entropy(self, logits: torch.Tensor) -> torch.Tensor:
+        probs = torch.softmax(logits.float(), dim=-1)
+        return -(probs * torch.log(probs.clamp_min(1e-8))).sum(dim=-1)
+
+    def _ensure_feature_dim(self, feature: torch.Tensor, expected_dim: int, name: str) -> None:
+        """Luma keeps feature-template contracts explicit so routing heads cannot silently desync from concat order.
+        Luma 把特征模板契约写死检查，避免拼接顺序变化后线性层输入维度悄悄错位。
+        """
+
+        actual_dim = int(feature.shape[-1])
+        if actual_dim != expected_dim:
+            raise RuntimeError(
+                f"{name} feature dim mismatch: expected {expected_dim}, got {actual_dim}. "
+                "Check concat template/order for c_t, progress_state, block_repr, and context summaries."
+            )
+
+    def _context_scalars(self, context: Optional[dict], batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        if context is None:
+            return torch.zeros((batch_size, 3), device=device, dtype=dtype)
+        def _to_column(name: str) -> torch.Tensor:
+            value = context.get(name, None)
+            if value is None:
+                return torch.zeros((batch_size, 1), device=device, dtype=dtype)
+            tensor = value if isinstance(value, torch.Tensor) else torch.tensor(value, device=device, dtype=dtype)
+            if tensor.dim() == 0:
+                tensor = tensor.expand(batch_size).to(dtype=dtype)
+            if tensor.dim() == 1:
+                tensor = tensor[:, None]
+            return tensor.to(device=device, dtype=dtype)
+        next_col = _to_column("progress_next")
+        trend_col = _to_column("progress_trend")
+        plateau_col = _to_column("progress_plateau")
+        return torch.cat([next_col, trend_col, plateau_col], dim=-1)
+
+    def _context_hidden(
+        self,
+        context: Optional[dict],
+        key: str,
+        batch_size: int,
+        hidden_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if context is None or context.get(key, None) is None:
+            return torch.zeros((batch_size, hidden_size), device=device, dtype=dtype)
+        value = context[key]
+        tensor = value if isinstance(value, torch.Tensor) else torch.tensor(value, device=device, dtype=dtype)
+        if tensor.dim() == 1:
+            tensor = tensor[None, :]
+        tensor = tensor.to(device=device, dtype=dtype)
+        if tensor.shape[-1] > hidden_size:
+            tensor = tensor[..., :hidden_size]
+        elif tensor.shape[-1] < hidden_size:
+            pad = torch.zeros((tensor.shape[0], hidden_size - tensor.shape[-1]), device=device, dtype=dtype)
+            tensor = torch.cat([tensor, pad], dim=-1)
+        return tensor
+
+    def _apply_dynamics_experiment(
+        self,
+        h: torch.Tensor,
+        c_t: torch.Tensor,
+        context: Optional[dict],
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], dict]:
+        if not self.dynamics_experiment:
+            return h, None, {}
+
+        bsz, seq_len, hidden_size = h.shape
+        device, dtype = h.device, h.dtype
+        mode = self.dynamics_experiment
+        chunk_summary, spans = self._chunk_summaries(h)
+        num_chunks = chunk_summary.shape[1]
+        global_summary = chunk_summary.mean(dim=1)
+        recent_block = self._context_hidden(context, "recent_block_repr", bsz, hidden_size, device, dtype)
+        world_summary = self._context_hidden(context, "world_summary", bsz, hidden_size, device, dtype)
+        loop_history_summary = self._context_hidden(context, "loop_history_summary", bsz, hidden_size, device, dtype)
+        scalar_ctx = self._context_scalars(context, bsz, device, dtype)
+
+        is_summary_v1 = "summary_chunk_film_v1_core" in mode
+        is_summary_v2 = "summary_chunk_film_v2_progress" in mode
+        is_hici = "hici_construct_integrate_broadcast_v1" in mode
+        is_budget_v1 = "budgeted_summary_routing_v1" in mode
+        is_budget_v2 = "budgeted_summary_routing_v2_progress" in mode
+        is_hier_v1 = "hier_block_token_v1_block_only" in mode
+        is_hier_v2 = "hier_block_token_v2_attn_bias" in mode
+        is_hier_v3 = "hier_block_token_v3_residual_delta" in mode
+        is_double_p = "double_p_coarse_to_fine_v1" in mode
+        is_memory_tier = "memory_tiered_routing_v1" in mode
+        is_focus_v1 = "progress_focus_v1_chunk_query" in mode
+        is_focus_v3 = "progress_focus_v3_dense_sparse_hybrid" in mode
+        is_m1_lite = "m1_lite" in mode
+        is_m1_anti_collapse = "m1_anti_collapse" in mode
+        is_anti_budget = "anti_budget" in mode
+        is_s_lite_control = "s_lite_control" in mode
+        is_s_local_floor = "s_local_floor" in mode
+        is_local_floor_guard = "local_floor" in mode or is_s_local_floor
+        is_entropy_guard = "entropy_guard" in mode or is_m1_anti_collapse
+        is_zone_loss = "zone_loss" in mode
+        is_vitality_loss = "vitality_loss" in mode
+        use_progress = is_summary_v2 or is_budget_v2 or is_focus_v1 or is_focus_v3
+
+        c_expand = c_t[:, None, :].expand(-1, num_chunks, -1)
+        block_expand = recent_block[:, None, :].expand(-1, num_chunks, -1)
+        global_expand = global_summary[:, None, :].expand(-1, num_chunks, -1)
+        loop_expand = loop_history_summary[:, None, :].expand(-1, num_chunks, -1)
+        progress_expand = scalar_ctx[:, None, :].expand(-1, num_chunks, -1) if use_progress else torch.zeros((bsz, num_chunks, 3), device=device, dtype=dtype)
+        third_expand = global_expand if is_hici else (loop_expand if is_memory_tier else torch.zeros_like(global_expand))
+        chunk_feat = torch.cat([chunk_summary, block_expand, third_expand, c_expand, progress_expand], dim=-1)
+        self._ensure_feature_dim(chunk_feat, self.chunk_feature_dim, "chunk")
+
+        chunk_gate_logits = self.chunk_gate_head(chunk_feat).squeeze(-1)
+        chunk_gate = torch.sigmoid(chunk_gate_logits)
+        film = self.chunk_film_head(chunk_feat)
+        gamma_chunk, beta_chunk = film.chunk(2, dim=-1)
+        gamma_tok = self._expand_chunk_values(gamma_chunk, spans, seq_len)
+        beta_tok = self._expand_chunk_values(beta_chunk, spans, seq_len)
+
+        c_expand_tok = c_t[:, None, :].expand(-1, seq_len, -1)
+        token_scalar_tok = scalar_ctx[:, None, :].expand(-1, seq_len, -1) if use_progress else torch.zeros((bsz, seq_len, 3), device=device, dtype=dtype)
+        token_feat = torch.cat([h, c_expand_tok, token_scalar_tok], dim=-1)
+        self._ensure_feature_dim(token_feat, self.token_feature_dim, "token")
+        token_score = torch.sigmoid(self.token_score_head(token_feat)).squeeze(-1)
+        token_score = torch.nan_to_num(token_score, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+
+        c_bias = torch.tanh(self.ct_injection.proj(c_t)).unsqueeze(1)
+        dense_gain_value = self.routing_weak_gain
+        sparse_gain_value = self.routing_strong_gain
+        if is_s_lite_control or is_m1_lite:
+            dense_gain_value *= 0.75
+            sparse_gain_value *= 0.60
+        dense_gain = torch.tensor(dense_gain_value, device=device, dtype=dtype)
+        sparse_gain = torch.tensor(sparse_gain_value, device=device, dtype=dtype)
+        quarter = torch.tensor(0.25, device=device, dtype=dtype)
+        half = torch.tensor(0.5, device=device, dtype=dtype)
+        beta_tanh = torch.tanh(beta_tok).clamp(-self.routing_modulation_ceiling, self.routing_modulation_ceiling)
+        gamma_tanh = torch.tanh(gamma_tok).clamp(-self.routing_modulation_ceiling, self.routing_modulation_ceiling)
+        weak_dense = dense_gain * (torch.tanh(c_bias) + quarter * beta_tanh)
+        strong_summary = sparse_gain * (half * beta_tanh + half * gamma_tanh)
+
+        selected_chunk_mask = torch.ones((bsz, num_chunks), device=device, dtype=torch.bool)
+        selected_mass = chunk_gate.new_ones((bsz,))
+        attn_bias: Optional[torch.Tensor] = None
+        mod_stats: dict[str, torch.Tensor] = {}
+
+        if is_budget_v1 or is_budget_v2:
+            if is_budget_v2:
+                budget_in = torch.cat([c_t, scalar_ctx], dim=-1)
+            else:
+                loop_ratio = float(context.get("loop_ratio", 0.0)) if context is not None else 0.0
+                hard_proxy = float(context.get("hard_loop_var_proxy", 0.0)) if context is not None else 0.0
+                budget_extra = torch.tensor([loop_ratio, hard_proxy, 1.0 - loop_ratio], device=device, dtype=dtype).expand(bsz, -1)
+                budget_in = torch.cat([c_t, budget_extra], dim=-1)
+            budget_value = torch.sigmoid(self.budget_head(budget_in)).squeeze(-1)
+            budget_value = self.routing_budget_min + (self.routing_budget_max - self.routing_budget_min) * budget_value
+            selected_chunk_mask = torch.zeros_like(selected_chunk_mask)
+            budget_utilization = []
+            for b in range(bsz):
+                topk = max(1, min(num_chunks, int(round(float(num_chunks) * float(budget_value[b].item())))))
+                idx = torch.topk(chunk_gate[b], k=topk).indices
+                selected_chunk_mask[b, idx] = True
+                budget_utilization.append(float(topk) / float(max(1, num_chunks)))
+            selected_mass = torch.tensor(budget_utilization, device=device, dtype=dtype)
+            mod_stats["budget_value_mean"] = budget_value.mean()
+            mod_stats["budget_value_std"] = budget_value.std(unbiased=False)
+            mod_stats["budget_utilization_ratio"] = selected_mass.mean()
+
+        if is_hier_v1 or is_hier_v2 or is_hier_v3 or is_double_p:
+            block_feat = torch.cat([chunk_summary, block_expand, torch.zeros_like(global_expand), c_expand, torch.zeros((bsz, num_chunks, 3), device=device, dtype=dtype)], dim=-1)
+            self._ensure_feature_dim(block_feat, self.block_feature_dim, "block")
+            block_score = self.block_score_head(block_feat).squeeze(-1)
+            if is_double_p:
+                selected_chunk_mask, coarse_mass = self._topp_mask(block_score, self.routing_top_p_coarse, self.routing_topk_blocks * 2)
+                selected_mass = coarse_mass
+                mod_stats["topk_or_topp_mass"] = coarse_mass.mean()
+            else:
+                selected_chunk_mask = self._topk_mask(block_score, self.routing_topk_blocks)
+                selected_mass = selected_chunk_mask.float().mean(dim=-1)
+            mod_stats["selected_block_count"] = selected_chunk_mask.float().sum(dim=-1).mean()
+            mod_stats["selected_block_entropy"] = self._entropy(block_score).mean()
+
+        if is_focus_v1 or is_focus_v3:
+            focus_query = self.focus_query_head(torch.cat([c_t, scalar_ctx], dim=-1))
+            focus_score = torch.einsum("bd,bkd->bk", focus_query, chunk_summary) / math.sqrt(float(hidden_size))
+            selected_chunk_mask = self._topk_mask(focus_score, self.routing_topk_blocks)
+            selected_mass = selected_chunk_mask.float().mean(dim=-1)
+            mod_stats["focus_score_entropy"] = self._entropy(focus_score).mean()
+            mod_stats["focus_span_count"] = selected_chunk_mask.float().sum(dim=-1).mean()
+            mod_stats["focus_span_avg_width"] = torch.tensor(float(self.routing_chunk_size), device=device, dtype=dtype)
+
+        if is_memory_tier:
+            tier_logits = self.memory_tier_head(torch.cat([c_t, scalar_ctx], dim=-1))
+            tier_weights = torch.softmax(tier_logits.float(), dim=-1).to(dtype)
+            world_cap = self.routing_world_summary_cap
+            if (is_m1_lite or is_m1_anti_collapse) and world_cap >= 1.0:
+                world_cap = 0.45
+            if world_cap < 1.0:
+                capped_world = torch.clamp(tier_weights[:, 3], max=world_cap)
+                tier_weights = torch.cat([tier_weights[:, :3], capped_world[:, None]], dim=-1)
+                tier_weights = tier_weights / tier_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            min_local_share = self.routing_min_local_share
+            if (is_m1_lite or is_m1_anti_collapse) and min_local_share <= 0.0:
+                min_local_share = 0.20
+            if min_local_share > 0.0:
+                local_share = torch.clamp(tier_weights[:, 0], min=min_local_share)
+                tier_weights = torch.cat([local_share[:, None], tier_weights[:, 1:]], dim=-1)
+                tier_weights = tier_weights / tier_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            source_stack = torch.stack([chunk_summary.mean(dim=1), loop_history_summary, recent_block, world_summary], dim=1)
+            soft_tier_mode = is_m1_lite or is_m1_anti_collapse or self.routing_tier_soft_only
+            tier_choice = torch.argmax(tier_weights, dim=-1)
+            if soft_tier_mode:
+                chosen_source = (tier_weights.unsqueeze(-1) * source_stack).sum(dim=1)
+            else:
+                chosen_source = source_stack[torch.arange(bsz, device=device), tier_choice]
+            h = h + sparse_gain * torch.tanh(self.memory_source_proj(chosen_source)).unsqueeze(1)
+            local_selected = self._topk_mask(chunk_gate, self.routing_topk_blocks)
+            if soft_tier_mode:
+                selected_chunk_mask = local_selected
+                selected_mass = (local_selected.float() * tier_weights[:, 0:1]).mean(dim=-1)
+            else:
+                local_active = tier_choice.eq(0)[:, None].expand(-1, num_chunks)
+                selected_chunk_mask = local_selected & local_active
+                selected_mass = selected_chunk_mask.float().mean(dim=-1)
+            tier_entropy = self._entropy(tier_logits)
+            dominant_tier_ratio = tier_weights.max(dim=-1).values
+            prev_tier_choice = context.get("prev_tier_choice", None) if context is not None else None
+            if isinstance(prev_tier_choice, torch.Tensor) and prev_tier_choice.shape == tier_choice.shape:
+                tier_switch_rate = tier_choice.ne(prev_tier_choice.to(device=device)).float().mean()
+            else:
+                tier_switch_rate = tier_choice.new_zeros((), dtype=dtype)
+            mod_stats["tier_weight_local"] = tier_weights[:, 0].mean()
+            mod_stats["tier_weight_loop_history"] = tier_weights[:, 1].mean()
+            mod_stats["tier_weight_block_repr"] = tier_weights[:, 2].mean()
+            mod_stats["tier_weight_world_summary"] = tier_weights[:, 3].mean()
+            mod_stats["tier_entropy"] = tier_entropy.mean()
+            mod_stats["dominant_tier_ratio"] = dominant_tier_ratio.mean()
+            mod_stats["tier_switch_rate"] = tier_switch_rate
+            mod_stats["tier_local_share"] = tier_weights[:, 0].mean()
+            mod_stats["tier_entropy_floor_violation"] = torch.relu(
+                tier_entropy.new_tensor(
+                    self.routing_tier_entropy_floor if self.routing_tier_entropy_floor > 0.0 else (1.0 if is_m1_anti_collapse else 0.0)
+                )
+                - tier_entropy
+            ).mean()
+            mod_stats["tier_local_floor_violation"] = torch.relu(
+                tier_weights.new_tensor(min_local_share) - tier_weights[:, 0]
+            ).mean()
+            mod_stats["tier_choice_idx_mean"] = tier_choice.float().mean()
+            mod_stats["tier_choice_last"] = tier_choice.float().mean()
+            mod_stats["_tier_choice_vector"] = tier_choice.detach()
+
+        if is_anti_budget:
+            min_active_ratio = max(0.0, self.routing_min_local_share if self.routing_min_local_share > 0.0 else 0.20)
+            min_active_k = max(1, min(num_chunks, int(round(float(num_chunks) * min_active_ratio))))
+            for b in range(bsz):
+                current_k = int(selected_chunk_mask[b].float().sum().item())
+                if current_k >= min_active_k:
+                    continue
+                top_idx = torch.topk(chunk_gate[b], k=min_active_k).indices
+                selected_chunk_mask[b, top_idx] = True
+            selected_mass = selected_chunk_mask.float().mean(dim=-1)
+            mod_stats["budget_min_active_ratio"] = selected_mass.mean()
+
+        chunk_selected_tok = self._expand_chunk_values(selected_chunk_mask.to(dtype=dtype).unsqueeze(-1), spans, seq_len)
+        selected_token_mask = chunk_selected_tok.squeeze(-1)
+        local_floor = max(self.routing_local_floor, self.routing_modulation_floor if is_local_floor_guard else 0.0)
+        if local_floor > 0.0:
+            chunk_strength_tok = local_floor + (1.0 - local_floor) * chunk_selected_tok
+        else:
+            chunk_strength_tok = chunk_selected_tok
+        chunk_strength_tok = chunk_strength_tok.clamp(max=max(1e-6, self.routing_modulation_ceiling))
+        strong_summary_delta = chunk_strength_tok * strong_summary
+        baseline_path_energy = (h + weak_dense).float().norm(dim=-1).mean()
+
+        if is_summary_v1 or is_summary_v2 or is_hici or is_budget_v1 or is_budget_v2:
+            h = h + weak_dense + strong_summary_delta
+        elif is_hier_v1:
+            h = h + chunk_strength_tok * dense_gain * (torch.tanh(c_bias) + half * beta_tanh)
+        elif is_hier_v2:
+            attn_bias = chunk_strength_tok * token_score.unsqueeze(-1) * sparse_gain * torch.tanh(c_bias)
+            h = h + weak_dense
+            mod_stats["selected_token_ratio"] = (selected_token_mask * (token_score > 0.5).float()).mean()
+        elif is_hier_v3:
+            local_delta = torch.tanh(self.local_delta_head(torch.cat([h, c_expand_tok], dim=-1)))
+            h = h + weak_dense + chunk_strength_tok * token_score.unsqueeze(-1) * sparse_gain * local_delta
+            mod_stats["selected_token_ratio"] = (selected_token_mask * (token_score > 0.5).float()).mean()
+            mod_stats["delta_local_norm_mean"] = local_delta.norm(dim=-1).mean()
+            mod_stats["delta_local_norm_std"] = local_delta.norm(dim=-1).std(unbiased=False)
+        elif is_double_p:
+            token_scores_masked = token_score * selected_token_mask
+            token_logits = torch.log(token_scores_masked.clamp_min(1e-8))
+            fine_mask, fine_mass = self._topp_mask(token_logits, self.routing_top_p_fine, self.routing_topk_tokens)
+            local_delta = torch.tanh(self.local_delta_head(torch.cat([h, c_expand_tok], dim=-1)))
+            fine_mask_tok = fine_mask.unsqueeze(-1).to(dtype)
+            h = h + weak_dense + fine_mask_tok * (half * sparse_gain) * local_delta
+            mod_stats["selected_token_ratio"] = fine_mask.float().mean()
+            mod_stats["topk_or_topp_mass"] = fine_mass.mean()
+            mod_stats["delta_local_norm_mean"] = local_delta.norm(dim=-1).mean()
+            mod_stats["delta_local_norm_std"] = local_delta.norm(dim=-1).std(unbiased=False)
+        elif is_focus_v1:
+            h = h + weak_dense + strong_summary_delta
+        elif is_focus_v3:
+            local_delta = torch.tanh(self.local_delta_head(torch.cat([h, c_expand_tok], dim=-1)))
+            h = h + weak_dense + chunk_strength_tok * sparse_gain * local_delta
+            mod_stats["delta_local_norm_mean"] = local_delta.norm(dim=-1).mean()
+            mod_stats["delta_local_norm_std"] = local_delta.norm(dim=-1).std(unbiased=False)
+        elif is_memory_tier:
+            h = h + weak_dense + chunk_strength_tok * (half * strong_summary)
+        else:
+            h = h + weak_dense
+
+        gate_ref = token_score if (is_hier_v2 or is_hier_v3 or is_double_p) else chunk_gate
+        mod_stats["modulated_chunk_ratio"] = (chunk_selected_tok.squeeze(-1) > 0.5).float().mean()
+        mod_stats["unmodulated_path_energy"] = baseline_path_energy
+        gain_ref = chunk_strength_tok.squeeze(-1).float()
+        mod_stats["modulation_gain_low_ratio"] = (gain_ref < 0.33).float().mean()
+        mod_stats["modulation_gain_mid_ratio"] = ((gain_ref >= 0.33) & (gain_ref < 0.66)).float().mean()
+        mod_stats["modulation_gain_high_ratio"] = (gain_ref >= 0.66).float().mean()
+        mod_stats["gate_mean"] = gate_ref.mean()
+        mod_stats["gate_std"] = gate_ref.std(unbiased=False)
+        mod_stats["gate_saturation_ratio"] = ((gate_ref < 0.01) | (gate_ref > 0.99)).float().mean()
+        mod_stats["nonfinite_gate_count"] = (~torch.isfinite(gate_ref)).float().sum()
+        mod_stats["selected_chunk_ratio"] = selected_chunk_mask.float().mean()
+        mod_stats["selected_token_ratio"] = mod_stats.get("selected_token_ratio", selected_token_mask.mean())
+        mod_stats["chunk_gamma_mean"] = gamma_chunk.mean()
+        mod_stats["chunk_gamma_std"] = gamma_chunk.std(unbiased=False)
+        mod_stats["chunk_beta_mean"] = beta_chunk.mean()
+        mod_stats["chunk_beta_std"] = beta_chunk.std(unbiased=False)
+        mod_stats["dense_path_gain"] = dense_gain
+        mod_stats["sparse_path_gain"] = sparse_gain
+        return h, attn_bias, mod_stats
+
     def forward(
         self,
         h: torch.Tensor,
@@ -1811,11 +2440,25 @@ class LumaReasonCore(nn.Module):
         r_trust: Optional[torch.Tensor] = None,
         r_t_mode: str = "blend",
         disable_ct_injection: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        modulation_context: Optional[dict] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], dict]:
         c_bias = self.ct_injection.proj(c_t).unsqueeze(1)
         if disable_ct_injection:
             c_bias = torch.zeros_like(c_bias)
         switch_value: Optional[torch.Tensor] = None
+        modulation_stats: dict = {}
+        attn_bias: Optional[torch.Tensor] = None
+        if not disable_ct_injection and self.dynamics_experiment:
+            h, attn_bias, modulation_stats = self._apply_dynamics_experiment(h, c_t, modulation_context)
+        if not disable_ct_injection:
+            if self.ct_modulation_mode == "additive":
+                h = h + c_bias
+            elif self.ct_modulation_mode == "lowrank_hyperbias" and self.ct_lowrank_down is not None and self.ct_lowrank_up is not None:
+                lowrank_bias = self.ct_lowrank_up(F.silu(self.ct_lowrank_down(c_t))).unsqueeze(1)
+                h = h + lowrank_bias
+            elif self.ct_modulation_mode == "token_selective" and self.token_selective_gate is not None:
+                token_gate = torch.sigmoid(self.token_selective_gate(torch.cat([h, c_t.unsqueeze(1).expand(-1, h.shape[1], -1)], dim=-1)))
+                h = h + token_gate * c_bias
         if self.r_injection is not None and r_t is not None:
             r_bias = self.r_injection(r_t).unsqueeze(1)
             trust = r_trust.unsqueeze(1) if r_trust is not None else torch.zeros_like(c_bias[..., :1])
@@ -1833,16 +2476,15 @@ class LumaReasonCore(nn.Module):
                 switch_value = trust.squeeze(1)
             effective_switch = trust * switch_value.unsqueeze(1)
             if r_t_mode == "blend":
-                h = h + (1.0 - effective_switch) * c_bias + effective_switch * r_bias
+                if self.ct_modulation_mode != "additive":
+                    h = h + effective_switch * r_bias
+                else:
+                    h = h + effective_switch * (r_bias - c_bias)
             elif r_t_mode == "parallel":
-                h = h + c_bias + effective_switch * r_bias
-            else:
-                h = h + c_bias
-        else:
-            h = h + c_bias
+                h = h + effective_switch * r_bias
         for layer in self.shared_layers:
-            h = layer(h)
-        return h, switch_value
+            h = layer(h, c_t=c_t, attn_bias=attn_bias)
+        return h, switch_value, modulation_stats
 
 
 class LumaBackbone(nn.Module):
@@ -1871,6 +2513,7 @@ class LumaBackbone(nn.Module):
         # SelfJEPAResidualPredictor 是叠在其上的独立 Self-JEPA 残差预测头。
         self.self_jepa_residual_predictor = SelfJEPAResidualPredictor(config)
         self.self_jepa_progress_shape_head = SelfJEPAProgressShapeHead(config)
+        self.trajectory_health_probe = TrajectoryHealthProbe(config) if config.enable_trajectory_health_probe else None
         self.reasoning_state_ring = TinyReasoningStateRing(config) if config.enable_reasoning_state_ring else None
         self.reasoning_state_to_hidden = nn.Linear(config.r_t_dim, config.hidden_size, bias=False) if config.enable_reasoning_state_ring else None
         if config.world_jepa_mode == "full":
@@ -1898,6 +2541,10 @@ class LumaBackbone(nn.Module):
             gain_weight=config.exit_gain_weight,
             uncertainty_feature_weight=config.exit_uncertainty_feature_weight,
             crystal_feature_weight=config.exit_crystal_feature_weight,
+            enable_progress_exit_readout=config.enable_progress_exit_readout,
+            progress_gain_weight=config.exit_progress_gain_weight,
+            progress_trend_weight=config.exit_progress_trend_weight,
+            progress_plateau_weight=config.exit_progress_plateau_weight,
         )
         self.final_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -1952,8 +2599,17 @@ class LumaBackbone(nn.Module):
         jepa_crystal_history: List[torch.Tensor] = []
         predicted_gain_history: List[torch.Tensor] = []
         predicted_gain2_history: List[torch.Tensor] = []
+        progress_next_history: List[torch.Tensor] = []
+        progress_trend_history: List[torch.Tensor] = []
+        progress_plateau_history: List[torch.Tensor] = []
         world_surprise_history: List[torch.Tensor] = []
         world_summary_history: List[torch.Tensor] = []
+        exit_score_preclamp_nonfinite_history: List[torch.Tensor] = []
+        exit_score_postfix_clamped_ratio_history: List[torch.Tensor] = []
+        bernoulli_invalid_prevented_history: List[torch.Tensor] = []
+        nan_to_num_trigger_history: List[torch.Tensor] = []
+        dynamics_modulation_history: List[dict] = []
+        dynamics_modulation_traces: dict[str, List[torch.Tensor]] = {}
         math_lane_score_history: List[torch.Tensor] = []
         math_summary_gate_history: List[torch.Tensor] = []
         r_t_history: List[torch.Tensor] = []
@@ -1968,16 +2624,22 @@ class LumaBackbone(nn.Module):
         coupling_terms: List[torch.Tensor] = []
         progress_shape_terms: List[torch.Tensor] = []
         local_consistency_terms: List[torch.Tensor] = []
+        trajectory_health_terms: List[torch.Tensor] = []
         pending_rollout_preds: List[Tuple[int, torch.Tensor, int]] = []
-        pending_progress_preds: List[Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        pending_progress_preds: List[Tuple[int, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]] = []
         slow_step_idx = -1
         executed_loops = 0
         recent_joint_gains: List[torch.Tensor] = []
         recent_delta_improves: List[torch.Tensor] = []
         pred_delta_history: List[torch.Tensor] = []
+        latest_progress_next = h.new_zeros(())
+        latest_progress_trend = h.new_zeros(())
+        latest_progress_plateau = h.new_zeros(())
+        trajectory_health_history: List[torch.Tensor] = []
         prev_self_error_for_gain = h.new_tensor(1.0)
         prev_world_error_for_gain = h.new_tensor(1.0)
         prev_world_summary: Optional[torch.Tensor] = None
+        prev_tier_choice: Optional[torch.Tensor] = None
         if "math_lane_score" in compression_diag:
             math_lane_score_history.append(compression_diag["math_lane_score"].detach())
         hierarchical_horizons = self._hierarchical_rollout_horizons()
@@ -1985,11 +2647,34 @@ class LumaBackbone(nn.Module):
         for loop_idx in range(self.config.reason_active_loops):
             current_r_t = reasoning_state["state"] if reasoning_state is not None else None
             current_r_trust = reasoning_state["trust"] if reasoning_state is not None else None
-            switch_trace: dict[str, Optional[torch.Tensor]] = {"value": None}
+            recent_block_repr = block_reprs[-1].mean(dim=1) if block_reprs else h.new_zeros((batch_size, h.shape[-1]))
+            if loop_history:
+                loop_history_summary = torch.stack([item.mean(dim=1) for item in loop_history[-3:]], dim=0).mean(dim=0)
+            else:
+                loop_history_summary = h.new_zeros((batch_size, h.shape[-1]))
+            recent_world_summary = world_summary_history[-1] if world_summary_history else h.new_zeros((batch_size, self.config.world_dim))
+            recent_improves = torch.stack(recent_delta_improves[-4:]).float() if recent_delta_improves else h.new_zeros((1,), dtype=torch.float32)
+            hard_loop_var_proxy = float(recent_improves.var(unbiased=False).item()) if recent_improves.numel() > 1 else 0.0
+            modulation_context = {
+                "recent_block_repr": recent_block_repr.detach(),
+                "world_summary": recent_world_summary.detach(),
+                "loop_history_summary": loop_history_summary.detach(),
+                "progress_next": latest_progress_next.detach(),
+                "progress_trend": latest_progress_trend.detach(),
+                "progress_plateau": latest_progress_plateau.detach(),
+                "loop_ratio": float(loop_idx + 1) / float(max(1, self.config.reason_active_loops)),
+                "hard_loop_var_proxy": hard_loop_var_proxy,
+                "prev_tier_choice": prev_tier_choice.detach() if isinstance(prev_tier_choice, torch.Tensor) else None,
+            }
+            switch_trace: dict[str, object] = {"value": None, "mod_stats": {}}
             streams, h = self.mhc(
                 streams,
                 lambda x, rt=current_r_t, rg=current_r_trust: (
-                    lambda out: (switch_trace.__setitem__("value", out[1]) or out[0])
+                    lambda out: (
+                        switch_trace.__setitem__("value", out[1])
+                        or switch_trace.__setitem__("mod_stats", out[2])
+                        or out[0]
+                    )
                 )(
                     self.reason_core(
                         x,
@@ -1998,11 +2683,25 @@ class LumaBackbone(nn.Module):
                         r_trust=rg,
                         r_t_mode=self.config.r_t_mode,
                         disable_ct_injection=disable_ct_injection,
+                        modulation_context=modulation_context,
                     )
                 ),
             )
             if switch_trace["value"] is not None:
-                r_t_switch_history.append(switch_trace["value"].detach().mean())
+                r_t_switch_history.append(cast(torch.Tensor, switch_trace["value"]).detach().mean())
+            loop_mod_stats = cast(dict, switch_trace["mod_stats"])
+            if "_tier_choice_vector" in loop_mod_stats:
+                maybe_tier_choice = loop_mod_stats.pop("_tier_choice_vector")
+                if isinstance(maybe_tier_choice, torch.Tensor):
+                    prev_tier_choice = maybe_tier_choice.detach().to(device=h.device)
+            if loop_mod_stats:
+                dynamics_modulation_history.append(loop_mod_stats)
+                for key, value in loop_mod_stats.items():
+                    if value is None:
+                        continue
+                    tensor = value if isinstance(value, torch.Tensor) else h.new_tensor(float(value))
+                    tensor = tensor.float().mean()
+                    dynamics_modulation_traces.setdefault(key, []).append(tensor.detach())
             h = self.unified_attnres(h, loop_history, block_reprs)
             did_slow_update = (loop_idx % self.config.slow_k == 0)
             if did_slow_update:
@@ -2091,13 +2790,13 @@ class LumaBackbone(nn.Module):
                         current_rollout_error = rollout_err.detach()
                 current_self_improve_scalar = (prev_self_error_for_gain - current_self_error).detach()
                 matured_progress = [
-                    (pred_next, pred_trend, pred_plateau, prev_improve)
-                    for target_idx, pred_next, pred_trend, pred_plateau, prev_improve in pending_progress_preds
+                    (pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack)
+                    for target_idx, pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack in pending_progress_preds
                     if target_idx == slow_step_idx
                 ]
                 if matured_progress:
                     next_improve_target = h.new_full((batch_size,), float(current_self_improve_scalar.item()))
-                    for pred_next, pred_trend, pred_plateau, prev_improve in matured_progress:
+                    for pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack in matured_progress:
                         if self.config.self_progress_shape_weight > 0.0:
                             progress_shape_terms.append(
                                 self.config.self_progress_shape_weight
@@ -2114,6 +2813,14 @@ class LumaBackbone(nn.Module):
                             progress_shape_terms.append(
                                 self.config.self_progress_plateau_weight
                                 * F.binary_cross_entropy_with_logits(pred_plateau, plateau_target)
+                            )
+                        if self.config.enable_backtrack_aware_progress and pred_backtrack is not None:
+                            backtrack_target = h.new_full(
+                                (batch_size,),
+                                1.0 if float(current_self_improve_scalar.item()) < 0.0 else 0.0,
+                            )
+                            progress_shape_terms.append(
+                                0.02 * F.binary_cross_entropy_with_logits(pred_backtrack, backtrack_target)
                             )
                 pending_rollout_preds = [
                     (target_idx, pred, horizon)
@@ -2153,8 +2860,29 @@ class LumaBackbone(nn.Module):
                             progress_pred["pred_trend"],
                             progress_pred["pred_plateau_logit"],
                             current_self_improve_scalar.detach(),
+                            progress_pred.get("pred_backtrack_logit"),
                         )
                     )
+                    latest_progress_next = progress_pred["pred_next_improve"].detach().mean()
+                    latest_progress_trend = progress_pred["pred_trend"].detach().mean()
+                    latest_progress_plateau = torch.sigmoid(progress_pred["pred_plateau_logit"].detach()).mean()
+                    if self.trajectory_health_probe is not None:
+                        health_logit = self.trajectory_health_probe(
+                            c_t,
+                            delta_h,
+                            current_loop_progress,
+                            recent_self_improve_vec,
+                            recent_rollout_improve_vec,
+                        )
+                        health_target = h.new_full(
+                            (batch_size,),
+                            1.0 if (float(current_self_improve_scalar.item()) > 0.0 and float(current_rollout_error.item()) <= float(current_self_error.item()) + 0.05) else 0.0,
+                        )
+                        trajectory_health_terms.append(
+                            self.config.trajectory_health_weight
+                            * F.binary_cross_entropy_with_logits(health_logit, health_target)
+                        )
+                        trajectory_health_history.append(torch.sigmoid(health_logit.detach()).mean())
                 if self.config.self_local_delta_consistency_weight > 0.0 and pred_delta_history:
                     prev_pred_delta = pred_delta_history[-1]
                     local_consistency_terms.append(
@@ -2229,6 +2957,9 @@ class LumaBackbone(nn.Module):
                 recent_delta_improve_2=recent_delta_improves[-2] if len(recent_delta_improves) > 1 else h.new_zeros(()),
                 reason_local_signal=(reasoning_state["trust"].mean() if reasoning_state is not None else None),
                 uncertainty_score=uncertainty.mean(),
+                progress_next_improve=latest_progress_next,
+                progress_trend=latest_progress_trend,
+                progress_plateau_logit=torch.logit(latest_progress_plateau.clamp(1e-4, 1 - 1e-4)),
             )
             delta_h_history.append(exit_stats["delta_h"].detach())
             self_error_history.append(current_self_error.detach())
@@ -2242,6 +2973,13 @@ class LumaBackbone(nn.Module):
             jepa_crystal_history.append(exit_stats["jepa_crystal_signal"].detach())
             predicted_gain_history.append(exit_stats["predicted_gain"].detach())
             predicted_gain2_history.append(exit_stats["predicted_gain2"].detach())
+            progress_next_history.append(exit_stats["progress_next_signal"].detach())
+            progress_trend_history.append(exit_stats["progress_trend_signal"].detach())
+            progress_plateau_history.append(exit_stats["progress_plateau_signal"].detach())
+            exit_score_preclamp_nonfinite_history.append(exit_stats["exit_score_preclamp_nonfinite_count"].detach())
+            exit_score_postfix_clamped_ratio_history.append(exit_stats["exit_score_postfix_clamped_ratio"].detach())
+            bernoulli_invalid_prevented_history.append(exit_stats["bernoulli_invalid_prevented_count"].detach())
+            nan_to_num_trigger_history.append(exit_stats["nan_to_num_trigger_count"].detach())
             world_surprise_history.append(world_surprise)
             world_summary_history.append(world_summary)
             recent_joint_gains.append(exit_stats["predicted_gain"].detach())
@@ -2261,7 +2999,32 @@ class LumaBackbone(nn.Module):
             self_jepa_loss = self_jepa_loss + progress_shape_loss + local_consistency_loss
         else:
             self_jepa_loss = h.new_zeros(()) + progress_shape_loss + local_consistency_loss
+        if trajectory_health_terms:
+            self_jepa_loss = self_jepa_loss + torch.stack(trajectory_health_terms).mean()
         self_rollout_loss = torch.stack(rollout_loss_terms).mean() if rollout_loss_terms else h.new_zeros(())
+        dynamics_modulation_summary = {
+            key: torch.stack(values).mean() if values else h.new_zeros(())
+            for key, values in dynamics_modulation_traces.items()
+        }
+        dynamics_modulation_std = {
+            f"{key}_std": (torch.stack(values).std(unbiased=False) if len(values) > 1 else h.new_zeros(()))
+            for key, values in dynamics_modulation_traces.items()
+        }
+        dynamics_modulation_summary.update(dynamics_modulation_std)
+        c_t_delta_norm_history: List[torch.Tensor] = []
+        if len(c_t_history) > 1:
+            for prev_state, next_state in zip(c_t_history[:-1], c_t_history[1:]):
+                c_t_delta_norm_history.append((next_state.float() - prev_state.float()).norm(dim=-1).mean().detach())
+        pred_delta_c_cos_adjacent_history: List[torch.Tensor] = []
+        if len(pred_delta_history) > 1:
+            for prev_delta, next_delta in zip(pred_delta_history[:-1], pred_delta_history[1:]):
+                pred_delta_c_cos_adjacent_history.append(
+                    F.cosine_similarity(
+                        F.normalize(prev_delta.float(), dim=-1),
+                        F.normalize(next_delta.float(), dim=-1),
+                        dim=-1,
+                    ).mean().detach()
+                )
         return h, {
             "block_reprs": block_reprs,
             "loop_history": loop_history,
@@ -2276,6 +3039,7 @@ class LumaBackbone(nn.Module):
             "self_jepa_loss": self_jepa_loss,
             "self_progress_shape_loss": progress_shape_loss,
             "self_local_consistency_loss": local_consistency_loss,
+            "trajectory_health_mean": torch.stack(trajectory_health_history).mean() if trajectory_health_history else h.new_zeros(()),
             "self_rollout_loss": self_rollout_loss,
             "slow_update_flags": slow_update_flags,
             "delta_h_history": delta_h_history,
@@ -2290,8 +3054,19 @@ class LumaBackbone(nn.Module):
             "jepa_crystal_history": jepa_crystal_history,
             "predicted_gain_history": predicted_gain_history,
             "predicted_gain2_history": predicted_gain2_history,
+            "progress_next_history": progress_next_history,
+            "progress_trend_history": progress_trend_history,
+            "progress_plateau_history": progress_plateau_history,
             "world_surprise_history": world_surprise_history,
             "world_summary_history": world_summary_history,
+            "exit_score_preclamp_nonfinite_history": exit_score_preclamp_nonfinite_history,
+            "exit_score_postfix_clamped_ratio_history": exit_score_postfix_clamped_ratio_history,
+            "bernoulli_invalid_prevented_history": bernoulli_invalid_prevented_history,
+            "nan_to_num_trigger_history": nan_to_num_trigger_history,
+            "dynamics_modulation_history": dynamics_modulation_history,
+            "dynamics_modulation_summary": dynamics_modulation_summary,
+            "c_t_delta_norm_history": c_t_delta_norm_history,
+            "pred_delta_c_cos_adjacent_history": pred_delta_c_cos_adjacent_history,
             "r_t_history": r_t_history,
             "r_t_trust_history": r_t_trust_history,
             "r_t_switch_history": r_t_switch_history,
@@ -2442,6 +3217,105 @@ class LumaForCausalLM(PreTrainedModel):
         exit_aux_loss = torch.stack(gain_terms).mean() if gain_terms else labels.new_zeros((), dtype=torch.float32)
         return exit_aux_loss, target_history, benefit_history, predicted_gain_history, predicted_gain2_history
 
+    def _zone_penalty(self, value: torch.Tensor, low: float, high: float) -> torch.Tensor:
+        """Luma penalizes collapse strongly, but only lightly penalizes over-activity.
+        Luma 对活性塌缩重罚，对过活跃只轻罚，避免把系统推向死平滑。
+        """
+
+        low_t = value.new_tensor(low)
+        high_t = value.new_tensor(high)
+        below = torch.relu(low_t - value)
+        above = torch.relu(value - high_t)
+        return below.pow(2) + 0.5 * above.pow(2)
+
+    def _compute_rollout_activity_zone_loss(self, aux: dict, ref: torch.Tensor) -> torch.Tensor:
+        if self.config.rollout_zone_weight <= 0.0:
+            aux["rollout_activity_zone_loss"] = ref.new_zeros(())
+            return ref.new_zeros(())
+        rollout_history = aux.get("rollout_error_history", [])
+        if not rollout_history:
+            aux["rollout_activity_zone_loss"] = ref.new_zeros(())
+            return ref.new_zeros(())
+        rollout_tensor = torch.stack([item.float() for item in rollout_history])
+        rollout_nonzero_ratio = (rollout_tensor.abs() > 1e-12).float().mean()
+        rollout_active_ratio = (rollout_tensor.abs() > 1e-6).float().mean()
+        if aux.get("delta_h_history"):
+            delta_norms = torch.stack([item.float().norm(dim=-1).mean() for item in aux["delta_h_history"]])
+            future_delta_var = delta_norms.var(unbiased=False)
+        else:
+            future_delta_var = ref.new_zeros(())
+        zone_loss = (
+            self._zone_penalty(rollout_nonzero_ratio, self.config.rollout_nonzero_low, self.config.rollout_nonzero_high)
+            + self._zone_penalty(rollout_active_ratio, self.config.rollout_active_low, self.config.rollout_active_high)
+            + self._zone_penalty(future_delta_var, self.config.rollout_future_var_low, self.config.rollout_future_var_high)
+        )
+        zone_loss = self.config.rollout_zone_weight * zone_loss
+        aux["rollout_nonzero_ratio_internal"] = rollout_nonzero_ratio.detach()
+        aux["rollout_active_ratio_internal"] = rollout_active_ratio.detach()
+        aux["future_delta_var_internal"] = future_delta_var.detach()
+        aux["rollout_activity_zone_loss"] = zone_loss.detach()
+        return zone_loss
+
+    def _compute_routing_entropy_regularization(self, aux: dict, ref: torch.Tensor) -> torch.Tensor:
+        if self.config.routing_tier_entropy_weight <= 0.0 and self.config.routing_min_local_share_weight <= 0.0:
+            aux["routing_entropy_loss"] = ref.new_zeros(())
+            return ref.new_zeros(())
+        modulation_history = aux.get("dynamics_modulation_history", [])
+        if not modulation_history:
+            aux["routing_entropy_loss"] = ref.new_zeros(())
+            return ref.new_zeros(())
+        entropy_floor_terms: List[torch.Tensor] = []
+        local_floor_terms: List[torch.Tensor] = []
+        for item in modulation_history:
+            if "tier_entropy_floor_violation" in item:
+                entropy_floor_terms.append(item["tier_entropy_floor_violation"].float().mean())
+            if "tier_local_floor_violation" in item:
+                local_floor_terms.append(item["tier_local_floor_violation"].float().mean())
+        entropy_loss = torch.stack(entropy_floor_terms).mean() if entropy_floor_terms else ref.new_zeros(())
+        local_loss = torch.stack(local_floor_terms).mean() if local_floor_terms else ref.new_zeros(())
+        routing_entropy_loss = (
+            self.config.routing_tier_entropy_weight * entropy_loss
+            + self.config.routing_min_local_share_weight * local_loss
+        )
+        aux["routing_entropy_floor_violation_mean"] = entropy_loss.detach()
+        aux["routing_local_floor_violation_mean"] = local_loss.detach()
+        aux["routing_entropy_loss"] = routing_entropy_loss.detach()
+        return routing_entropy_loss
+
+    def _compute_trajectory_vitality_loss(self, aux: dict, ref: torch.Tensor) -> torch.Tensor:
+        if self.config.trajectory_vitality_weight <= 0.0:
+            aux["trajectory_vitality_loss"] = ref.new_zeros(())
+            return ref.new_zeros(())
+        c_t_history = aux.get("c_t_history", [])
+        world_summary_history = aux.get("world_summary_history", [])
+        c_t_drift_mean = ref.new_zeros(())
+        world_drift_mean = ref.new_zeros(())
+        if len(c_t_history) > 1:
+            c_t_drifts = torch.stack(
+                [
+                    (next_state.float() - prev_state.float()).norm(dim=-1).mean()
+                    for prev_state, next_state in zip(c_t_history[:-1], c_t_history[1:])
+                ]
+            )
+            c_t_drift_mean = c_t_drifts.mean()
+        if len(world_summary_history) > 1:
+            world_drifts = torch.stack(
+                [
+                    (next_state.float() - prev_state.float()).norm(dim=-1).mean()
+                    for prev_state, next_state in zip(world_summary_history[:-1], world_summary_history[1:])
+                ]
+            )
+            world_drift_mean = world_drifts.mean()
+        vitality_penalty = (
+            torch.relu(ref.new_tensor(self.config.trajectory_c_t_drift_floor) - c_t_drift_mean)
+            + torch.relu(ref.new_tensor(self.config.trajectory_world_drift_floor) - world_drift_mean)
+        )
+        vitality_loss = self.config.trajectory_vitality_weight * vitality_penalty
+        aux["trajectory_c_t_drift_mean_internal"] = c_t_drift_mean.detach()
+        aux["trajectory_world_drift_mean_internal"] = world_drift_mean.detach()
+        aux["trajectory_vitality_loss"] = vitality_loss.detach()
+        return vitality_loss
+
     def forward(self, input_ids: torch.Tensor, labels: Optional[torch.Tensor] = None, **kwargs):
         disable_ct_injection = kwargs.pop("disable_ct_injection", False)
         del kwargs
@@ -2461,6 +3335,9 @@ class LumaForCausalLM(PreTrainedModel):
             aux["predicted_gain_history"] = predicted_gains
             aux["predicted_gain2_history"] = predicted_gains2
             aux["loop_lm_loss_history"] = self._compute_loop_lm_proxy_losses(aux["loop_history"], labels)
+            rollout_zone_loss = self._compute_rollout_activity_zone_loss(aux, lm_loss)
+            routing_entropy_loss = self._compute_routing_entropy_regularization(aux, lm_loss)
+            trajectory_vitality_loss = self._compute_trajectory_vitality_loss(aux, lm_loss)
             loss = lm_loss
             loss = (
                 loss
@@ -2468,6 +3345,9 @@ class LumaForCausalLM(PreTrainedModel):
                 + aux["self_jepa_loss"]
                 + self.config.self_rollout_weight * aux["self_rollout_loss"]
                 + self.config.exit_aux_weight * aux["exit_aux_loss"]
+                + rollout_zone_loss
+                + routing_entropy_loss
+                + trajectory_vitality_loss
             )
         return MoeCausalLMOutputWithPast(
             loss=loss,
@@ -2476,6 +3356,9 @@ class LumaForCausalLM(PreTrainedModel):
                 + aux["self_jepa_loss"]
                 + self.config.self_rollout_weight * aux["self_rollout_loss"]
                 + self.config.exit_aux_weight * aux["exit_aux_loss"]
+                + aux.get("rollout_activity_zone_loss", logits.new_zeros(()))
+                + aux.get("routing_entropy_loss", logits.new_zeros(()))
+                + aux.get("trajectory_vitality_loss", logits.new_zeros(()))
             ),
             logits=logits,
             past_key_values=None,
