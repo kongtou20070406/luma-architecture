@@ -1,0 +1,175 @@
+{
+  "fixture_path": "/home/kt/ai/minimind/artifacts/luma_stage12_competition_math_dialogue.json",
+  "fixture_mode": "competition_math_dialogue",
+  "rollout_steps": 10,
+  "slow_k": 1,
+  "reason_loops": 15,
+  "enable_world_jepa": true,
+  "world_jepa_mode": "scaffold",
+  "enable_self_check_ring": true,
+  "num_samples": 8,
+  "stage1": {
+    "mean_kl": 1.719201922416687,
+    "mean_hidden_delta": 4.1875,
+    "hard_loop_var": 7.234375,
+    "soft_loop_var": 0.109375,
+    "c_t_var": 0.7708313465118408,
+    "exit_score_var": 0.00010986891720676795,
+    "sampled_exit_score_var": 0.0003847204498015344,
+    "two_step_improvement_mean": -0.0046050106175243855,
+    "self_check_mean": 0.5265085101127625
+  },
+  "stage2": {
+    "losses": [
+      25.756013870239258,
+      24.881420135498047,
+      23.63263702392578,
+      23.879621505737305,
+      23.132625579833984,
+      22.382646560668945,
+      22.756288528442383,
+      23.757171630859375
+    ],
+    "self_losses": [
+      1.015625,
+      0.96875,
+      1.0625,
+      1.2109375,
+      0.9375,
+      1.046875,
+      1.1015625,
+      1.0546875
+    ],
+    "rollout_losses": [
+      0.7734375,
+      1.0390625,
+      0.71875,
+      0.7734375,
+      0.796875,
+      0.7265625,
+      0.796875,
+      0.82421875
+    ],
+    "mean_delta_norm": 1.2119140625,
+    "self_loss_head": 0.9921875,
+    "self_loss_tail": 1.078125,
+    "self_rollout_head": 0.90625,
+    "self_rollout_tail": 0.810546875
+  },
+  "per_task": {
+    "math": {
+      "stage1": {
+        "mean_kl": 1.768784523010254,
+        "mean_hidden_delta": 4.375,
+        "hard_loop_var": 5.1875,
+        "soft_loop_var": 0.234375,
+        "c_t_var": 0.7565765380859375,
+        "exit_score_var": 4.755263580591418e-05,
+        "sampled_exit_score_var": 0.0003082553739659488,
+        "two_step_improvement_mean": 0.0024291989393532276,
+        "self_check_mean": 0.4853556454181671
+      },
+      "stage2": {
+        "losses": [
+          25.756013870239258,
+          24.008134841918945,
+          23.508140563964844,
+          23.25763511657715
+        ],
+        "self_losses": [
+          1.015625,
+          1.1015625,
+          0.98828125,
+          1.1328125
+        ],
+        "rollout_losses": [
+          0.7734375,
+          0.70703125,
+          0.8046875,
+          0.80078125
+        ],
+        "mean_delta_norm": 1.197265625,
+        "self_loss_head": 1.05859375,
+        "self_loss_tail": 1.060546875,
+        "self_rollout_head": 0.740234375,
+        "self_rollout_tail": 0.802734375
+      }
+    },
+    "dialogue": {
+      "stage1": {
+        "mean_kl": 1.8808419704437256,
+        "mean_hidden_delta": 4.4375,
+        "hard_loop_var": 6.359375,
+        "soft_loop_var": 0.5,
+        "c_t_var": 0.5362682342529297,
+        "exit_score_var": 8.430000161752105e-05,
+        "sampled_exit_score_var": 0.0005410912563093007,
+        "two_step_improvement_mean": 0.004174699541181326,
+        "self_check_mean": 0.5315048694610596
+      },
+      "stage2": {
+        "losses": [
+          25.00643539428711,
+          23.881004333496094,
+          22.25765037536621,
+          23.88042640686035
+        ],
+        "self_losses": [
+          0.97265625,
+          1.234375,
+          1.0546875,
+          1.0625
+        ],
+        "rollout_losses": [
+          1.0859375,
+          0.796875,
+          0.70703125,
+          0.8203125
+        ],
+        "mean_delta_norm": 1.357421875,
+        "self_loss_head": 1.103515625,
+        "self_loss_tail": 1.05859375,
+        "self_rollout_head": 0.94140625,
+        "self_rollout_tail": 0.763671875
+      }
+    },
+    "mixed": {
+      "stage1": {
+        "mean_kl": 1.719201922416687,
+        "mean_hidden_delta": 4.1875,
+        "hard_loop_var": 7.234375,
+        "soft_loop_var": 0.109375,
+        "c_t_var": 0.7708313465118408,
+        "exit_score_var": 0.00010986891720676795,
+        "sampled_exit_score_var": 0.0003847204498015344,
+        "two_step_improvement_mean": -0.0046050106175243855,
+        "self_check_mean": 0.5265085101127625
+      },
+      "stage2": {
+        "losses": [
+          25.756013870239258,
+          24.75747299194336,
+          23.632644653320312,
+          23.881006240844727
+        ],
+        "self_losses": [
+          1.015625,
+          0.8984375,
+          1.0625,
+          1.2109375
+        ],
+        "rollout_losses": [
+          0.7734375,
+          0.94921875,
+          0.71875,
+          0.78515625
+        ],
+        "mean_delta_norm": 1.392578125,
+        "self_loss_head": 0.95703125,
+        "self_loss_tail": 1.13671875,
+        "self_rollout_head": 0.861328125,
+        "self_rollout_tail": 0.751953125
+      }
+    }
+  }
+}

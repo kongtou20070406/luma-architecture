@@ -1,0 +1,218 @@
+{"event": "stage1_ct_kl", "ok": true, "value": 1.9246649742126465, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774831055.9891121}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 4.5625, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774831055.9895575}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 1.359375, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774831055.989591}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.109375, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774831055.9896047}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.7466460466384888, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774831055.9896152}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 0.0001037807232933119, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774831055.9896247}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0002761918294709176, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774831055.989635}
+{"event": "stage1_two_step_improvement", "ok": true, "value": -0.01381683349609375, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774831055.9896445}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.530517578125, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774831055.9896536}
+{"event": "stage1_jepa_crystal_mean", "ok": true, "value": 0.0, "note": "Mean JEPA-guided entropy crystal signal / JEPA 引导熵结晶信号均值", "timestamp": 1774831055.9896617}
+{"event": "stage1_uncertainty_mean", "ok": true, "value": 0.0, "note": "Mean introspection uncertainty signal / 自省疑惑度均值", "timestamp": 1774831055.98967}
+{"event": "stage1_world_surprise_mean", "ok": true, "value": 11.048089981079102, "note": "Mean world surprise signal / world surprise 信号均值", "timestamp": 1774831055.9896786}
+{"event": "stage1_intermediate_state_variance", "ok": true, "value": 0.004525873810052872, "note": "Intermediate state variance / 中间状态方差", "timestamp": 1774831055.9896872}
+{"event": "stage1_c_t_drift_mean", "ok": true, "value": 2.3661093711853027, "note": "Mean c_t drift / c_t 漂移均值", "timestamp": 1774831055.9896965}
+{"event": "stage1_world_summary_drift_mean", "ok": true, "value": 0.0923016369342804, "note": "Mean world summary drift / world summary 漂移均值", "timestamp": 1774831055.9897053}
+{"event": "stage1_c_t_delta_norm_mean", "ok": true, "value": 2.3661093711853027, "note": "Mean c_t delta norm / c_t 相邻步差分范数均值", "timestamp": 1774831055.9897144}
+{"event": "stage1_pred_delta_c_cos_adjacent", "ok": true, "value": 0.5179685354232788, "note": "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值", "timestamp": 1774831055.9897223}
+{"event": "stage1_math_lane_score_mean", "ok": true, "value": 0.0, "note": "Mean math adapter lane score / math adapter lane 分数均值", "timestamp": 1774831055.9897308}
+{"event": "stage1_math_summary_gate_mean", "ok": true, "value": 0.0, "note": "Mean math summary gate / math summary gate 均值", "timestamp": 1774831055.9897382}
+{"event": "stage1_r_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean r_t drift / r_t 漂移均值", "timestamp": 1774831055.9897456}
+{"event": "stage1_r_t_trust_mean", "ok": true, "value": 0.0, "note": "Mean r_t trust / r_t 信任均值", "timestamp": 1774831055.989753}
+{"event": "stage1_r_t_switch_mean", "ok": true, "value": 0.0, "note": "Mean c_t/r_t switch gate / c_t/r_t 切换门均值", "timestamp": 1774831055.9897604}
+{"event": "stage1_progress_vs_rollout_corr", "ok": true, "value": 0.31523895263671875, "note": "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性", "timestamp": 1774831055.9897687}
+{"event": "stage1_progress_vs_exit_corr", "ok": true, "value": -0.3520835340023041, "note": "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性", "timestamp": 1774831055.9897819}
+{"event": "stage1_exit_invalid_count", "ok": true, "value": 0.0, "note": "Invalid exit-score count should stay zero / exit 非有限计数应为零", "timestamp": 1774831055.9897904}
+{"event": "stage1_nan_to_num_trigger_count", "ok": true, "value": 0.0, "note": "nan_to_num trigger count / nan_to_num 触发次数", "timestamp": 1774831055.9897983}
+{"event": "stage2_self_jepa_start", "ok": true, "value": 1.08203125, "note": "Initial short-run Self-JEPA loss / 初始短程 Self-JEPA 损失", "timestamp": 1774831089.3622997}
+{"event": "stage2_self_jepa_end", "ok": true, "value": 0.15087890625, "note": "Ending Self-JEPA loss should not explode / 结束时 Self-JEPA 损失不应爆炸", "timestamp": 1774831089.362484}
+{"event": "stage2_self_rollout_end", "ok": true, "value": 0.0, "note": "Self-rollout loss should stay bounded / Self-rollout 损失应保持有界", "timestamp": 1774831089.3625278}
+{"event": "stage2_rollout_active_ratio", "ok": true, "value": 1.0, "note": "Rollout supervision should activate at least sometimes / rollout 监督至少应在部分 step 上激活", "timestamp": 1774831089.362549}
+{"event": "stage2_rollout_nonzero_ratio", "ok": true, "value": 0.046875, "note": "Fraction of non-zero rollout losses / 非零 rollout 损失占比", "timestamp": 1774831089.362562}
+{"event": "stage2_delta_norm", "ok": true, "value": 12.8599853515625, "note": "Target delta_c norm should stay non-zero / 目标 delta_c 范数不能接近零", "timestamp": 1774831089.362572}
+{"event": "stage2_nonfinite_abort", "ok": true, "value": 0.0, "note": "Stage2 should avoid non-finite aborts / Stage2 不应因非有限值中止", "timestamp": 1774831089.3625834}
+{"event": "stage2_rollout_zone_loss_tail", "ok": true, "value": 0.0, "note": "Tail rollout zone loss / rollout 活性区间损失尾值", "timestamp": 1774831089.3626182}
+{"event": "stage2_routing_entropy_loss_tail", "ok": true, "value": 0.0, "note": "Tail routing entropy loss / routing 熵损失尾值", "timestamp": 1774831089.3626292}
+{"event": "stage2_trajectory_vitality_loss_tail", "ok": true, "value": 0.0, "note": "Tail trajectory vitality loss / 轨迹活性损失尾值", "timestamp": 1774831089.362638}
+{"event": "stage1_ct_kl", "ok": true, "value": 0.5706702470779419, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774831089.9262614}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 3.96875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774831089.9264586}
+{"event": "stage1_hard_loop_variance", "ok": false, "value": 0.0, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774831089.926501}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.6875, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774831089.9265182}
+{"event": "stage1_ct_variance", "ok": true, "value": 13.509330749511719, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774831089.9265301}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 0.00020791206043213606, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774831089.9265406}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0009343087440356612, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774831089.9265516}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.0, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774831089.9265618}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.541015625, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774831089.926572}
+{"event": "stage1_jepa_crystal_mean", "ok": true, "value": 0.0, "note": "Mean JEPA-guided entropy crystal signal / JEPA 引导熵结晶信号均值", "timestamp": 1774831089.9265928}
+{"event": "stage1_uncertainty_mean", "ok": true, "value": 0.0, "note": "Mean introspection uncertainty signal / 自省疑惑度均值", "timestamp": 1774831089.926601}
+{"event": "stage1_world_surprise_mean", "ok": true, "value": 10.921875, "note": "Mean world surprise signal / world surprise 信号均值", "timestamp": 1774831089.92661}
+{"event": "stage1_intermediate_state_variance", "ok": true, "value": 0.013762074522674084, "note": "Intermediate state variance / 中间状态方差", "timestamp": 1774831089.926618}
+{"event": "stage1_c_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean c_t drift / c_t 漂移均值", "timestamp": 1774831089.926627}
+{"event": "stage1_world_summary_drift_mean", "ok": true, "value": 1.605482578277588, "note": "Mean world summary drift / world summary 漂移均值", "timestamp": 1774831089.9266355}
+{"event": "stage1_c_t_delta_norm_mean", "ok": true, "value": 0.0, "note": "Mean c_t delta norm / c_t 相邻步差分范数均值", "timestamp": 1774831089.926644}
+{"event": "stage1_pred_delta_c_cos_adjacent", "ok": true, "value": 0.0, "note": "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值", "timestamp": 1774831089.926652}
+{"event": "stage1_math_lane_score_mean", "ok": true, "value": 0.0, "note": "Mean math adapter lane score / math adapter lane 分数均值", "timestamp": 1774831089.9266603}
+{"event": "stage1_math_summary_gate_mean", "ok": true, "value": 0.0, "note": "Mean math summary gate / math summary gate 均值", "timestamp": 1774831089.9266691}
+{"event": "stage1_r_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean r_t drift / r_t 漂移均值", "timestamp": 1774831089.9266775}
+{"event": "stage1_r_t_trust_mean", "ok": true, "value": 0.0, "note": "Mean r_t trust / r_t 信任均值", "timestamp": 1774831089.9266846}
+{"event": "stage1_r_t_switch_mean", "ok": true, "value": 0.0, "note": "Mean c_t/r_t switch gate / c_t/r_t 切换门均值", "timestamp": 1774831089.9266934}
+{"event": "stage1_progress_vs_rollout_corr", "ok": true, "value": 0.0, "note": "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性", "timestamp": 1774831089.9267015}
+{"event": "stage1_progress_vs_exit_corr", "ok": true, "value": -0.968433141708374, "note": "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性", "timestamp": 1774831089.9267101}
+{"event": "stage1_exit_invalid_count", "ok": true, "value": 0.0, "note": "Invalid exit-score count should stay zero / exit 非有限计数应为零", "timestamp": 1774831089.9267192}
+{"event": "stage1_nan_to_num_trigger_count", "ok": true, "value": 0.0, "note": "nan_to_num trigger count / nan_to_num 触发次数", "timestamp": 1774831089.926727}
+{"event": "stage1_ct_kl", "ok": true, "value": 0.44170695543289185, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774831090.5428116}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 3.625, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774831090.5430117}
+{"event": "stage1_hard_loop_variance", "ok": false, "value": 0.0, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774831090.5430536}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.75, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774831090.5430703}
+{"event": "stage1_ct_variance", "ok": true, "value": 3.8308191299438477, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774831090.5430818}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 6.34815005469136e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774831090.5431056}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0003232539165765047, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774831090.5431628}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.0, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774831090.5431783}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.544921875, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774831090.5431898}
+{"event": "stage1_jepa_crystal_mean", "ok": true, "value": 0.0, "note": "Mean JEPA-guided entropy crystal signal / JEPA 引导熵结晶信号均值", "timestamp": 1774831090.5432}
+{"event": "stage1_uncertainty_mean", "ok": true, "value": 0.0, "note": "Mean introspection uncertainty signal / 自省疑惑度均值", "timestamp": 1774831090.5432093}
+{"event": "stage1_world_surprise_mean", "ok": true, "value": 10.958854675292969, "note": "Mean world surprise signal / world surprise 信号均值", "timestamp": 1774831090.543218}
+{"event": "stage1_intermediate_state_variance", "ok": true, "value": 0.00784752331674099, "note": "Intermediate state variance / 中间状态方差", "timestamp": 1774831090.543227}
+{"event": "stage1_c_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean c_t drift / c_t 漂移均值", "timestamp": 1774831090.5432353}
+{"event": "stage1_world_summary_drift_mean", "ok": true, "value": 1.1677632331848145, "note": "Mean world summary drift / world summary 漂移均值", "timestamp": 1774831090.5432446}
+{"event": "stage1_c_t_delta_norm_mean", "ok": true, "value": 0.0, "note": "Mean c_t delta norm / c_t 相邻步差分范数均值", "timestamp": 1774831090.5432534}
+{"event": "stage1_pred_delta_c_cos_adjacent", "ok": true, "value": 0.0, "note": "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值", "timestamp": 1774831090.5432618}
+{"event": "stage1_math_lane_score_mean", "ok": true, "value": 0.0, "note": "Mean math adapter lane score / math adapter lane 分数均值", "timestamp": 1774831090.5432694}
+{"event": "stage1_math_summary_gate_mean", "ok": true, "value": 0.0, "note": "Mean math summary gate / math summary gate 均值", "timestamp": 1774831090.5432775}
+{"event": "stage1_r_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean r_t drift / r_t 漂移均值", "timestamp": 1774831090.5432858}
+{"event": "stage1_r_t_trust_mean", "ok": true, "value": 0.0, "note": "Mean r_t trust / r_t 信任均值", "timestamp": 1774831090.5432932}
+{"event": "stage1_r_t_switch_mean", "ok": true, "value": 0.0, "note": "Mean c_t/r_t switch gate / c_t/r_t 切换门均值", "timestamp": 1774831090.5433006}
+{"event": "stage1_progress_vs_rollout_corr", "ok": true, "value": 0.0, "note": "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性", "timestamp": 1774831090.5433083}
+{"event": "stage1_progress_vs_exit_corr", "ok": true, "value": -0.9176684617996216, "note": "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性", "timestamp": 1774831090.543318}
+{"event": "stage1_exit_invalid_count", "ok": true, "value": 0.0, "note": "Invalid exit-score count should stay zero / exit 非有限计数应为零", "timestamp": 1774831090.543328}
+{"event": "stage1_nan_to_num_trigger_count", "ok": true, "value": 0.0, "note": "nan_to_num trigger count / nan_to_num 触发次数", "timestamp": 1774831090.5433366}
+{"event": "stage1_ct_kl", "ok": true, "value": 1.4023232460021973, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774831091.2224765}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 4.09375, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774831091.2226548}
+{"event": "stage1_hard_loop_variance", "ok": false, "value": 0.0, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774831091.2226942}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.1875, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774831091.2227106}
+{"event": "stage1_ct_variance", "ok": true, "value": 3.1393003463745117, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774831091.2227337}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 0.000307567446725443, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774831091.222744}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0008189023938030005, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774831091.222755}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.0, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774831091.2227645}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.560546875, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774831091.2227733}
+{"event": "stage1_jepa_crystal_mean", "ok": true, "value": 0.0, "note": "Mean JEPA-guided entropy crystal signal / JEPA 引导熵结晶信号均值", "timestamp": 1774831091.2228217}
+{"event": "stage1_uncertainty_mean", "ok": true, "value": 0.0, "note": "Mean introspection uncertainty signal / 自省疑惑度均值", "timestamp": 1774831091.2228386}
+{"event": "stage1_world_surprise_mean", "ok": true, "value": 10.899479866027832, "note": "Mean world surprise signal / world surprise 信号均值", "timestamp": 1774831091.2228484}
+{"event": "stage1_intermediate_state_variance", "ok": true, "value": 0.010810455307364464, "note": "Intermediate state variance / 中间状态方差", "timestamp": 1774831091.2228577}
+{"event": "stage1_c_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean c_t drift / c_t 漂移均值", "timestamp": 1774831091.2228665}
+{"event": "stage1_world_summary_drift_mean", "ok": true, "value": 1.353723168373108, "note": "Mean world summary drift / world summary 漂移均值", "timestamp": 1774831091.2228746}
+{"event": "stage1_c_t_delta_norm_mean", "ok": true, "value": 0.0, "note": "Mean c_t delta norm / c_t 相邻步差分范数均值", "timestamp": 1774831091.222883}
+{"event": "stage1_pred_delta_c_cos_adjacent", "ok": true, "value": 0.0, "note": "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值", "timestamp": 1774831091.2228909}
+{"event": "stage1_math_lane_score_mean", "ok": true, "value": 0.0, "note": "Mean math adapter lane score / math adapter lane 分数均值", "timestamp": 1774831091.2228987}
+{"event": "stage1_math_summary_gate_mean", "ok": true, "value": 0.0, "note": "Mean math summary gate / math summary gate 均值", "timestamp": 1774831091.2229064}
+{"event": "stage1_r_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean r_t drift / r_t 漂移均值", "timestamp": 1774831091.222914}
+{"event": "stage1_r_t_trust_mean", "ok": true, "value": 0.0, "note": "Mean r_t trust / r_t 信任均值", "timestamp": 1774831091.2229214}
+{"event": "stage1_r_t_switch_mean", "ok": true, "value": 0.0, "note": "Mean c_t/r_t switch gate / c_t/r_t 切换门均值", "timestamp": 1774831091.2229285}
+{"event": "stage1_progress_vs_rollout_corr", "ok": true, "value": 0.0, "note": "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性", "timestamp": 1774831091.2229366}
+{"event": "stage1_progress_vs_exit_corr", "ok": true, "value": -0.8035463094711304, "note": "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性", "timestamp": 1774831091.2229447}
+{"event": "stage1_exit_invalid_count", "ok": true, "value": 0.0, "note": "Invalid exit-score count should stay zero / exit 非有限计数应为零", "timestamp": 1774831091.2229538}
+{"event": "stage1_nan_to_num_trigger_count", "ok": true, "value": 0.0, "note": "nan_to_num trigger count / nan_to_num 触发次数", "timestamp": 1774831091.2229617}
+{"event": "stage1_ct_kl", "ok": true, "value": 2.3859970569610596, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774831092.4919982}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 5.1875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774831092.492211}
+{"event": "stage1_hard_loop_variance", "ok": true, "value": 0.109375, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774831092.4922557}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.234375, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774831092.4922729}
+{"event": "stage1_ct_variance", "ok": true, "value": 4.721650123596191, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774831092.492284}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 2.8000100428471342e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774831092.492295}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.00034684763522818685, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774831092.492311}
+{"event": "stage1_two_step_improvement", "ok": true, "value": -0.0107421875, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774831092.4923213}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.4493001401424408, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774831092.49233}
+{"event": "stage1_jepa_crystal_mean", "ok": true, "value": 0.0, "note": "Mean JEPA-guided entropy crystal signal / JEPA 引导熵结晶信号均值", "timestamp": 1774831092.492339}
+{"event": "stage1_uncertainty_mean", "ok": true, "value": 0.0, "note": "Mean introspection uncertainty signal / 自省疑惑度均值", "timestamp": 1774831092.492348}
+{"event": "stage1_world_surprise_mean", "ok": true, "value": 5.2138671875, "note": "Mean world surprise signal / world surprise 信号均值", "timestamp": 1774831092.492356}
+{"event": "stage1_intermediate_state_variance", "ok": true, "value": 0.02966650202870369, "note": "Intermediate state variance / 中间状态方差", "timestamp": 1774831092.4923644}
+{"event": "stage1_c_t_drift_mean", "ok": true, "value": 1.5282905101776123, "note": "Mean c_t drift / c_t 漂移均值", "timestamp": 1774831092.4923732}
+{"event": "stage1_world_summary_drift_mean", "ok": true, "value": 2.2783541679382324, "note": "Mean world summary drift / world summary 漂移均值", "timestamp": 1774831092.492381}
+{"event": "stage1_c_t_delta_norm_mean", "ok": true, "value": 1.5282905101776123, "note": "Mean c_t delta norm / c_t 相邻步差分范数均值", "timestamp": 1774831092.4923906}
+{"event": "stage1_pred_delta_c_cos_adjacent", "ok": true, "value": 0.28378188610076904, "note": "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值", "timestamp": 1774831092.4923983}
+{"event": "stage1_math_lane_score_mean", "ok": true, "value": 0.0, "note": "Mean math adapter lane score / math adapter lane 分数均值", "timestamp": 1774831092.4924066}
+{"event": "stage1_math_summary_gate_mean", "ok": true, "value": 0.0, "note": "Mean math summary gate / math summary gate 均值", "timestamp": 1774831092.4924142}
+{"event": "stage1_r_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean r_t drift / r_t 漂移均值", "timestamp": 1774831092.4924219}
+{"event": "stage1_r_t_trust_mean", "ok": true, "value": 0.0, "note": "Mean r_t trust / r_t 信任均值", "timestamp": 1774831092.4924297}
+{"event": "stage1_r_t_switch_mean", "ok": true, "value": 0.0, "note": "Mean c_t/r_t switch gate / c_t/r_t 切换门均值", "timestamp": 1774831092.492437}
+{"event": "stage1_progress_vs_rollout_corr", "ok": true, "value": 0.22069597244262695, "note": "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性", "timestamp": 1774831092.492445}
+{"event": "stage1_progress_vs_exit_corr", "ok": true, "value": 0.7485172748565674, "note": "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性", "timestamp": 1774831092.4924586}
+{"event": "stage1_exit_invalid_count", "ok": true, "value": 0.0, "note": "Invalid exit-score count should stay zero / exit 非有限计数应为零", "timestamp": 1774831092.492467}
+{"event": "stage1_nan_to_num_trigger_count", "ok": true, "value": 0.0, "note": "nan_to_num trigger count / nan_to_num 触发次数", "timestamp": 1774831092.4924917}
+{"event": "stage1_ct_kl", "ok": true, "value": 1.414433479309082, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774831093.6101122}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 3.9375, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774831093.610319}
+{"event": "stage1_hard_loop_variance", "ok": false, "value": 0.0, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774831093.6103609}
+{"event": "stage1_soft_loop_variance", "ok": false, "value": 0.0, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774831093.6103778}
+{"event": "stage1_ct_variance", "ok": true, "value": 1.4632586240768433, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774831093.6103895}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 5.765035530203022e-05, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774831093.6104002}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0006894513498991728, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774831093.6104174}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.0, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774831093.610428}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.54150390625, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774831093.610438}
+{"event": "stage1_jepa_crystal_mean", "ok": true, "value": 0.0, "note": "Mean JEPA-guided entropy crystal signal / JEPA 引导熵结晶信号均值", "timestamp": 1774831093.6104476}
+{"event": "stage1_uncertainty_mean", "ok": true, "value": 0.0, "note": "Mean introspection uncertainty signal / 自省疑惑度均值", "timestamp": 1774831093.6104562}
+{"event": "stage1_world_surprise_mean", "ok": true, "value": 10.967187881469727, "note": "Mean world surprise signal / world surprise 信号均值", "timestamp": 1774831093.610465}
+{"event": "stage1_intermediate_state_variance", "ok": true, "value": 0.008763003163039684, "note": "Intermediate state variance / 中间状态方差", "timestamp": 1774831093.6104743}
+{"event": "stage1_c_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean c_t drift / c_t 漂移均值", "timestamp": 1774831093.610483}
+{"event": "stage1_world_summary_drift_mean", "ok": true, "value": 1.1290395259857178, "note": "Mean world summary drift / world summary 漂移均值", "timestamp": 1774831093.610492}
+{"event": "stage1_c_t_delta_norm_mean", "ok": true, "value": 0.0, "note": "Mean c_t delta norm / c_t 相邻步差分范数均值", "timestamp": 1774831093.6105006}
+{"event": "stage1_pred_delta_c_cos_adjacent", "ok": true, "value": 0.0, "note": "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值", "timestamp": 1774831093.6105092}
+{"event": "stage1_math_lane_score_mean", "ok": true, "value": 0.0, "note": "Mean math adapter lane score / math adapter lane 分数均值", "timestamp": 1774831093.6105175}
+{"event": "stage1_math_summary_gate_mean", "ok": true, "value": 0.0, "note": "Mean math summary gate / math summary gate 均值", "timestamp": 1774831093.6105254}
+{"event": "stage1_r_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean r_t drift / r_t 漂移均值", "timestamp": 1774831093.6105344}
+{"event": "stage1_r_t_trust_mean", "ok": true, "value": 0.0, "note": "Mean r_t trust / r_t 信任均值", "timestamp": 1774831093.610552}
+{"event": "stage1_r_t_switch_mean", "ok": true, "value": 0.0, "note": "Mean c_t/r_t switch gate / c_t/r_t 切换门均值", "timestamp": 1774831093.6105595}
+{"event": "stage1_progress_vs_rollout_corr", "ok": true, "value": 0.0, "note": "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性", "timestamp": 1774831093.610567}
+{"event": "stage1_progress_vs_exit_corr", "ok": true, "value": -0.7547761797904968, "note": "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性", "timestamp": 1774831093.6105754}
+{"event": "stage1_exit_invalid_count", "ok": true, "value": 0.0, "note": "Invalid exit-score count should stay zero / exit 非有限计数应为零", "timestamp": 1774831093.6105847}
+{"event": "stage1_nan_to_num_trigger_count", "ok": true, "value": 0.0, "note": "nan_to_num trigger count / nan_to_num 触发次数", "timestamp": 1774831093.6105928}
+{"event": "stage1_ct_kl", "ok": true, "value": 1.3842926025390625, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774831094.730368}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 3.921875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774831094.7305617}
+{"event": "stage1_hard_loop_variance", "ok": false, "value": 0.0, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774831094.730605}
+{"event": "stage1_soft_loop_variance", "ok": false, "value": 0.0, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774831094.7306213}
+{"event": "stage1_ct_variance", "ok": true, "value": 0.5368916988372803, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774831094.7306318}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 3.62579385182471e-06, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774831094.730642}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0003400704881642014, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774831094.730657}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.0, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774831094.7306666}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.5361328125, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774831094.730676}
+{"event": "stage1_jepa_crystal_mean", "ok": true, "value": 0.0, "note": "Mean JEPA-guided entropy crystal signal / JEPA 引导熵结晶信号均值", "timestamp": 1774831094.7306855}
+{"event": "stage1_uncertainty_mean", "ok": true, "value": 0.0, "note": "Mean introspection uncertainty signal / 自省疑惑度均值", "timestamp": 1774831094.730693}
+{"event": "stage1_world_surprise_mean", "ok": true, "value": 10.667448043823242, "note": "Mean world surprise signal / world surprise 信号均值", "timestamp": 1774831094.7307012}
+{"event": "stage1_intermediate_state_variance", "ok": true, "value": 0.008722672238945961, "note": "Intermediate state variance / 中间状态方差", "timestamp": 1774831094.7307096}
+{"event": "stage1_c_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean c_t drift / c_t 漂移均值", "timestamp": 1774831094.7307174}
+{"event": "stage1_world_summary_drift_mean", "ok": true, "value": 1.165887713432312, "note": "Mean world summary drift / world summary 漂移均值", "timestamp": 1774831094.7307262}
+{"event": "stage1_c_t_delta_norm_mean", "ok": true, "value": 0.0, "note": "Mean c_t delta norm / c_t 相邻步差分范数均值", "timestamp": 1774831094.7307343}
+{"event": "stage1_pred_delta_c_cos_adjacent", "ok": true, "value": 0.0, "note": "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值", "timestamp": 1774831094.7307417}
+{"event": "stage1_math_lane_score_mean", "ok": true, "value": 0.0, "note": "Mean math adapter lane score / math adapter lane 分数均值", "timestamp": 1774831094.7307603}
+{"event": "stage1_math_summary_gate_mean", "ok": true, "value": 0.0, "note": "Mean math summary gate / math summary gate 均值", "timestamp": 1774831094.7307682}
+{"event": "stage1_r_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean r_t drift / r_t 漂移均值", "timestamp": 1774831094.7307754}
+{"event": "stage1_r_t_trust_mean", "ok": true, "value": 0.0, "note": "Mean r_t trust / r_t 信任均值", "timestamp": 1774831094.7307827}
+{"event": "stage1_r_t_switch_mean", "ok": true, "value": 0.0, "note": "Mean c_t/r_t switch gate / c_t/r_t 切换门均值", "timestamp": 1774831094.7307897}
+{"event": "stage1_progress_vs_rollout_corr", "ok": true, "value": 0.0, "note": "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性", "timestamp": 1774831094.7307973}
+{"event": "stage1_progress_vs_exit_corr", "ok": true, "value": -0.16232196986675262, "note": "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性", "timestamp": 1774831094.7308059}
+{"event": "stage1_exit_invalid_count", "ok": true, "value": 0.0, "note": "Invalid exit-score count should stay zero / exit 非有限计数应为零", "timestamp": 1774831094.730815}
+{"event": "stage1_nan_to_num_trigger_count", "ok": true, "value": 0.0, "note": "nan_to_num trigger count / nan_to_num 触发次数", "timestamp": 1774831094.7308226}
+{"event": "stage1_ct_kl", "ok": true, "value": 0.5061886310577393, "note": "KL between c_t-on and c_t-off logits / 打开关闭 c_t 注入后的 logits KL", "timestamp": 1774831095.941364}
+{"event": "stage1_ct_hidden_delta", "ok": true, "value": 3.796875, "note": "Hidden drift caused by c_t injection / c_t 注入导致的隐状态漂移", "timestamp": 1774831095.9415576}
+{"event": "stage1_hard_loop_variance", "ok": false, "value": 0.0, "note": "Executed loop variance with hard exit / 硬退出下的循环步数方差", "timestamp": 1774831095.9415987}
+{"event": "stage1_soft_loop_variance", "ok": true, "value": 0.4375, "note": "Executed loop variance with sampled exit / 采样退出下的循环步数方差", "timestamp": 1774831095.941615}
+{"event": "stage1_ct_variance", "ok": true, "value": 12.683420181274414, "note": "c_t variance should stay above collapse floor / c_t 方差不能塌到近零", "timestamp": 1774831095.9416265}
+{"event": "stage1_exit_score_variance", "ok": true, "value": 0.00015247694682329893, "note": "Exit score variance should be non-zero / 退出分数方差应为非零", "timestamp": 1774831095.9416366}
+{"event": "stage1_sampled_exit_score_variance", "ok": true, "value": 0.0005154038080945611, "note": "Sampled exit score variance should be non-zero / 采样退出分数方差应为非零", "timestamp": 1774831095.9416473}
+{"event": "stage1_two_step_improvement", "ok": true, "value": 0.0, "note": "Mean joint one-step benefit signal / 联合一步收益均值", "timestamp": 1774831095.9416575}
+{"event": "stage1_self_check_mean", "ok": true, "value": 0.54296875, "note": "Mean self-check score / 自检分数均值", "timestamp": 1774831095.9416668}
+{"event": "stage1_jepa_crystal_mean", "ok": true, "value": 0.0, "note": "Mean JEPA-guided entropy crystal signal / JEPA 引导熵结晶信号均值", "timestamp": 1774831095.9416754}
+{"event": "stage1_uncertainty_mean", "ok": true, "value": 0.0, "note": "Mean introspection uncertainty signal / 自省疑惑度均值", "timestamp": 1774831095.9416835}
+{"event": "stage1_world_surprise_mean", "ok": true, "value": 10.940364837646484, "note": "Mean world surprise signal / world surprise 信号均值", "timestamp": 1774831095.9416916}
+{"event": "stage1_intermediate_state_variance", "ok": true, "value": 0.01080479845404625, "note": "Intermediate state variance / 中间状态方差", "timestamp": 1774831095.9417007}
+{"event": "stage1_c_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean c_t drift / c_t 漂移均值", "timestamp": 1774831095.9417093}
+{"event": "stage1_world_summary_drift_mean", "ok": true, "value": 1.3866229057312012, "note": "Mean world summary drift / world summary 漂移均值", "timestamp": 1774831095.9417288}
+{"event": "stage1_c_t_delta_norm_mean", "ok": true, "value": 0.0, "note": "Mean c_t delta norm / c_t 相邻步差分范数均值", "timestamp": 1774831095.9417374}
+{"event": "stage1_pred_delta_c_cos_adjacent", "ok": true, "value": 0.0, "note": "Mean adjacent cosine of predicted delta_c / 相邻预测 delta_c 余弦均值", "timestamp": 1774831095.941745}
+{"event": "stage1_math_lane_score_mean", "ok": true, "value": 0.0, "note": "Mean math adapter lane score / math adapter lane 分数均值", "timestamp": 1774831095.9417536}
+{"event": "stage1_math_summary_gate_mean", "ok": true, "value": 0.0, "note": "Mean math summary gate / math summary gate 均值", "timestamp": 1774831095.941761}
+{"event": "stage1_r_t_drift_mean", "ok": true, "value": 0.0, "note": "Mean r_t drift / r_t 漂移均值", "timestamp": 1774831095.9417684}
+{"event": "stage1_r_t_trust_mean", "ok": true, "value": 0.0, "note": "Mean r_t trust / r_t 信任均值", "timestamp": 1774831095.9417758}
+{"event": "stage1_r_t_switch_mean", "ok": true, "value": 0.0, "note": "Mean c_t/r_t switch gate / c_t/r_t 切换门均值", "timestamp": 1774831095.941783}
+{"event": "stage1_progress_vs_rollout_corr", "ok": true, "value": 0.0, "note": "Correlation between progress_next and rollout error / progress_next 与 rollout 误差相关性", "timestamp": 1774831095.94179}
+{"event": "stage1_progress_vs_exit_corr", "ok": true, "value": -0.9528902173042297, "note": "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性", "timestamp": 1774831095.941799}
+{"event": "stage1_exit_invalid_count", "ok": true, "value": 0.0, "note": "Invalid exit-score count should stay zero / exit 非有限计数应为零", "timestamp": 1774831095.941808}
+{"event": "stage1_nan_to_num_trigger_count", "ok": true, "value": 0.0, "note": "nan_to_num trigger count / nan_to_num 触发次数", "timestamp": 1774831095.9418159}

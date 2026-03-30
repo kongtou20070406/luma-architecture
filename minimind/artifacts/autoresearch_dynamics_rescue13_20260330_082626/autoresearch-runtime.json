@@ -1,0 +1,28 @@
+{
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout",
+  "cmd": [
+    "/home/kt/ai/.venvs/luma-global/bin/python",
+    "/home/kt/ai/minimind/scripts/run_dynamics_candidate_eval.py",
+    "--program",
+    "/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json",
+    "--candidate",
+    "A2-progress_shape_v1-h3+progress_exit_readout",
+    "--stage2-steps",
+    "4096",
+    "--json-out",
+    "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626/reports/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout.json",
+    "--metrics-out",
+    "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626/metrics/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout.jsonl",
+    "--summary-out",
+    "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626/summaries/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout.json",
+    "--save-checkpoint",
+    "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout.pt"
+  ],
+  "load_checkpoint": null,
+  "save_checkpoint": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout.pt",
+  "stage_name": "short_prescreen",
+  "stage_steps": 4096,
+  "started_at": 1774830386.3695483,
+  "status": "running",
+  "timeout_sec": 14400
+}

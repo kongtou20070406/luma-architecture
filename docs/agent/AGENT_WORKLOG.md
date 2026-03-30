@@ -229,6 +229,56 @@
 - 下一步:
   - 根据参数分布，决定是否先做 `lm_head` / factorized output 的参数收敛方案
 
+## 2026-03-29 23:30 动力学矩阵 E1~E12 替换 + 新实验接线 + CUDA smoke
+- 阶段: Dynamics mid/long 筛选准备（实现稳定性优先）
+- 本步目标:
+  - 把旧矩阵替换成新的 E1~E12
+  - 把 `dynamics_experiment` 分支在模型主循环、runner、program 三处打通
+  - 先做单候选 CUDA smoke，确认实现链路可跑
+- 已完成:
+  - 更新 `/home/kt/ai/minimind/model/model_minimind.py`
+    - `GatedDiffAttnFoXSWA` 增加稳定的 `attn_bias` 广播逻辑
+    - `LumaReasonCore` 的 `dynamics_experiment` 对齐到新 12 方案命名：
+      - `summary_chunk_film_v1_core / v2_progress`
+      - `hici_construct_integrate_broadcast_v1`
+      - `budgeted_summary_routing_v1 / v2_progress`
+      - `hier_block_token_v1/v2/v3`
+      - `double_p_coarse_to_fine_v1`
+      - `memory_tiered_routing_v1`
+      - `progress_focus_v1 / v3`
+    - `LumaBackbone` 接入 `modulation_context` 与控制统计回传
+    - 新增数值安全计数回传：
+      - `exit_score_preclamp_nonfinite_count`
+      - `exit_score_postfix_clamped_ratio`
+      - `bernoulli_invalid_prevented_count`
+      - `nan_to_num_trigger_count`
+  - 更新 `/home/kt/ai/minimind/scripts/run_luma_stage12.py`
+    - 新增 CLI 参数：`dynamics_experiment` + routing/budget/top-p 相关参数
+    - `build_tiny_luma_config` 透传新字段
+    - 报告中新增 progress/数值安全/调制统计字段
+  - 用新定义重写矩阵脚本：
+    - `/home/kt/ai/minimind/scripts/build_luma_dynamics_matrix.py`
+  - 重写 autoresearch program：
+    - `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+    - candidate 列表替换为新 E1~E12
+  - 生成新矩阵文档：
+    - `/home/kt/ai/docs/reports/Luma_Dynamics_Experiment_Matrix_20260329.generated.json`
+    - `/home/kt/ai/docs/reports/Luma_Dynamics_Experiment_Matrix_20260329.generated.md`
+- 验证:
+  - `python3 -m py_compile` 通过：
+    - `model/model_minimind.py`
+    - `scripts/run_luma_stage12.py`
+    - `scripts/build_luma_dynamics_matrix.py`
+  - 单候选 CUDA smoke（E1）：
+    - 命令：`run_luma_stage12.py ... --dynamics-experiment summary_chunk_film_v1_core`
+    - 结果：成功运行并产出
+      - `/home/kt/ai/minimind/artifacts/stage12_smoke_e1.json`
+      - `/home/kt/ai/minimind/artifacts/stage12_smoke_e1_metrics.jsonl`
+- 结论边界:
+  - 当前只完成“实现接线 + 单候选 smoke”，尚未开始 12 条 2048/4096/10240 正式筛选
+  - 历史 stale runtime 的 20480 仍不计入结论
+  - 任何 `failed:1` 仍需按日志先区分实现 bug 与结构失败
+
 ## 2026-03-28 16:02 压缩区 AttnRes 落地 + world JEPA 接入 + factorized LM head 收敛
 - 阶段: 阶段0B 模块拆分与验证脚手架
 - 本步目标: 把压缩区 Block AttnRes 从摘要占位改成真实前向模块，接入 world JEPA 主干，并把过大的 LM Head 收敛到 factorized 版本
@@ -1313,3 +1363,162 @@
     2. `hierarchical_block_token_ct_routing`
     3. `progress_query_focus_routing`
   - 后续赛制建议改为“晋级继训练制”：`2048 -> 4096 -> 10240 -> 20480` 默认沿同候选 checkpoint 继续训练。
+
+## 2026-03-29 Handoff + bug-prevention constraints for next chat window
+- 阶段: 项目交接准备
+- 本步目标: 为新聊天窗口提供稳定接手点，并明确后续实验执行中的防 bug 规则。
+- 交接基线:
+  - 当前动力学增强主候选: `A2-progress_shape_v1-h3+progress_exit_readout`
+  - 当前观察锚点: `A2-progress_shape_v1-h3`
+  - 当前实现版暂不继续送中长程: `token_selective_ct_routing / lowrank_hyperbias_ct / modulewise_ct_gate`
+- 当前正式总结文档:
+  - `/home/kt/ai/docs/reports/Luma_Dynamics_MidLong_Summary_20260329.md`
+  - `/home/kt/ai/docs/reports/Luma_Dynamics_Literature_Midcourse_Plan.md`
+  - `/home/kt/ai/docs/plans/Luma_v0.7.2_Agent_MasterPlan.md`
+- 后续优先实现的新结构候选:
+  1. `summary_conditioned_chunk_film`
+  2. `hierarchical_block_token_ct_routing`
+  3. `progress_query_focus_routing`
+- 防 bug 规则:
+  - 新 runner 或评估脚本改动后，必须先 `py_compile` 再开批量实验。
+  - 任何 mid/long 实验前，先做单候选 CUDA smoke，不再依赖 CPU smoke。
+  - 开第二条串行链前，先检查现有 `systemctl --user` 与 `ps`，避免重复 supervisor。
+  - 旧 runtime/heartbeat 文件不能当活进程证据，必须同时核对 service 和实际进程树。
+  - 任何 `failed:1` 结论先看日志，区分“实现 bug”与“结构性失败”。
+  - 后续长程筛选默认采用 checkpoint 晋级继训练制，而不是每档 fresh start。
+
+## 2026-03-29 Nightly matrix12 launch (public python bucket)
+- 阶段: 12 候选矩阵后台长链启动
+- 本步目标: 按 `2048 -> 4096 -> 10240 -> 20480` 晋级继训练制启动新一轮筛选，长程名额固定为 `5`，并切换 python 桶为公开数据源。
+- 启动前检查:
+  - `systemctl --user` 与 `ps` 无旧活跃训练链。
+  - `py_compile` 通过:
+    - `/home/kt/ai/minimind/model/model_minimind.py`
+    - `/home/kt/ai/minimind/scripts/run_luma_stage12.py`
+    - `/home/kt/ai/minimind/scripts/build_luma_dynamics_matrix.py`
+  - CUDA smoke 通过（`summary_chunk_film_v1_core` + `public_mbpp`）。
+- 配置确认:
+  - `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+  - `candidate_priority = 12`
+  - `promotions.to_long_top_k = 5`
+  - `fixed_eval_args.python_code_source = public_mbpp`
+- 正式后台链:
+  - service: `luma-dyn-matrix12-20260329-234325.service`
+  - output: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_matrix12_20260329_234325`
+  - runtime: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_matrix12_20260329_234325/autoresearch-runtime.json`
+  - heartbeat: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_matrix12_20260329_234325/watchdog-heartbeat.json`
+  - results TSV: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_matrix12_20260329_234325/research-results.tsv`
+- 说明:
+  - 中途尝试过一次 `nohup` 启动，但在当前执行环境下后台子进程会被回收，未形成有效运行链；该尝试不计入实验结果。
+  - 正式链已改为 `systemd --user` 托管，并已确认存在活跃 process tree（watchdog + candidate eval + stage12）。
+
+## 2026-03-30 Matrix12 nightly summary delivered
+- 已完成本轮后台链路结果汇总，输出报告:
+  - `/home/kt/ai/docs/reports/Luma_Dynamics_Matrix12_Nightly_Report_20260330.md`
+- 关键边界:
+  - 本轮有效阶段停在 `2048 + 1条4096`，未进入 `10240/20480`
+  - `hier_block_token_*` 与 `double_p_coarse_to_fine_v1` 为实现 bug 污染（`block_score_head` shape mismatch），不能直接当结构失败结论
+  - 当前唯一通过 `2048` guard 并进入 `4096` 的是 `memory_tiered_routing_v1`，但其 `4096` rollout_nonzero guard 失守
+
+## 2026-03-30 Rescue-priority refactor + 4096 matrix reset
+- 第一优先修复：`block_score_head` 接口契约
+  - `model/model_minimind.py` 中将 block/chunk/token feature dim 改为统一模板变量并增加运行时维度校验。
+  - 已修复此前 `mat1 and mat2 shapes cannot be multiplied (2x419 and 291x1)` 的主因。
+- 第二优先：memory_tiered 抢救机制
+  - 新增 soft-tier 模式、world cap、local share floor、tier entropy/dominant/switch 监控。
+  - 新增 `m1_lite / m1_anti_collapse / local_floor / anti_budget` 标签路径。
+- 第三优先：summary 家族减控制
+  - 新增 `s_lite_control / s_local_floor` 标签路径（降低增益、引入 local floor，防止摘要路径过早接管）。
+- 新增轻量防塌缩损失
+  - rollout 活性区间损失（zone）
+  - routing entropy/min-local-share 正则
+  - trajectory vitality 损失（基于 c_t/world drift floor）
+- 新矩阵与程序
+  - 生成新矩阵：
+    - `/home/kt/ai/docs/reports/Luma_Dynamics_Experiment_Matrix_20260330.generated.json`
+    - `/home/kt/ai/docs/reports/Luma_Dynamics_Experiment_Matrix_20260330.generated.md`
+  - 更新运行程序：
+    - `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+  - 新赛制为 `4096 -> 10240 -> 20480`（保留 checkpoint 晋级继训练）
+- 防 bug 验证
+  - `py_compile` 全通过：
+    - `model/model_minimind.py`
+    - `scripts/run_luma_stage12.py`
+    - `scripts/build_luma_dynamics_matrix.py`
+    - `scripts/run_dynamics_candidate_eval.py`
+    - `scripts/run_dynamics_autoresearch_local.py`
+  - CUDA smoke（hierarchical 路径）通过：
+    - `--dynamics-experiment hier_block_token_v2_attn_bias`
+    - 输出：`/home/kt/ai/minimind/artifacts/stage12_smoke_hier_fix.json`
+
+## 2026-03-30 Formal-pretrain anchor added + matrix relaunched
+- 根据用户新要求，将 `A2-progress_shape_v1-h3+progress_exit_readout` 作为正式预训练验证锚点加入矩阵。
+- 更新文件：
+  - `/home/kt/ai/minimind/scripts/build_luma_dynamics_matrix.py`
+  - `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+  - 生成物刷新：
+    - `/home/kt/ai/docs/reports/Luma_Dynamics_Experiment_Matrix_20260330.generated.json`
+    - `/home/kt/ai/docs/reports/Luma_Dynamics_Experiment_Matrix_20260330.generated.md`
+- 当前矩阵规模：`13` 候选（新增 `P0` pretrain-readiness anchor）。
+- 规则执行记录：
+  - 先 `py_compile`（runner/eval/build 脚本）通过。
+  - 先做单候选 CUDA smoke（新锚点，`stage2_steps=128`）通过，`guard.all_ok=true`。
+  - 启动前检查 `systemctl --user` 与 `ps`，无重复活链。
+- 正式后台链（systemd transient）：
+  - unit: `luma-matrix13-20260330_082626.service`
+  - output: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626`
+  - launcher log: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626.service.log`
+  - runtime: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626/autoresearch-runtime.json`
+  - heartbeat: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_20260330_082626/watchdog-heartbeat.json`
+
+## 2026-03-30 ARC benchmark integrated into matrix run
+- 用户要求：在当前矩阵赛制中加入 ARC 智能基准评估。
+- 代码改动：
+  - `/home/kt/ai/minimind/scripts/run_luma_stage12.py`
+    - 新增 `ARC-Challenge` 公共数据加载
+    - 新增 `--enable-arc` 开关
+    - `build_sample_groups` 增加 `arc` bucket（独立评估桶）
+    - 报告字段增加 `enable_arc`
+  - `/home/kt/ai/minimind/scripts/run_dynamics_candidate_eval.py`
+    - score 逻辑改为按 `score_formula.weights` 动态解析（支持 `arc_self_tail`）
+    - rollout_nonzero guard 观察桶加入 `arc`
+  - `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+    - `fixed_eval_args.enable_arc = true`
+    - `score_formula.weights` 新增 `arc_self_tail`
+  - `/home/kt/ai/minimind/scripts/build_luma_dynamics_matrix.py`
+    - 文档矩阵指标口径加入 `arc`
+- 规则执行：
+  - `py_compile` 通过（runner/eval/build/autoresearch 脚本）
+  - 单候选 CUDA smoke（含 ARC）通过：
+    - `/home/kt/ai/minimind/artifacts/stage12_smoke_arc_anchor_20260330.json`
+- 运行链切换：
+  - 先停旧链：`luma-matrix13-20260330_082626.service`
+  - 新链（含 ARC）已启动：
+    - unit: `luma-matrix13-arc-20260330_083423.service`
+    - output: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arc_20260330_083423`
+    - runtime: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arc_20260330_083423/autoresearch-runtime.json`
+
+## 2026-03-30 ARC source correction: AI2 ARC -> Chollet ARC-AGI
+- 用户要求：移除 AI2 ARC，改为 Chollet ARC（或文本可用版本）。
+- 执行结果：已切换到 `Chollet ARC-AGI`（官方 `fchollet/ARC-AGI` 训练任务），并采用文本线性化样本用于当前 stage12 桶评估。
+- 代码改动：
+  - `/home/kt/ai/minimind/scripts/run_luma_stage12.py`
+    - 移除 AI2 ARC-Challenge loader
+    - 新增 `load_chollet_arc_agi_texts(...)`
+    - 新增 flag：`--enable-arc-agi`
+    - bucket 名称从 `arc` 更正为 `arc_agi`
+  - `/home/kt/ai/minimind/scripts/run_dynamics_candidate_eval.py`
+    - rollout guard 观察桶改为包含 `arc_agi`
+    - score 键使用 `arc_agi_self_tail`
+  - `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+    - `enable_arc_agi=true`
+    - 权重键改为 `arc_agi_self_tail`
+  - `/home/kt/ai/minimind/scripts/build_luma_dynamics_matrix.py` 与生成矩阵同步改口径为 `arc_agi`
+- 规则执行：
+  - `py_compile` 通过
+  - 单候选 CUDA smoke（含 `enable_arc_agi`）通过：
+    - `/home/kt/ai/minimind/artifacts/stage12_smoke_arc_agi_anchor_20260330.json`
+- 后台链重启（含 Chollet ARC-AGI）：
+  - unit: `luma-matrix13-arcagi-20260330_083823.service`
+  - output: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823`
+  - runtime: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/autoresearch-runtime.json`

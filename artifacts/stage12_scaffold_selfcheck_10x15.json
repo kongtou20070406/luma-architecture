@@ -1,0 +1,175 @@
+{
+  "fixture_path": "/home/kt/ai/minimind/artifacts/luma_stage12_hard_math_dialogue.json",
+  "fixture_mode": "hard_math_dialogue",
+  "rollout_steps": 10,
+  "slow_k": 1,
+  "reason_loops": 15,
+  "enable_world_jepa": true,
+  "world_jepa_mode": "scaffold",
+  "enable_self_check_ring": true,
+  "num_samples": 8,
+  "stage1": {
+    "mean_kl": 1.8405219316482544,
+    "mean_hidden_delta": 4.375,
+    "hard_loop_var": 7.0,
+    "soft_loop_var": 0.109375,
+    "c_t_var": 0.7550972700119019,
+    "exit_score_var": 9.065533959073946e-05,
+    "sampled_exit_score_var": 0.0003618580522015691,
+    "two_step_improvement_mean": 0.21272048354148865,
+    "self_check_mean": 0.48036184906959534
+  },
+  "stage2": {
+    "losses": [
+      24.385761260986328,
+      24.635150909423828,
+      23.261234283447266,
+      23.635637283325195,
+      22.635631561279297,
+      22.13578987121582,
+      23.635929107666016,
+      23.63597297668457
+    ],
+    "self_losses": [
+      0.77734375,
+      0.9921875,
+      1.0859375,
+      1.234375,
+      0.95703125,
+      1.0625,
+      0.9609375,
+      1.046875
+    ],
+    "rollout_losses": [
+      0.84765625,
+      1.078125,
+      0.609375,
+      0.7421875,
+      0.66796875,
+      0.6953125,
+      0.6015625,
+      0.74609375
+    ],
+    "mean_delta_norm": 1.208251953125,
+    "self_loss_head": 0.884765625,
+    "self_loss_tail": 1.00390625,
+    "self_rollout_head": 0.962890625,
+    "self_rollout_tail": 0.673828125
+  },
+  "per_task": {
+    "math": {
+      "stage1": {
+        "mean_kl": 1.7727315425872803,
+        "mean_hidden_delta": 4.34375,
+        "hard_loop_var": 6.0,
+        "soft_loop_var": 0.5555555820465088,
+        "c_t_var": 0.8839390873908997,
+        "exit_score_var": 0.00010628598829498515,
+        "sampled_exit_score_var": 0.0004673130752053112,
+        "two_step_improvement_mean": 0.18385419249534607,
+        "self_check_mean": 0.44466960430145264
+      },
+      "stage2": {
+        "losses": [
+          24.385761260986328,
+          23.385780334472656,
+          22.885560989379883,
+          23.885801315307617
+        ],
+        "self_losses": [
+          0.77734375,
+          1.0859375,
+          0.96484375,
+          1.0234375
+        ],
+        "rollout_losses": [
+          0.84765625,
+          0.6796875,
+          0.69140625,
+          0.5859375
+        ],
+        "mean_delta_norm": 1.263671875,
+        "self_loss_head": 0.931640625,
+        "self_loss_tail": 0.994140625,
+        "self_rollout_head": 0.763671875,
+        "self_rollout_tail": 0.638671875
+      }
+    },
+    "dialogue": {
+      "stage1": {
+        "mean_kl": 1.8660852909088135,
+        "mean_hidden_delta": 4.40625,
+        "hard_loop_var": 8.333333015441895,
+        "soft_loop_var": 1.1388888359069824,
+        "c_t_var": 0.5359553694725037,
+        "exit_score_var": 0.00011098749382654205,
+        "sampled_exit_score_var": 0.0007031424320302904,
+        "two_step_improvement_mean": 0.2524542510509491,
+        "self_check_mean": 0.5426575541496277
+      },
+      "stage2": {
+        "losses": [
+          25.01020622253418,
+          23.88556480407715,
+          22.260711669921875,
+          23.88576316833496
+        ],
+        "self_losses": [
+          0.97265625,
+          1.234375,
+          1.0546875,
+          1.0625
+        ],
+        "rollout_losses": [
+          1.0859375,
+          0.79296875,
+          0.7109375,
+          0.828125
+        ],
+        "mean_delta_norm": 1.376953125,
+        "self_loss_head": 1.103515625,
+        "self_loss_tail": 1.05859375,
+        "self_rollout_head": 0.939453125,
+        "self_rollout_tail": 0.76953125
+      }
+    },
+    "mixed": {
+      "stage1": {
+        "mean_kl": 1.8405219316482544,
+        "mean_hidden_delta": 4.375,
+        "hard_loop_var": 7.0,
+        "soft_loop_var": 0.109375,
+        "c_t_var": 0.7550972700119019,
+        "exit_score_var": 9.065533959073946e-05,
+        "sampled_exit_score_var": 0.0003618580522015691,
+        "two_step_improvement_mean": 0.21272048354148865,
+        "self_check_mean": 0.48036184906959534
+      },
+      "stage2": {
+        "losses": [
+          24.385761260986328,
+          24.635101318359375,
+          23.386194229125977,
+          23.635637283325195
+        ],
+        "self_losses": [
+          0.77734375,
+          0.99609375,
+          1.0859375,
+          1.234375
+        ],
+        "rollout_losses": [
+          0.84765625,
+          1.09375,
+          0.61328125,
+          0.7421875
+        ],
+        "mean_delta_norm": 1.4130859375,
+        "self_loss_head": 0.88671875,
+        "self_loss_tail": 1.16015625,
+        "self_rollout_head": 0.970703125,
+        "self_rollout_tail": 0.677734375
+      }
+    }
+  }
+}

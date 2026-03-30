@@ -1,0 +1,24 @@
+{
+  "candidate": "A2-progress_shape_v1-h3+modulewise_ct_gate",
+  "cmd": [
+    "/home/kt/ai/.venvs/luma-global/bin/python",
+    "/home/kt/ai/minimind/scripts/run_dynamics_candidate_eval.py",
+    "--program",
+    "/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json",
+    "--candidate",
+    "A2-progress_shape_v1-h3+modulewise_ct_gate",
+    "--stage2-steps",
+    "4096",
+    "--json-out",
+    "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_midpatch_20260329/reports/mid_rescreen__A2-progress_shape_v1-h3__modulewise_ct_gate.json",
+    "--metrics-out",
+    "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_midpatch_20260329/metrics/mid_rescreen__A2-progress_shape_v1-h3__modulewise_ct_gate.jsonl",
+    "--summary-out",
+    "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_midpatch_20260329/summaries/mid_rescreen__A2-progress_shape_v1-h3__modulewise_ct_gate.json"
+  ],
+  "stage_name": "mid_rescreen",
+  "stage_steps": 4096,
+  "started_at": 1774792504.9213583,
+  "status": "running",
+  "timeout_sec": 10800
+}

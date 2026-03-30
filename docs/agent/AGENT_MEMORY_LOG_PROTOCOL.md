@@ -5,7 +5,8 @@
 - 每一步都留下“已完成事项 + 证据 + 下一步”，避免记忆丢失。
 
 ## 2. 记录文件与位置
-- 主记录文件固定为：`/home/kt/ai/AGENT_WORKLOG.md`
+- 主项目目录固定为：`/home/kt/ai/luma-architecture`
+- 主记录文件固定为：`/home/kt/ai/luma-architecture/docs/agent/AGENT_WORKLOG.md`
 - 所有 agent 在每个步骤结束后，必须更新该文件。
 - 不允许只在对话里汇报、不落盘。
 
@@ -64,5 +65,5 @@
 
 ## 8. 与主规划联动
 - 本规范默认绑定：
-  - `/home/kt/ai/Luma_v0.7.2_Agent_MasterPlan.md`
+  - `/home/kt/ai/luma-architecture/docs/plans/Luma_v0.7.2_Agent_MasterPlan.md`
 - `AGENT_WORKLOG.md` 中每条记录必须标注对应主规划阶段（如 `阶段0D`、`Gate P3`）。

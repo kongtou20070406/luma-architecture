@@ -1,0 +1,63 @@
+{
+  "program_name": "luma_dynamics_background_screening_v1",
+  "primary_repo": "/home/kt/ai/minimind",
+  "baseline_candidate": "A2-progress_shape_v1-h3",
+  "stages": {
+    "short_prescreen_steps": 2048,
+    "mid_rescreen_steps": 4096,
+    "long_round1_steps": 10240,
+    "long_confirm_steps": 20480
+  },
+  "candidate_priority": [
+    "A2-progress_shape_v1-h3",
+    "A2-progress_shape_v1-h3+local_rollout_head",
+    "A2-progress_shape_v1-h3+progress_exit_readout",
+    "A2-progress_shape_v1-h3+dual_rate_self_predictor",
+    "A2-progress_shape_v1-h3+trajectory_health_probe",
+    "A2-progress_shape_v1-h3+modulewise_ct_gate",
+    "A2-progress_shape_v1-h3+film_ct_modulation"
+  ],
+  "fixed_eval_args": {
+    "device": "cuda",
+    "seq_len": 48,
+    "samples": 8,
+    "fixture_mode": "competition_math_dialogue_emotion",
+    "enable_persona_seed": true,
+    "enable_python_code": true,
+    "persona_dir": "/home/kt/ai/luma_dataset",
+    "rollout_steps": 10,
+    "reason_loops": 15,
+    "world_jepa_mode": "full",
+    "enable_self_check_ring": true,
+    "self_check_k": 2,
+    "reason_shared_depth": 2,
+    "exit_two_step_aux_weight": 0.25,
+    "self_loop_awareness_mode": "predictor_progress",
+    "self_progress_shape_weight": 0.1,
+    "self_progress_trend_weight": 0.05,
+    "self_progress_plateau_weight": 0.02,
+    "self_rollout_supervision_horizon": 3,
+    "self_rollout_weighting_mode": "legacy"
+  },
+  "score_formula": {
+    "direction": "lower",
+    "weights": {
+      "math_self_tail": 0.40,
+      "python_code_self_tail": 0.25,
+      "mixed_self_tail": 0.20,
+      "dialogue_self_tail": 0.075,
+      "emotion_self_tail": 0.075
+    }
+  },
+  "guard_rules": {
+    "min_c_t_var": 0.20,
+    "min_any_rollout_nonzero_ratio": 0.05,
+    "max_dialogue_self_tail": 1.50,
+    "max_emotion_self_tail": 0.60
+  },
+  "notes": [
+    "Use 2048-step as screening default until a candidate earns promotion.",
+    "Do not promote candidates that improve mixed-only while collapsing rollout nonzero ratio and c_t variance.",
+    "Prioritize math + python_code + mixed over cosmetic mixed-only wins."
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "candidate": "A2-progress_shape_v1-h3+modulewise_ct_gate",
+  "elapsed_sec": 690.0103871822357,
+  "pid": 503389,
+  "stage_name": "mid_rescreen",
+  "stage_steps": 4096,
+  "status": "running",
+  "timeout_sec": 10800,
+  "ts": 1774793194.9323282
+}

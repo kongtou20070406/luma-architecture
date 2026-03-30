@@ -1,16 +1,21 @@
 # private data
 luma_dataset/
 **/luma_dataset/
+minimind_runtime_dynamics/dataset/
+**/dataset/private*/
+**/persona_seed/
 
 # weights / checkpoints
 *.pth
 *.pt
 *.bin
 *.safetensors
+*.ckpt
 minimind/checkpoints/
 minimind/out/
 **/checkpoints/
 **/out/
+**/weights/
 
 # env / caches
 .venv/
@@ -19,6 +24,9 @@ __pycache__/
 *.pyc
 *.pyo
 .ipynb_checkpoints/
+.cache/
+**/.cache/
+.DS_Store
 
 # local experiment noise
 *.log
@@ -26,3 +34,8 @@ wandb/
 
 # local artifacts not meant for sharing by default
 minimind/.wheels/
+minimind_runtime_dynamics/.wheels/
+
+# local compiled binaries
+**/*.cpython-*.so
+third_party/mamba-official/*.so

@@ -1,0 +1,25 @@
+{
+  "c_t_var": 0.7466460466384888,
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout",
+  "checkpoint_lineage": [],
+  "guard": {
+    "all_ok": false,
+    "c_t_var_ok": true,
+    "dialogue_ok": true,
+    "emotion_ok": true,
+    "rollout_nonzero_ok": false
+  },
+  "hard_loop_var": 1.359375,
+  "load_checkpoint": null,
+  "metrics": {
+    "arc_self_tail": 0.20263671875,
+    "dialogue_self_tail": 0.11669921875,
+    "emotion_self_tail": 0.122314453125,
+    "math_self_tail": 0.099365234375,
+    "mixed_self_tail": 0.10546875,
+    "python_code_self_tail": 0.20263671875
+  },
+  "rollout_nonzero_max": 0.0,
+  "save_checkpoint": null,
+  "score": 0.135595703125
+}

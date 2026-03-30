@@ -2,6 +2,11 @@
 
 公开分享版的 **Luma architecture** 研究仓。
 
+## 主项目位置（唯一）
+
+- 本地主项目目录固定为：`/home/kt/ai/luma-architecture`
+- 从现在起以这个仓作为唯一主线，不再并行维护“内外两套同名仓”。
+
 这个仓主要用于和朋友分享当前进度，内容以：
 
 - 架构设计文档
@@ -82,10 +87,10 @@
 
 1. 私有或公开训练数据
 2. WSL2 + CUDA 环境
-3. 外部依赖仓或包（如 `mamba-ssm`、`flash-linear-attention`、`bitsandbytes`、`muon-optimizer`）
+3. Python 依赖包（如 `bitsandbytes`、`muon-optimizer`），以及按需编译第三方内核
 
 详细见：
-- [WSL2_Agent_Environment.md](docs/reference/WSL2_Agent_Environment.md)
+- [Luma_Experiment_Implementation_Checklist.md](docs/reference/Luma_Experiment_Implementation_Checklist.md)
 
 ## 推荐阅读顺序
 

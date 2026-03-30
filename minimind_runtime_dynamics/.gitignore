@@ -1,0 +1,12 @@
+artifacts/
+checkpoints/
+logs/
+out/
+__pycache__/
+*.pyc
+autoresearch-state.json
+research-results.tsv
+autoresearch-launch.json
+autoresearch-launch.prev.json
+autoresearch-runtime.json
+autoresearch-runtime.log

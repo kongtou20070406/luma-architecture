@@ -1,0 +1,50 @@
+{
+  "fixture_path": "/home/kt/ai/minimind/artifacts/luma_stage12_hard_math_dialogue.json",
+  "fixture_mode": "hard_math_dialogue",
+  "rollout_steps": 4,
+  "slow_k": 1,
+  "reason_loops": 8,
+  "enable_world_jepa": true,
+  "num_samples": 6,
+  "stage1": {
+    "mean_kl": 1.2430847883224487,
+    "mean_hidden_delta": 3.75,
+    "hard_loop_var": 0.8055555820465088,
+    "soft_loop_var": 0.1388888955116272,
+    "c_t_var": 0.5537167191505432,
+    "exit_score_var": 4.417098898557015e-05,
+    "sampled_exit_score_var": 0.00025445883511565626,
+    "two_step_improvement_mean": 0.184446319937706
+  },
+  "stage2": {
+    "losses": [
+      25.0,
+      25.125,
+      24.875,
+      24.0,
+      24.125,
+      24.5
+    ],
+    "self_losses": [
+      0.85546875,
+      0.984375,
+      1.046875,
+      0.921875,
+      0.8125,
+      0.94921875
+    ],
+    "rollout_losses": [
+      0.71875,
+      0.87109375,
+      0.7578125,
+      0.6796875,
+      0.640625,
+      0.76171875
+    ],
+    "mean_delta_norm": 1.2565104166666667,
+    "self_loss_head": 0.919921875,
+    "self_loss_tail": 0.880859375,
+    "self_rollout_head": 0.794921875,
+    "self_rollout_tail": 0.701171875
+  }
+}

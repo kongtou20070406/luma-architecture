@@ -429,489 +429,305 @@
   - 这是这组里最不稳的一条
   - 容易引入新的训练噪声，所以优先级应低于 FiLM 和 module-wise gate
 
-## 5. 两阶段实验筛选计划：先短程/中程筛选，再送长程
+## 5. 当前 authoritative 口径（对齐当前工作区）
 
-这里的目标不是“一次找最终答案”，而是：
+这一节开始，旧的“`token_selective / modulewise / lowrank` 仍在默认竞线中”的表述全部作废。
 
-- 先用中程实验把最有价值的动力学改进筛出来
-- 再把排名前 `1 / 2 / 3` 的方案送去长程复验
-- 同时避免再把系统推向 rollout 压平
+当前唯一有效、且与工作区实现对齐的动力学口径是：
 
-### 阶段 A：短程预筛（2048-step）
+- 当前动力学增强主候选：
+  - `A2-progress_shape_v1-h3+progress_exit_readout`
+- 当前观察锚点：
+  - `A2-progress_shape_v1-h3`
+- 当前实现版本不再直接送中长程：
+  - `A2-progress_shape_v1-h3+token_selective_ct_routing`
+  - `A2-progress_shape_v1-h3+lowrank_hyperbias_ct`
+  - `A2-progress_shape_v1-h3+modulewise_ct_gate`
 
-这一步的目标是：
-- 快速剔除会把 system dynamics 推坏的方案
-- 找到真正值得继续烧更长预算的结构/损失候选
-- 给每个候选一个可比较的分数
+与当前工作区对应的程序入口：
 
-#### 中程预筛候选池
+- 固定程序：
+  - `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+- 单候选 verifier：
+  - `/home/kt/ai/minimind/scripts/run_dynamics_candidate_eval.py`
+- 本地分级 runner：
+  - `/home/kt/ai/minimind/scripts/run_dynamics_autoresearch_local.py`
+- 矩阵生成脚本：
+  - `/home/kt/ai/minimind/scripts/build_luma_dynamics_matrix.py`
 
-最小候选池建议是：
+与当前 runner 口径对应的赛果边界：
 
-1. `A2-progress_shape_v1-h3`
-2. `A2-progress_shape_v1-h3-softnear`
-3. `A2-progress_shape_v1-h3-lite_local`
-4. `A2-progress_shape_v1-h3 + local_rollout_head`
-5. `A2-progress_shape_v1-h3 + progress_exit_readout`
-6. `A2-progress_shape_v1-h3 + dual_rate_self_predictor`
-7. `A2-progress_shape_v1-h3 + trajectory_health_probe`
-8. `A2-progress_shape_v1-h3 + backtrack_aware_progress`
-9. `A2-progress_shape_v1-h3 + film_ct_modulation`
-10. `A2-progress_shape_v1-h3 + modulewise_ct_gate`
-11. `A2-progress_shape_v1-h3 + lowrank_hyperbias_ct`
-12. `A2-progress_shape_v1-h3 + token_selective_ct_routing`
+- `2048`：有效，可作为预筛依据
+- `4096`：有效，可作为中程复筛依据
+- `10240`：有效，但当前只有 `progress_exit_readout` 站住
+- `20480`：当前不计正式结论，因为当时没有活着的训练进程
+- `mid_rerun`：不能直接当结构失败证据，因为当时被 `run_luma_stage12.py` 的 `import math` bug 污染
 
-如果 GPU 时间更紧，可以先缩成：
+## 6. 方法 Review：把三种新方案改成更符合 Luma 的实现
 
-1. `A2-progress_shape_v1-h3`
-2. `A2-progress_shape_v1-h3 + local_rollout_head`
-3. `A2-progress_shape_v1-h3 + progress_exit_readout`
-4. `A2-progress_shape_v1-h3 + dual_rate_self_predictor`
+这里不沿用“直接强控 token”的旧实现口径，而是按 Luma 当前真实模块边界来改写：
 
-#### 实验 A1：`A2-progress_shape_v1-h3`
-- 作用：作为新的 dynamics 基线
-- 目的：确认 `horizon3` 在比 `2048-step` 更长的口径下是否仍稳定
-- 主要看：
-  - `math / python_code / mixed self_tail`
-  - `rollout_nonzero_ratio`
-  - `c_t_var`
-  - `hard_loop_var`
+- 慢环控制源：
+  - `c_t`
+  - `know_gap`
+  - `progress-state(next improvement / trend / plateau)`
+- 压缩区摘要源：
+  - `block_repr`
+  - `chunk summary`
+  - `world_summary`
+- 快环局部作用点：
+  - `ReasonMamba input`
+  - `DiffAttn residual bias`
+  - `FFN residual scale`
 
-#### 实验 A2：`A2-progress_shape_v1-h3-softnear`
-- 做法：
-  - 保持 `horizon3`
-  - 再加一个比当前 `near3_weighted` 更轻的近端加权
-  - 例如：`1.0 / 0.3 / 0.1`
-- 目的：
-  - 看能不能在不伤 `dialogue / persona_seed` 的前提下，把 `rollout_nonzero_ratio` 再拉高一点
-- 停止条件：
-  - `dialogue` 或 `persona_seed` 相对 `A1` 恶化超过 `15%`
-  - 但 `rollout_nonzero_ratio` 没有明显回升
+### 6.1 `summary_conditioned_chunk_film`
 
-#### 实验 A3：`A2-progress_shape_v1-h3-lite_local`
-- 做法：
-  - 在 `horizon3` 上加更轻的局部一致性
-  - 比当前 `local_smooth` 更弱，例如把权重减半
-- 目的：
-  - 看局部几何约束在近端 rollout 下是否终于变成正收益
-- 主要看：
-  - `pred_delta_c` 相邻夹角分布
-  - `trajectory curvature`
-  - `math / python_code` 是否比 `A1` 更稳
+这是当前最优先方案，也最符合 Luma 的慢环/快环分工。
 
-### 阶段 B：中程复筛（4096-step）
+Luma 版改写：
 
-这一步只给阶段 A 表现最好的前 `3~4` 组。
+- `c_t` 不直接控 token
+- 先构建：
+  - `chunk_summary = pool(h, chunk=32/64)`
+  - `block_context = fuse(last_k_block_repr, optional_world_summary)`
+- 再用：
+  - `summary_gate = MLP([c_t, progress_state, chunk_summary, block_context])`
+- 输出：
+  - `gamma_chunk`
+  - `beta_chunk`
+- 广播回 token 后，只做低增益调制：
+  - `ReasonMamba input FiLM`
+  - 或 `DiffAttn residual bias`
 
-目标：
-- 看中程里排序是否稳定
-- 排除只在 2048-step 冒尖、但一拉长就压平的方案
-- 为最终长程只保留前 `1 / 2 / 3` 名
+为什么更像 Luma：
 
-### 排名规则（用于决定前 1/2/3）
+- 慢环控制的是摘要，不是原始 token
+- 直接复用 `CompressionZone -> block_repr -> ReasonLoop`
+- 最容易稳定到 `10240`
 
-中程筛选不建议只看单个 `mixed self_tail`。
+论文启发落点：
 
-建议采用下面这个综合排序原则：
+- `Model-First Reasoning`
+- `LeWorldModel`
+- `EIDOS`
+- `Geometrically-Regularized World Models`
 
-#### 硬门槛
-- `math` 不恶化
-- `python_code` 不恶化
+### 6.2 `hierarchical_block_token_ct_routing`
+
+Luma 版不做原始 token 级“全局常开”路由，而是两段式：
+
+1. block 级筛选
+- `block_gate = MLP([c_t, progress_state, block_repr, loop_embed])`
+- 只保留 `top-k blocks`
+
+2. block 内轻量 token gate
+- `token_gate = sigmoid(MLP([h_local, c_t_proj, progress_proj]))`
+- 但不直接做 `h = h * gate`
+- 改成：
+  - `attn bias` 调制
+  - 或 `h = h + gate * delta_local`
+
+为什么更像 Luma：
+
+- 先用压缩区摘要缩小作用范围
+- token 细控只在局部打开
+- 更符合“先选区域，再局部精读”的推理方式
+
+论文启发落点：
+
+- `Causal-JEPA`
+- `Latent Particle World Models`
+- `Attention Residuals`
+
+### 6.3 `progress_query_focus_routing`
+
+Luma 版的关键不是“query from c_t”，而是“query from progress-aware slow state”。
+
+实现口径：
+
+- `focus_q = MLP([c_t, progress_next, progress_trend, progress_plateau, loop_embed])`
+- 先匹配：
+  - `block_repr`
+  - `chunk summary`
+- 再在选中块内做轻量 token top-k 或 span top-k
+- 未选中的区域只保留弱全局 FiLM
+- 被选中的区域才吃强局部 residual control
+
+为什么更像 Luma：
+
+- routing 成为 `progress-shape` 的下游执行器
+- 不再另起一条和 Self-JEPA 竞争的控制线
+- 对超长上下文更自然
+
+论文启发落点：
+
+- `From Latent Signals to Reflection Behavior`
+- `Learning When to Stop`
+- `Emergent Search and Backtracking`
+
+## 7. 12 组实验矩阵（新基线展开）
+
+实验矩阵全部挂在：
+
+- `A2-progress_shape_v1-h3+progress_exit_readout`
+
+上面，不再回到旧 `token_selective` 家族基底。
+
+### 7.1 Summary-Conditioned Chunk FiLM 家族
+
+1. `summary_chunk_film_v1`
+- `c_t + block_repr + chunk_summary`
+- 只调 `ReasonMamba input FiLM`
+
+2. `summary_chunk_film_v2_world`
+- 在 `v1` 上加入 `world_summary`
+- 看慢环世界态是否帮助 chunk 选择
+
+3. `summary_chunk_film_v3_progress`
+- 在 `v1` 上加入 `progress-state`
+- 看 plateau / trend 是否应该直接影响 chunk FiLM 强度
+
+4. `summary_chunk_film_v4_dualsite`
+- 弱 `Mamba input FiLM` + 弱 `DiffAttn residual bias`
+- 看两点低增益调制是否优于单点
+
+### 7.2 Hierarchical Block-Token Routing 家族
+
+5. `hier_block_token_v1_block_only`
+- 只有 block gate
+- 不开 token gate
+- 用来验证“先 block、再 token”是否真比旧全局 token routing 更稳
+
+6. `hier_block_token_v2_attn_bias`
+- block gate + block 内 token gate
+- token gate 只调 `attn bias`
+
+7. `hier_block_token_v3_residual_delta`
+- block gate + token gate
+- 被选区域走 `h = h + gate * delta_local`
+
+8. `hier_block_token_v4_progress_rank`
+- block 排名由 `c_t + progress-state` 决定
+- 让 plateau / reversal 直接影响 `top-k` 范围
+
+### 7.3 Progress-Query Focus Routing 家族
+
+9. `progress_focus_v1_chunk_query`
+- `focus_q` 先打 `chunk summary`
+- 选中的 chunk 吃更强 summary-FiLM
+
+10. `progress_focus_v2_block_then_token`
+- 先打 `block_repr`
+- 再在选中的 block 内做 token top-k
+
+11. `progress_focus_v3_dense_sparse_hybrid`
+- 全局保留弱 dense FiLM
+- 选中 span 再加 sparse residual boost
+
+12. `progress_focus_v4_backtrack`
+- 加入 plateau / backtrack-aware top-k 调度
+- 让卡住时 focus 变宽，而不是立刻塌成单点
+
+## 8. 长程筛选赛制（至少到 10240）
+
+赛制固定为：
+
+- `cuda_smoke`
+  - 单候选 CUDA smoke
+  - 不计正式排名
+- `2048`
+  - 全 12 组预筛
+- `4096`
+  - 前 `6` 组复筛
+- `10240`
+  - 前 `4` 组长程首轮
+- `20480`
+  - 前 `2` 组确认
+
+当前硬规则：
+
+- 同一候选必须 checkpoint 晋级继训练
+- 不允许各阶段 fresh start 混进正式排序
+- 长程报告至少要明确写：
+  - 哪些结果有效
+  - 哪些因 stale runtime 不算
+  - 哪些因实现 bug 污染不能直接盖棺
+
+checkpoint lineage 固定写法：
+
+- `4096 from 2048 checkpoint`
+- `10240 from 4096 checkpoint`
+- `20480 from 10240 checkpoint`
+
+## 9. 排名与 guard
+
+硬 guard：
+
+- `math` 不掉
+- `python_code` 不掉
 - `mixed` 不崩
-- `rollout_nonzero_ratio` 不能继续掉成无分辨率
-- `c_t_var` 不能明显塌缩
+- `rollout_nonzero_ratio > 0`
+- `c_t_var` 不塌
 
-#### 主排序指标
+主排序指标：
+
 1. `math self_tail`
 2. `python_code self_tail`
 3. `mixed self_tail`
 
-#### 副排序指标
+副排序指标：
+
 1. `rollout_nonzero_ratio`
 2. `hard_loop_var`
 3. `world_summary_drift_mean`
-4. `dialogue / emotion` 是否仍在可接受区间
+4. `dialogue / emotion` 是否守住
 
-#### 推荐排序口径
-- 第 1 名：
-  - 兼顾 `math + python_code + mixed`
-  - 同时动力学健康指标不塌
-- 第 2 名：
-  - 综合次优，但在某一方向有明确结构性优势
-- 第 3 名：
-  - 不是最优，但具备明显研究价值，值得看长程是否反超
+解释性诊断必须统一记录：
 
-### 阶段 C：动态诊断层
+- `progress_shape_loss`
+- `rollout_nonzero_ratio`
+- `c_t curvature`
+- `pred_delta_c` 邻接夹角
+- `world_summary short-window drift`
 
-这一步不是独立竞争组，而是给阶段 A/B 的候选统一加诊断。
+## 10. 当前工作区中的实现边界
 
-目的：
-- 判断性能改善到底来自“更健康的推进”，还是来自“更快压平”
-- 给最终长程报告提供解释，而不只是给分数
+截至当前工作区，下面这些已经可直接跑：
 
-#### 实验 B1：trajectory health probe
-- 新增诊断：
-  - `c_t` 短窗 curvature
-  - `pred_delta_c` 相邻夹角分布
-  - `world_summary` 短窗 drift 分布
-- 目的：
-  - 判断性能改善到底来自“更健康的推进”，还是来自“更快压平”
-- 成功标准：
-  - 改善组相比基线，`math / python_code` 更好时，不能伴随：
-    - `c_t_var` 明显塌缩
-    - `world_summary_drift` 异常归零
-    - `rollout_nonzero_ratio` 大幅掉光
-
-#### 实验 B2：progress vs rollout correlation
-- 做法：
-  - 记录每个 bucket 的：
-    - `progress_shape_loss`
-    - `rollout_nonzero_ratio`
-    - `self_tail`
-- 目的：
-  - 判断 progress-shape 和 rollout 分辨率是否在同向工作
-- 解释原则：
-  - 如果 `progress_shape_loss` 明显下降，但 `rollout_nonzero_ratio` 继续归零，同时 bucket 性能也不升，那更像“状态被压硬”而不是“动力学更健康”
-
-### 阶段 D：只保留一条高风险研究线
-
-#### 实验 C1：structured world mask revisit
-- 前提：A 阶段稳定后再做
-- 做法：
-  - 在 `A2-progress_shape_v1-h3` 上重新试更轻的 `structured world mask`
-- 目的：
-  - 验证 structured world 是不是只有在近端 dynamics 稳了之后才会发力
-
-### 阶段 D：长程结构候选筛选
-
-这一阶段只在 `A2-progress_shape_v1-h3` 已经站住时才开。
-
-#### 实验 D1：`A2-progress_shape_v1-h3 + local_rollout_head`
-- 目的：
-  - 看近端专用 rollout head 能不能恢复 `rollout_nonzero_ratio`
-  - 同时守住 `math / python_code`
-
-#### 实验 D2：`A2-progress_shape_v1-h3 + progress_exit_readout`
-- 目的：
-  - 看 progress-shape 是否真的能变成 exit 证据，而不是只做辅助 loss
-
-#### 实验 D3：`A2-progress_shape_v1-h3 + dual_rate_self_predictor`
-- 目的：
-  - 用 predictor 级双时间尺度，替代更重的并行状态流实验
-
-#### 实验 D4：`A2-progress_shape_v1-h3 + trajectory_health_probe`
-- 目的：
-  - 先做“强诊断、弱侵入”的结构探针
-  - 判断性能变化是否来自更健康轨迹
-
-#### 实验 D5：`A2-progress_shape_v1-h3 + backtrack_aware_progress`
-- 目的：
-  - 验证 plateau/reversal/backtrack 这类状态是否对长程 reasoning 更关键
-
-#### 实验 D6：`A2-progress_shape_v1-h3 + film_ct_modulation`
-- 目的：
-  - 验证 `c_t` 改为 FiLM 调制后，是否能提升慢环对快环的精细控制
-
-#### 实验 D7：`A2-progress_shape_v1-h3 + modulewise_ct_gate`
-- 目的：
-  - 验证 `c_t` 是否更适合做“本轮思考重心分配器”，而不是单纯 bias
-
-#### 实验 D8：`A2-progress_shape_v1-h3 + lowrank_hyperbias_ct`
-- 目的：
-  - 在不引入大结构的前提下，测试 `c_t` 控制表达力能否继续提升
-
-#### 实验 D9：`A2-progress_shape_v1-h3 + token_selective_ct_routing`
-- 目的：
-  - 验证慢环控制是否应该更局部化，而不是全序列平均注入
-
-## 5.1 分级执行顺序与预算
-
-如果后面要用分级实验真正筛选，而不是继续短程碰运气，我建议：
-
-1. 跑阶段 A：`2048-step` 全候选短程预筛
-2. 选前 `3~4` 名进入阶段 B：`4096-step` 中程复筛
-3. 统一补阶段 C diagnostics
-4. 再决定是否给高风险线 `structured world mask` 一个名额
-5. 最终只保留前 `1 / 2 / 3` 名进入长程
-6. `structured world mask` 站住后，再开 D 阶段结构筛选
-
-一个 practical 的分级筛选批次可以定成：
-- `2048-step`：预筛
-- `4096-step`：中程复筛
-- `10240-step`：长程首轮，只给排名前 `1 / 2 / 3` 的组
-- `20480-step`：长程确认，只给 `10240-step` 后的前 `1~2` 名
-
-这样能避免把 GPU 时间浪费在高风险、低分辨率的配置上。
-
-## 5.2 长程送测规则（10240 / 20480-step）
-
-长程不是继续海选，而是：
-- 验证中程排名前 `1 / 2 / 3` 的方案是否仍然成立
-- 看中程排序在更长预算下会不会反转
-
-### 长程送测建议
-
-- `10240-step`
-  - 第 1 名：必须送
-  - 第 2 名：默认送
-  - 第 3 名：建议送
-
-- `20480-step`
-  - 只送 `10240-step` 之后最强的前 `1~2` 名
-  - 作用不是继续海选，而是确认谁值得真正扶正
-
-也就是说：
-- 长程第一轮固定跑 `3` 组最合适
-- 长程第二轮固定跑 `1~2` 组最合适
-- 这和你前面已经验证过的夜间批跑节奏也一致
-
-### 长程报告应该回答的三个问题
-
-1. 中程第 1 名在 `10240-step` 长程里是否继续领先？
-2. 中程第 2 / 第 3 名是否出现 `10240-step` 反超？
-3. 在 `20480-step` 之后，哪个方案最适合扶正为新的正式 dynamics baseline？
-
-## 6. 建议的执行顺序
-
-最推荐的顺序是：
-
-1. 阶段 A：`2048-step` 全候选预筛
-2. 阶段 B：前 `3~4` 名做 `4096-step`
-3. 阶段 C：统一加 diagnostics
-4. 按综合规则排出前 `1 / 2 / 3`
-5. 把前 `1 / 2 / 3` 送去 `10240-step` 长程首轮
-6. 再把 `10240-step` 最强的前 `1~2` 名送去 `20480-step` 长程确认
-7. `20480-step` 结束后再决定是否扶正新基线
-
-## 6.1 动力学候选执行表
-
-下面这个表的目标是：
-- 让后续执行时不必再从整篇文字里反推实验顺序
-- 一眼看出谁该先跑、谁只适合进复筛、谁值得送长程
-
-| 候选名 | 2048 预筛 | 4096 复筛 | 10240 长程 | 20480 确认 | 预期强项 | 主要风险 |
-|---|---|---|---|---|---|---|
-| `A2-progress_shape_v1-h3` | 必跑 | 必跑 | 高概率送 | 视 10240 排名而定 | 当前最稳的 dynamics 候选；近端 rollout 更有分辨率 | 可能只是“最好的一条现有线”，但未必是最终最强结构 |
-| `A2-progress_shape_v1-h3-softnear` | 必跑 | 视 2048 结果而定 | 有条件送 | 低概率送 | 有机会提高 `rollout_nonzero_ratio`，同时保留近端 supervision | 容易重新伤 `dialogue / persona_seed` |
-| `A2-progress_shape_v1-h3-lite_local` | 必跑 | 视 2048 结果而定 | 低概率送 | 低概率送 | 若局部几何终于变成正收益，可能增强 `math / python_code` 稳定性 | 很容易再次变成“几何好看但 bucket 变差” |
-| `A2-progress_shape_v1-h3 + local_rollout_head` | 必跑 | 高优先级复筛 | 高潜长程候选 | 高潜确认候选 | 最可能恢复 rollout 的真实分辨率，同时不必拉长 horizon | 新 head 可能把 dynamics 头拆得过散，导致 mixed 不稳 |
-| `A2-progress_shape_v1-h3 + progress_exit_readout` | 必跑 | 高优先级复筛 | 高潜长程候选 | 高潜确认候选 | 有机会把 progress-shape 从辅助 loss 变成真正 exit 证据 | 可能把退出策略重新压硬，导致 loops 分布收紧 |
-| `A2-progress_shape_v1-h3 + dual_rate_self_predictor` | 必跑 | 高优先级复筛 | 高潜长程候选 | 高潜确认候选 | 用 predictor 级双时间尺度替代重状态流，最符合当前 Luma 风格 | 两条 predictor 支路若耦合不好，可能引入新的不稳定源 |
-| `A2-progress_shape_v1-h3 + trajectory_health_probe` | 必跑 | 必跑 | 作为解释性 companion 而非主竞争组 | 不送 | 提供最强诊断价值，能帮助解释为什么某组表现更好 | 自身不一定直接带来性能提升 |
-| `A2-progress_shape_v1-h3 + backtrack_aware_progress` | 建议跑 | 视 2048 结果而定 | 研究性送测 | 低概率送 | 若 plateau/reversal 真有价值，可能改善复杂 reasoning 的“卡住后回退”能力 | 容易把 progress 头做得过重，伤 dialogue / emotion |
-| `A2-progress_shape_v1-h3 + film_ct_modulation` | 建议跑 | 高优先级复筛 | 高潜长程候选 | 高潜确认候选 | 让 `c_t` 从全局 bias 升级成更细粒度的模块调制 | 若 scale/shift 过强，可能把快环推硬 |
-| `A2-progress_shape_v1-h3 + modulewise_ct_gate` | 建议跑 | 高优先级复筛 | 高潜长程候选 | 高潜确认候选 | 最有机会把 `c_t` 变成“本轮思考重心分配器” | gate 若过早饱和，可能导致模块使用塌缩 |
-| `A2-progress_shape_v1-h3 + lowrank_hyperbias_ct` | 建议跑 | 视 2048 结果而定 | 有条件送 | 低概率送 | 在保持稳定的前提下提升 `c_t` 控制表达力 | 可能收益不明显，落成复杂但不值的中间态 |
-| `A2-progress_shape_v1-h3 + token_selective_ct_routing` | 研究性跑 | 视 2048 结果而定 | 低概率送 | 低概率送 | 若成功，最可能改善 math/code 的局部推理聚焦 | 风险最高，最容易引入训练噪声与不稳定 |
-| `A2-progress_shape_v1-h3 + structured_world_mask(light)` | 只在前面稳定后再跑 | 有条件复筛 | 有条件送 | 低概率送 | 若局部动力学先稳住，structured world 可能终于发力 | 历史上很容易伴随 math/rollout 压平问题 |
-
-### 推荐的最小可执行批次
-
-如果只想先跑一个“够有信息量，但不太夸张”的批次，我建议：
-
-1. `A2-progress_shape_v1-h3`
-2. `A2-progress_shape_v1-h3 + local_rollout_head`
-3. `A2-progress_shape_v1-h3 + progress_exit_readout`
-4. `A2-progress_shape_v1-h3 + dual_rate_self_predictor`
-5. `A2-progress_shape_v1-h3 + trajectory_health_probe`
-6. `A2-progress_shape_v1-h3 + modulewise_ct_gate`
-7. `A2-progress_shape_v1-h3 + film_ct_modulation`
-
-这 7 组已经足够回答：
-- 近端 rollout head 是否值得扶正
-- progress-shape 是否真能进入 exit 决策
-- predictor 级双时间尺度是否比新增状态流更靠谱
-- `c_t` 的调制方式是否该从 additive bias 升级
-- 改善是来自真实健康轨迹，还是只是指标压平
-
-### 当前实现状态
-
-截至 `2026-03-29`，这批候选里已经进入代码实现、可直接被固定程序调用的有：
-
+- `A2-progress_shape_v1-h3+progress_exit_readout`
 - `A2-progress_shape_v1-h3`
-- `A2-progress_shape_v1-h3 + local_rollout_head`
-- `A2-progress_shape_v1-h3 + progress_exit_readout`
-- `A2-progress_shape_v1-h3 + dual_rate_self_predictor`
-- `A2-progress_shape_v1-h3 + trajectory_health_probe`
-- `A2-progress_shape_v1-h3 + modulewise_ct_gate`
-- `A2-progress_shape_v1-h3 + film_ct_modulation`
-- `A2-progress_shape_v1-h3 + backtrack_aware_progress`
-- `A2-progress_shape_v1-h3 + lowrank_hyperbias_ct`
-- `A2-progress_shape_v1-h3 + token_selective_ct_routing`
-
-当前固定程序与本地 runner：
-
-- 固定程序：`/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
-- 单候选 verifier：`/home/kt/ai/minimind/scripts/run_dynamics_candidate_eval.py`
-- 纯本地 watchdog runner：`/home/kt/ai/minimind/scripts/run_dynamics_autoresearch_local.py`
-
-补充边界：
-
-- 这轮已用 `A2-progress_shape_v1-h3 + modulewise_ct_gate` 做过最小 CUDA smoke，候选名到开关映射链路已打通。
-- 当前 `mamba/triton` 路径不支持用 CPU 做同构 smoke；候选冒烟应使用 CUDA。
-
-### 推荐的长程送测逻辑
-
-完成 `2048 -> 4096` 之后，长程送测规则固定为：
-
-1. 只看 `4096` 中程结果
-2. 严格按中程综合排名选前 `3` 名
-3. `10240` 长程名额固定只有 `3` 个，不再额外加结构保留位
-
-也就是说：
-- `2048` 负责筛进中程
-- `4096` 负责决定谁进长程
-- `10240` 不再接受“分数没进前三，但结构上很有意思”的额外插队
-
-## 7. 当前我最推荐保留的主线
-
-如果现在必须给一个“动力学方向正式候选”，我会建议：
-
-- `A2-progress_shape_v1 + horizon3`
-
-原因：
-- 它最符合当前实验证据
-- 它不像更远 rollout 那样容易压平
-- 它比更重 local consistency 更平衡
-- 它也比 crystal / uncertainty 更稳定
-
-## 8. 按当前进度对主规划的推进建议
-
-基于目前已经完成的：
-- `A2-core` 长程站住
-- `A2-predictor_progress` 显示出真实潜力
-- `A2-progress_shape_v1` 比局部一致性更值得继续追
-- `horizon3` 比长 rollout 更有信息量
-
-我建议主规划向前推进到下面这个表述：
-
-### 当前正式长程基线
-- `A2-core`
-
-### 当前动力学强化主候选
-- `A2-progress_shape_v1-h3`
-
-### 当前不再优先的方向
-- 继续拉长 rollout horizon
-- uncertainty 直接调 two-step 权重
-- 更重的 local consistency penalty
-- 新增更重并行状态流
-
-### 当前值得进入长程筛选的结构候选
 - `local_rollout_head`
-- `progress_exit_readout`
 - `dual_rate_self_predictor`
 - `trajectory_health_probe`
 - `backtrack_aware_progress`
-- `film_ct_modulation`
-- `modulewise_ct_gate`
-- `lowrank_hyperbias_ct`
-- `token_selective_ct_routing`
 
-## 9. 一句话总结
+下面这些是本轮 review 后要进入实现的新方案，而不是已经落地的现成候选：
 
-最近的动力学/world-model 论文给 Luma 最有价值的不是“再做更远”，而是：
+- `summary_conditioned_chunk_film`
+- `hierarchical_block_token_ct_routing`
+- `progress_query_focus_routing`
 
-- 让状态表示更健康
-- 让近端 dynamics 更有分辨率
-- 让 Self-JEPA 更会表达推进形状
+因此当前动作顺序固定为：
 
-所以接下来的中程实验，最该押的是：
+1. 先按本节 review 实现三大家族最小版本
+2. 每加一组 runner 参数先 `py_compile`
+3. 每组先做单候选 CUDA smoke
+4. 再进入 `2048 -> 4096 -> 10240`
 
-- `A2-progress_shape_v1 + horizon3`
-- 再在它上面做更轻、更克制的 dynamics 改进
+## 11. 结论
 
-## 10. 2026-03-29 当前赛果回写
+当前这轮动力学 planning 的中心已经不是：
 
-截至当前，真正可计入结论的结果应按下面口径读取：
+- 继续硬推旧 `token_selective`
+- 或继续把旧 `modulewise / lowrank` 送中长程
 
-- `2048` 短程预筛：已完成，可作为候选晋级依据。
-- `4096` 中程复筛：已完成，可作为长程入围依据。
-- `10240` 长程首轮：当前只有 `A2-progress_shape_v1-h3+progress_exit_readout` 站住。
-- `20480` 长程确认：当前不计入正式结论，因为已无活跃训练进程，仅残留旧 runtime 文件。
+而是：
 
-当前最可信的赛果是：
-- `A2-progress_shape_v1-h3+progress_exit_readout`
-  - `4096` 通过
-  - `10240` 通过
-  - 当前应视为动力学增强第一候选
-- `A2-progress_shape_v1-h3`
-  - `4096` 通过
-  - `10240` 失败
-  - 当前应视为“观察保留的基线锚点”
-- `token_selective_ct_routing / lowrank_hyperbias_ct / modulewise_ct_gate`
-  - 原始 `4096` 均失败
-  - 当前实现版本不再继续直接送中长程
+- 以 `A2-progress_shape_v1-h3+progress_exit_readout` 为新基线
+- 把 token-selective 家族改写成：
+  - `summary-first`
+  - `hierarchical`
+  - `progress-driven`
+- 再用 12 组矩阵做分级筛选，至少送到 `10240`
 
-补充说明：
-- 后续 `mid_rerun` 链暴露出 runner 侧补丁 bug：
-  - `run_luma_stage12.py` 缺少 `import math`
-- 因此该补测链不能拿来直接判结构生死，只能说明复测流程被实现 bug 污染。
-
-## 11. token-selective 家族的更稳后继方案
-
-基于当前 `token_selective_ct_routing` 在 `4096` 仍然太猛、太不稳，下一轮不应继续沿“直接对 token 做强选择性控制”的旧实现直推，而应优先改成下面三种更贴 Luma 的结构。
-
-### 11.1 `summary_conditioned_chunk_film`
-- 核心：`c_t` 不直接控 token，而是先控 `chunk summary / block_repr / world_summary`，再把控制量广播回 token。
-- 建议实现：
-  - `chunk_summary = pool(h, chunk=32/64)`
-  - `gamma, beta = MLP([c_t, chunk_summary, progress_state])`
-  - `h_chunk = h_chunk * (1 + gamma) + beta`
-- 对 Luma 的好处：
-  - 最稳定
-  - 最符合“慢环控摘要，快环做局部细化”的当前架构
-  - 最适合后续超长上下文扩展
-
-### 11.2 `hierarchical_block_token_ct_routing`
-- 核心：先 block-level gate，再在被选中 block 内做轻量 token gate。
-- 建议实现：
-  - 复用压缩区 `block_repr`
-  - `block_gate = MLP([c_t, block_repr, loop_embed])`
-  - 仅对 top-k block 内计算 token gate
-  - 优先调 `attn bias / mamba gate / residual scale`，而不是直接整段乘法
-- 对 Luma 的好处：
-  - 比直接 token-selective 温和
-  - 更容易稳定进入 `2048 -> 4096`
-
-### 11.3 `progress_query_focus_routing`
-- 核心：由 `c_t + progress-shape(next improvement / trend / plateau)` 共同生成 focus query，再做稀疏区域选择。
-- 建议实现：
-  - `focus_q = MLP([c_t, progress_state, loop_embed])`
-  - 先匹配 `block_repr / chunk summary`
-  - 再在选中块内做 token top-k
-- 对 Luma 的好处：
-  - 让 routing 直接成为 `progress-shape` 的下游执行器
-  - 不是另起一条与 Self-JEPA 竞争的控制流
-
-当前优先级建议：
-1. `summary_conditioned_chunk_film`
-2. `hierarchical_block_token_ct_routing`
-3. `progress_query_focus_routing`
-
-## 12. 长程赛制建议：改成晋级继训练制
-
-后续建议不再让：
-- `2048`
-- `4096`
-- `10240`
-- `20480`
-都从头 fresh start。
-
-建议固定改成：
-- `2048` 跑完保存 checkpoint
-- `4096` 从对应 `2048` checkpoint 继续
-- `10240` 从 `4096` 胜出 checkpoint 继续
-- `20480` 从 `10240` 胜出 checkpoint 继续
-
-这样做的理由：
-- 省掉大量重复前期训练时间
-- 更贴近“候选先短程站住，再看能否自然延伸到中长程”的真实筛选逻辑
-- 比每一档重新从 0 开始更适合我们当前动力学实验
-
-执行约束：
-- 仅允许在同一候选、同一配置、同一 seed、同一数据桶口径下晋级继训练
-- 报告必须显式写清：
-  - `4096 from 2048 checkpoint`
-  - `10240 from 4096 checkpoint`
-  - `20480 from 10240 checkpoint`
+这才是当前与工作区、论文启发、以及你最新目标都一致的下一步。

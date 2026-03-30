@@ -1,0 +1,25 @@
+{
+  "c_t_var": 0.7472521066665649,
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_lite_control",
+  "checkpoint_lineage": [],
+  "guard": {
+    "all_ok": false,
+    "c_t_var_ok": true,
+    "dialogue_ok": true,
+    "emotion_ok": true,
+    "rollout_nonzero_ok": false
+  },
+  "hard_loop_var": 1.359375,
+  "load_checkpoint": null,
+  "metrics": {
+    "arc_agi_self_tail": 0.0888671875,
+    "dialogue_self_tail": 0.02545166015625,
+    "emotion_self_tail": 0.060302734375,
+    "math_self_tail": 0.02777099609375,
+    "mixed_self_tail": 0.02734375,
+    "python_code_self_tail": 0.085205078125
+  },
+  "rollout_nonzero_max": 0.0,
+  "save_checkpoint": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_lite_control.pt",
+  "score": 0.04830322265625
+}

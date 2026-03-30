@@ -1,0 +1,14 @@
+{
+  "confirm_ranked": [],
+  "long_ranked": [],
+  "mid_ranked": [
+    "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor"
+  ],
+  "short_ranked": [
+    "A2-progress_shape_v1-h3+progress_exit_readout+memory_tiered_routing_v1+m1_lite+zone_loss",
+    "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor"
+  ],
+  "status": "complete",
+  "ts": 1774842803.8954482,
+  "winner": null
+}

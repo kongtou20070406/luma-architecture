@@ -1,0 +1,2903 @@
+{
+  "candidate_name": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor",
+  "seed": 42,
+  "fixture_path": "/home/kt/ai/minimind/artifacts/luma_stage12_competition_math_dialogue_emotion.json",
+  "fixture_mode": "competition_math_dialogue_emotion",
+  "load_checkpoint": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/mid_rescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+  "save_checkpoint": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/long_round1__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+  "checkpoint_lineage": [
+    {
+      "path": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+      "stage_name": "stage12_eval",
+      "stage2_steps": 4096,
+      "candidate_name": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor"
+    },
+    {
+      "path": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/mid_rescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+      "stage_name": "stage12_eval",
+      "stage2_steps": 10240,
+      "candidate_name": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor"
+    }
+  ],
+  "loaded_checkpoint_meta": {
+    "path": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/mid_rescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+    "candidate_name": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor",
+    "stage_name": "stage12_eval",
+    "stage2_steps": 10240,
+    "seed": 42,
+    "fixture_mode": "competition_math_dialogue_emotion",
+    "config": {
+      "world_jepa_mode": "full",
+      "reason_loops": 15,
+      "reason_shared_depth": 2,
+      "rollout_steps": 10,
+      "self_check_k": 2,
+      "ct_modulation_mode": "additive",
+      "dynamics_experiment": "summary_chunk_film_v2_progress+s_local_floor",
+      "self_loop_awareness_mode": "predictor_progress",
+      "enable_progress_exit_readout": true,
+      "routing_local_floor": 0.2,
+      "routing_world_summary_cap": 1.0,
+      "routing_tier_entropy_floor": 0.0,
+      "routing_min_local_share": 0.0,
+      "rollout_zone_weight": 0.0,
+      "trajectory_vitality_weight": 0.0
+    },
+    "lineage": [
+      {
+        "path": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+        "stage_name": "stage12_eval",
+        "stage2_steps": 4096,
+        "candidate_name": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor"
+      }
+    ]
+  },
+  "rollout_steps": 10,
+  "slow_k": 2,
+  "reason_loops": 15,
+  "enable_world_jepa": true,
+  "world_jepa_mode": "full",
+  "enable_self_check_ring": true,
+  "self_check_k": 2,
+  "meta_dim": 64,
+  "meta_state": 16,
+  "c_t_dim": 32,
+  "self_check_dim": 16,
+  "enable_introspection_uncertainty": false,
+  "enable_exit_jepa_crystal": false,
+  "reason_width_mult": 1.0,
+  "reason_shared_depth": 2,
+  "world_mask_strategy": "default",
+  "world_full_simplify_loss": false,
+  "self_world_coupling_weight": 0.0,
+  "self_rollout_hierarchical": false,
+  "enable_local_rollout_head": false,
+  "exit_two_step_aux_weight": 0.25,
+  "exit_uncertainty_two_step_weight": 0.0,
+  "exit_uncertainty_two_step_mode": "multiplier",
+  "exit_uncertainty_two_step_cap": 0.2,
+  "exit_uncertainty_gate_threshold": 0.75,
+  "exit_crystal_two_step_weight": 0.0,
+  "exit_crystal_two_step_cap": 0.1,
+  "exit_uncertainty_feature_weight": 0.0,
+  "exit_crystal_feature_weight": 0.2,
+  "enable_math_adapter_lane": false,
+  "enable_math_summary_gate": false,
+  "ct_modulation_mode": "additive",
+  "self_progress_shape_weight": 0.1,
+  "self_progress_trend_weight": 0.05,
+  "self_progress_plateau_weight": 0.02,
+  "enable_progress_exit_readout": true,
+  "enable_backtrack_aware_progress": false,
+  "self_local_delta_consistency_weight": 0.0,
+  "self_local_curvature_weight": 0.0,
+  "enable_dual_rate_self_predictor": false,
+  "enable_trajectory_health_probe": false,
+  "self_rollout_supervision_horizon": 3,
+  "self_rollout_weighting_mode": "legacy",
+  "self_feature_span_mask_ratio": 0.0,
+  "dynamics_experiment": "summary_chunk_film_v2_progress+s_local_floor",
+  "routing_chunk_size": 32,
+  "routing_topk_blocks": 2,
+  "routing_topk_tokens": 32,
+  "routing_top_p_coarse": 0.5,
+  "routing_top_p_fine": 0.25,
+  "routing_budget_min": 0.1,
+  "routing_budget_max": 0.6,
+  "routing_weak_gain": 0.03,
+  "routing_strong_gain": 0.1,
+  "routing_local_floor": 0.2,
+  "routing_modulation_floor": 0.0,
+  "routing_modulation_ceiling": 0.7,
+  "routing_world_summary_cap": 1.0,
+  "routing_tier_soft_only": false,
+  "routing_tier_entropy_floor": 0.0,
+  "routing_min_local_share": 0.0,
+  "routing_tier_entropy_weight": 0.0,
+  "routing_min_local_share_weight": 0.0,
+  "rollout_zone_weight": 0.0,
+  "rollout_nonzero_low": 0.05,
+  "rollout_nonzero_high": 0.8,
+  "rollout_active_low": 0.05,
+  "rollout_active_high": 0.9,
+  "rollout_future_var_low": 1e-06,
+  "rollout_future_var_high": 0.5,
+  "trajectory_vitality_weight": 0.0,
+  "trajectory_c_t_drift_floor": 0.02,
+  "trajectory_world_drift_floor": 0.01,
+  "enable_compression_mhc": false,
+  "enable_reasoning_state_ring": false,
+  "r_t_dim": 16,
+  "r_t_mode": "blend",
+  "self_loop_awareness_mode": "predictor_progress",
+  "math_probe_rollout_steps": 0,
+  "math_probe_reason_loops": 0,
+  "math_probe_score_threshold": 0.0,
+  "math_probe_min_loops": 0,
+  "enable_persona_seed": true,
+  "enable_python_code": true,
+  "python_code_source": "public_mbpp",
+  "enable_arc_agi": true,
+  "persona_dir": "/home/kt/ai/luma_dataset",
+  "num_samples": 8,
+  "stage1": {
+    "mean_kl": NaN,
+    "mean_hidden_delta": NaN,
+    "hard_loop_var": 18.484375,
+    "soft_loop_var": 0.109375,
+    "c_t_var": NaN,
+    "exit_score_var": 0.0034677633084356785,
+    "sampled_exit_score_var": 0.005547519773244858,
+    "two_step_improvement_mean": NaN,
+    "self_check_mean": NaN,
+    "jepa_crystal_mean": 0.0,
+    "uncertainty_mean": 0.0,
+    "world_surprise_mean": NaN,
+    "intermediate_state_variance": NaN,
+    "c_t_drift_mean": NaN,
+    "world_summary_drift_mean": NaN,
+    "world_summary_drift_std": NaN,
+    "c_t_delta_norm_mean": NaN,
+    "c_t_delta_norm_std": NaN,
+    "pred_delta_c_cos_adjacent": NaN,
+    "math_lane_score_mean": 0.0,
+    "math_summary_gate_mean": 0.0,
+    "r_t_drift_mean": 0.0,
+    "r_t_trust_mean": 0.0,
+    "r_t_switch_mean": 0.0,
+    "progress_next_mean": NaN,
+    "progress_next_std": NaN,
+    "progress_trend_mean": NaN,
+    "progress_trend_std": NaN,
+    "progress_plateau_mean": NaN,
+    "progress_plateau_std": NaN,
+    "progress_vs_rollout_corr": NaN,
+    "progress_vs_exit_corr": NaN,
+    "exit_invalid_count": 14.0,
+    "exit_score_postfix_clamped_ratio": 0.0,
+    "bernoulli_invalid_prevented_count": 0.0,
+    "nan_to_num_trigger_count": 14.0,
+    "modulation_summary": {
+      "modulated_chunk_ratio": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "unmodulated_path_energy": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "modulation_gain_low_ratio": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "modulation_gain_mid_ratio": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "modulation_gain_high_ratio": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "gate_mean": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "gate_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "gate_saturation_ratio": {
+        "mean": 0.895833333954215,
+        "std": 0.27559909224510193
+      },
+      "nonfinite_gate_count": {
+        "mean": 0.2083333432674408,
+        "std": 0.5511982440948486
+      },
+      "selected_chunk_ratio": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "selected_token_ratio": {
+        "mean": 1.0,
+        "std": 0.0
+      },
+      "chunk_gamma_mean": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "chunk_gamma_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "chunk_beta_mean": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "chunk_beta_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "dense_path_gain": {
+        "mean": 0.030029297107830644,
+        "std": 6.5854449671221e-10
+      },
+      "sparse_path_gain": {
+        "mean": 0.10009765718132257,
+        "std": 2.63417798684884e-09
+      },
+      "modulated_chunk_ratio_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "unmodulated_path_energy_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "modulation_gain_low_ratio_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "modulation_gain_mid_ratio_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "modulation_gain_high_ratio_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "gate_mean_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "gate_std_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "gate_saturation_ratio_std": {
+        "mean": 0.04370036721229553,
+        "std": 0.11562030017375946
+      },
+      "nonfinite_gate_count_std": {
+        "mean": 0.08740073442459106,
+        "std": 0.23124060034751892
+      },
+      "selected_chunk_ratio_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "selected_token_ratio_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "chunk_gamma_mean_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "chunk_gamma_std_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "chunk_beta_mean_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "chunk_beta_std_std": {
+        "mean": NaN,
+        "std": NaN
+      },
+      "dense_path_gain_std": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "sparse_path_gain_std": {
+        "mean": 0.0,
+        "std": 0.0
+      }
+    }
+  },
+  "stage2": {
+    "losses": [
+      235.40170288085938,
+      185.37777709960938,
+      260.7804870605469,
+      175.43972778320312,
+      NaN
+    ],
+    "self_losses": [
+      0.014892578125,
+      0.022216796875,
+      0.0264892578125,
+      0.01385498046875,
+      NaN
+    ],
+    "rollout_losses": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      NaN
+    ],
+    "mean_delta_norm": 392704.0,
+    "rollout_active_ratio": 1.0,
+    "rollout_nonzero_ratio": 0.0,
+    "self_loss_head": 0.0185546875,
+    "self_loss_tail": NaN,
+    "self_rollout_head": 0.0,
+    "self_rollout_tail": NaN,
+    "rollout_zone_loss_tail": 0.0,
+    "routing_entropy_loss_tail": 0.0,
+    "trajectory_vitality_loss_tail": 0.0,
+    "nonfinite_abort": true
+  },
+  "per_task_from_mixed": true,
+  "per_task": {
+    "math": {
+      "stage1": {
+        "mean_kl": NaN,
+        "mean_hidden_delta": NaN,
+        "hard_loop_var": 42.25,
+        "soft_loop_var": 0.1875,
+        "c_t_var": NaN,
+        "exit_score_var": 0.007825256325304508,
+        "sampled_exit_score_var": 0.010316894389688969,
+        "two_step_improvement_mean": NaN,
+        "self_check_mean": NaN,
+        "jepa_crystal_mean": 0.0,
+        "uncertainty_mean": 0.0,
+        "world_surprise_mean": NaN,
+        "intermediate_state_variance": NaN,
+        "c_t_drift_mean": NaN,
+        "world_summary_drift_mean": NaN,
+        "world_summary_drift_std": NaN,
+        "c_t_delta_norm_mean": NaN,
+        "c_t_delta_norm_std": NaN,
+        "pred_delta_c_cos_adjacent": NaN,
+        "math_lane_score_mean": 0.0,
+        "math_summary_gate_mean": 0.0,
+        "r_t_drift_mean": 0.0,
+        "r_t_trust_mean": 0.0,
+        "r_t_switch_mean": 0.0,
+        "progress_next_mean": NaN,
+        "progress_next_std": NaN,
+        "progress_trend_mean": NaN,
+        "progress_trend_std": NaN,
+        "progress_plateau_mean": NaN,
+        "progress_plateau_std": NaN,
+        "progress_vs_rollout_corr": NaN,
+        "progress_vs_exit_corr": NaN,
+        "exit_invalid_count": 28.0,
+        "exit_score_postfix_clamped_ratio": 0.0,
+        "bernoulli_invalid_prevented_count": 0.0,
+        "nan_to_num_trigger_count": 28.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio": {
+            "mean": 0.5833333358168602,
+            "std": 0.4166666567325592
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.8333333730697632,
+            "std": 0.8333333730697632
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain": {
+            "mean": 0.030029297806322575,
+            "std": 1.31708899342442e-09
+          },
+          "sparse_path_gain": {
+            "mean": 0.1000976599752903,
+            "std": 5.26835597369768e-09
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.17480146884918213,
+            "std": 0.17480146884918213
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.34960293769836426,
+            "std": 0.34960293769836426
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        }
+      },
+      "stage2": {
+        "losses": [
+          166.09689331054688,
+          178.17489624023438,
+          NaN,
+          NaN
+        ],
+        "self_losses": [
+          0.0147705078125,
+          0.0263671875,
+          NaN,
+          NaN
+        ],
+        "rollout_losses": [
+          0.0,
+          0.0,
+          NaN,
+          NaN
+        ],
+        "mean_delta_norm": NaN,
+        "rollout_active_ratio": 1.0,
+        "rollout_nonzero_ratio": 0.0,
+        "self_loss_head": 0.02056884765625,
+        "self_loss_tail": NaN,
+        "self_rollout_head": 0.0,
+        "self_rollout_tail": NaN,
+        "rollout_zone_loss_tail": 0.0,
+        "routing_entropy_loss_tail": 0.0,
+        "trajectory_vitality_loss_tail": 0.0,
+        "world_surprise_mean": NaN,
+        "intermediate_state_variance": NaN,
+        "c_t_drift_mean": NaN,
+        "world_summary_drift_mean": NaN,
+        "uncertainty_mean": 0.0,
+        "progress_next_mean": NaN,
+        "progress_trend_mean": NaN,
+        "progress_plateau_mean": NaN,
+        "exit_invalid_count": 28.0,
+        "nan_to_num_trigger_count": 28.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio": {
+            "mean": 0.5833333358168602,
+            "std": 0.4166666567325592
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.8333333730697632,
+            "std": 0.8333333730697632
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain": {
+            "mean": 0.030029297806322575,
+            "std": 1.31708899342442e-09
+          },
+          "sparse_path_gain": {
+            "mean": 0.1000976599752903,
+            "std": 5.26835597369768e-09
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.17480146884918213,
+            "std": 0.17480146884918213
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.34960293769836426,
+            "std": 0.34960293769836426
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        },
+        "probe_from_mixed_model": true
+      }
+    },
+    "dialogue": {
+      "stage1": {
+        "mean_kl": NaN,
+        "mean_hidden_delta": NaN,
+        "hard_loop_var": 31.6875,
+        "soft_loop_var": 0.1875,
+        "c_t_var": NaN,
+        "exit_score_var": 0.005972861312329769,
+        "sampled_exit_score_var": 0.008760401979088783,
+        "two_step_improvement_mean": NaN,
+        "self_check_mean": NaN,
+        "jepa_crystal_mean": 0.0,
+        "uncertainty_mean": 0.0,
+        "world_surprise_mean": NaN,
+        "intermediate_state_variance": NaN,
+        "c_t_drift_mean": NaN,
+        "world_summary_drift_mean": NaN,
+        "world_summary_drift_std": NaN,
+        "c_t_delta_norm_mean": NaN,
+        "c_t_delta_norm_std": NaN,
+        "pred_delta_c_cos_adjacent": NaN,
+        "math_lane_score_mean": 0.0,
+        "math_summary_gate_mean": 0.0,
+        "r_t_drift_mean": 0.0,
+        "r_t_trust_mean": 0.0,
+        "r_t_switch_mean": 0.0,
+        "progress_next_mean": NaN,
+        "progress_next_std": NaN,
+        "progress_trend_mean": NaN,
+        "progress_trend_std": NaN,
+        "progress_plateau_mean": NaN,
+        "progress_plateau_std": NaN,
+        "progress_vs_rollout_corr": NaN,
+        "progress_vs_exit_corr": NaN,
+        "exit_invalid_count": 14.0,
+        "exit_score_postfix_clamped_ratio": 0.0,
+        "bernoulli_invalid_prevented_count": 0.0,
+        "nan_to_num_trigger_count": 14.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio": {
+            "mean": 0.7916666679084301,
+            "std": 0.3608439266681671
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.4166666865348816,
+            "std": 0.7216878533363342
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain": {
+            "mean": 0.030029297340661287,
+            "std": 9.313225746154785e-10
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765811264515,
+            "std": 3.725290298461914e-09
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.08740073442459106,
+            "std": 0.15138250589370728
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.17480146884918213,
+            "std": 0.30276501178741455
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        }
+      },
+      "stage2": {
+        "losses": [
+          175.58126831054688,
+          181.81491088867188,
+          NaN,
+          205.54647827148438
+        ],
+        "self_losses": [
+          0.0186767578125,
+          0.0140380859375,
+          NaN,
+          0.01904296875
+        ],
+        "rollout_losses": [
+          0.0,
+          0.0,
+          NaN,
+          0.0
+        ],
+        "mean_delta_norm": NaN,
+        "rollout_active_ratio": 1.0,
+        "rollout_nonzero_ratio": 0.0,
+        "self_loss_head": 0.016357421875,
+        "self_loss_tail": NaN,
+        "self_rollout_head": 0.0,
+        "self_rollout_tail": NaN,
+        "rollout_zone_loss_tail": 0.0,
+        "routing_entropy_loss_tail": 0.0,
+        "trajectory_vitality_loss_tail": 0.0,
+        "world_surprise_mean": NaN,
+        "intermediate_state_variance": NaN,
+        "c_t_drift_mean": NaN,
+        "world_summary_drift_mean": NaN,
+        "uncertainty_mean": 0.0,
+        "progress_next_mean": NaN,
+        "progress_trend_mean": NaN,
+        "progress_plateau_mean": NaN,
+        "exit_invalid_count": 14.0,
+        "nan_to_num_trigger_count": 14.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio": {
+            "mean": 0.7916666679084301,
+            "std": 0.3608439266681671
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.4166666865348816,
+            "std": 0.7216878533363342
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain": {
+            "mean": 0.030029297340661287,
+            "std": 9.313225746154785e-10
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765811264515,
+            "std": 3.725290298461914e-09
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.08740073442459106,
+            "std": 0.15138250589370728
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.17480146884918213,
+            "std": 0.30276501178741455
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        },
+        "probe_from_mixed_model": true
+      }
+    },
+    "emotion": {
+      "stage1": {
+        "mean_kl": 6.462700366973877,
+        "mean_hidden_delta": 8.8125,
+        "hard_loop_var": 0.0,
+        "soft_loop_var": 0.1875,
+        "c_t_var": 94478256.0,
+        "exit_score_var": 2.07304437935818e-05,
+        "sampled_exit_score_var": 0.0004793089465238154,
+        "two_step_improvement_mean": 0.0,
+        "self_check_mean": 0.4208984375,
+        "jepa_crystal_mean": 0.0,
+        "uncertainty_mean": 0.0,
+        "world_surprise_mean": 9.357551574707031,
+        "intermediate_state_variance": 0.019292466342449188,
+        "c_t_drift_mean": 0.0,
+        "world_summary_drift_mean": 95.48143005371094,
+        "world_summary_drift_std": 9.15044116973877,
+        "c_t_delta_norm_mean": 0.0,
+        "c_t_delta_norm_std": 0.0,
+        "pred_delta_c_cos_adjacent": 0.0,
+        "math_lane_score_mean": 0.0,
+        "math_summary_gate_mean": 0.0,
+        "r_t_drift_mean": 0.0,
+        "r_t_trust_mean": 0.0,
+        "r_t_switch_mean": 0.0,
+        "progress_next_mean": 0.994140625,
+        "progress_next_std": 0.0033829116728156805,
+        "progress_trend_mean": -0.998046875,
+        "progress_trend_std": 0.0033829116728156805,
+        "progress_plateau_mean": 0.014007568359375,
+        "progress_plateau_std": 0.006583667825907469,
+        "progress_vs_rollout_corr": 0.0,
+        "progress_vs_exit_corr": -0.1429731547832489,
+        "exit_invalid_count": 0.0,
+        "exit_score_postfix_clamped_ratio": 0.0,
+        "bernoulli_invalid_prevented_count": 0.0,
+        "nan_to_num_trigger_count": 0.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": 975.8602905273438,
+            "std": 122.91207122802734
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": 487.3277587890625,
+            "std": 60.247947692871094
+          },
+          "chunk_gamma_std": {
+            "mean": 5216.375,
+            "std": 419.5523376464844
+          },
+          "chunk_beta_mean": {
+            "mean": 155.668701171875,
+            "std": 43.818603515625
+          },
+          "chunk_beta_std": {
+            "mean": 5106.25,
+            "std": 487.4687805175781
+          },
+          "dense_path_gain": {
+            "mean": 0.030029296875,
+            "std": 0.0
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765625,
+            "std": 0.0
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": 964.3276062011719,
+            "std": 122.91090393066406
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_std_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": 486.6722412109375,
+            "std": 59.146488189697266
+          },
+          "chunk_gamma_std_std": {
+            "mean": 5023.625,
+            "std": 406.2809143066406
+          },
+          "chunk_beta_mean_std": {
+            "mean": 154.081298828125,
+            "std": 44.65037155151367
+          },
+          "chunk_beta_std_std": {
+            "mean": 4909.75,
+            "std": 472.0104064941406
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        }
+      },
+      "stage2": {
+        "losses": [
+          163.76473999023438,
+          196.4630126953125,
+          212.61117553710938,
+          167.78330993652344
+        ],
+        "self_losses": [
+          0.0771484375,
+          0.154296875,
+          0.052490234375,
+          0.080078125
+        ],
+        "rollout_losses": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mean_delta_norm": 348160.0,
+        "rollout_active_ratio": 1.0,
+        "rollout_nonzero_ratio": 0.0,
+        "self_loss_head": 0.11572265625,
+        "self_loss_tail": 0.0662841796875,
+        "self_rollout_head": 0.0,
+        "self_rollout_tail": 0.0,
+        "rollout_zone_loss_tail": 0.0,
+        "routing_entropy_loss_tail": 0.0,
+        "trajectory_vitality_loss_tail": 0.0,
+        "world_surprise_mean": 9.357552289962769,
+        "intermediate_state_variance": 0.019292467273771763,
+        "c_t_drift_mean": 0.0,
+        "world_summary_drift_mean": 95.48142433166504,
+        "uncertainty_mean": 0.0,
+        "progress_next_mean": 0.994140625,
+        "progress_trend_mean": -0.998046875,
+        "progress_plateau_mean": 0.014007568359375,
+        "exit_invalid_count": 0.0,
+        "nan_to_num_trigger_count": 0.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": 975.8602905273438,
+            "std": 122.91207122802734
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": 487.3277587890625,
+            "std": 60.247947692871094
+          },
+          "chunk_gamma_std": {
+            "mean": 5216.375,
+            "std": 419.5523376464844
+          },
+          "chunk_beta_mean": {
+            "mean": 155.668701171875,
+            "std": 43.818603515625
+          },
+          "chunk_beta_std": {
+            "mean": 5106.25,
+            "std": 487.4687805175781
+          },
+          "dense_path_gain": {
+            "mean": 0.030029296875,
+            "std": 0.0
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765625,
+            "std": 0.0
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": 964.3276062011719,
+            "std": 122.91090393066406
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_std_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": 486.6722412109375,
+            "std": 59.146488189697266
+          },
+          "chunk_gamma_std_std": {
+            "mean": 5023.625,
+            "std": 406.2809143066406
+          },
+          "chunk_beta_mean_std": {
+            "mean": 154.081298828125,
+            "std": 44.65037155151367
+          },
+          "chunk_beta_std_std": {
+            "mean": 4909.75,
+            "std": 472.0104064941406
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        },
+        "probe_from_mixed_model": true
+      }
+    },
+    "persona_seed": {
+      "stage1": {
+        "mean_kl": 5.578490257263184,
+        "mean_hidden_delta": 7.96875,
+        "hard_loop_var": 1.6875,
+        "soft_loop_var": 0.234375,
+        "c_t_var": 412953600.0,
+        "exit_score_var": 0.0004960600635968149,
+        "sampled_exit_score_var": 0.0008344011730514467,
+        "two_step_improvement_mean": 1.1887695789337158,
+        "self_check_mean": 0.5025390386581421,
+        "jepa_crystal_mean": 0.0,
+        "uncertainty_mean": 0.0,
+        "world_surprise_mean": 5.832630634307861,
+        "intermediate_state_variance": 0.026423556730151176,
+        "c_t_drift_mean": 2878.9853515625,
+        "world_summary_drift_mean": 111.48171997070312,
+        "world_summary_drift_std": 37.88850021362305,
+        "c_t_delta_norm_mean": 2878.9853515625,
+        "c_t_delta_norm_std": 2882.6650390625,
+        "pred_delta_c_cos_adjacent": 0.35345470905303955,
+        "math_lane_score_mean": 0.0,
+        "math_summary_gate_mean": 0.0,
+        "r_t_drift_mean": 0.0,
+        "r_t_trust_mean": 0.0,
+        "r_t_switch_mean": 0.0,
+        "progress_next_mean": -0.735107421875,
+        "progress_next_std": 0.5820170044898987,
+        "progress_trend_mean": -1.0,
+        "progress_trend_std": 0.0,
+        "progress_plateau_mean": 0.6615051031112671,
+        "progress_plateau_std": 0.33460551500320435,
+        "progress_vs_rollout_corr": -0.8893784284591675,
+        "progress_vs_exit_corr": -0.7942494750022888,
+        "exit_invalid_count": 0.0,
+        "exit_score_postfix_clamped_ratio": 0.0,
+        "bernoulli_invalid_prevented_count": 0.0,
+        "nan_to_num_trigger_count": 0.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": 902.1892013549805,
+            "std": 425.54571533203125
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": 577.7382888793945,
+            "std": 94.24457550048828
+          },
+          "chunk_gamma_std": {
+            "mean": 6157.424987792969,
+            "std": 888.3056030273438
+          },
+          "chunk_beta_mean": {
+            "mean": -210.03867149353027,
+            "std": 172.00877380371094
+          },
+          "chunk_beta_std": {
+            "mean": 5977.5250244140625,
+            "std": 1014.6032104492188
+          },
+          "dense_path_gain": {
+            "mean": 0.030029296875,
+            "std": 0.0
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765625,
+            "std": 0.0
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": 720.8784255981445,
+            "std": 145.54855346679688
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_std_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": 515.185791015625,
+            "std": 114.71388244628906
+          },
+          "chunk_gamma_std_std": {
+            "mean": 4921.4686279296875,
+            "std": 1073.2703857421875
+          },
+          "chunk_beta_mean_std": {
+            "mean": 224.57205486297607,
+            "std": 103.65679931640625
+          },
+          "chunk_beta_std_std": {
+            "mean": 4760.397766113281,
+            "std": 959.029541015625
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        }
+      },
+      "stage2": {
+        "losses": [
+          93.29322814941406,
+          88.62915802001953,
+          66.96795654296875,
+          71.16433715820312,
+          126.91822052001953,
+          250.1623077392578,
+          103.65037536621094,
+          215.08621215820312
+        ],
+        "self_losses": [
+          0.7109375,
+          0.71484375,
+          1.2734375,
+          1.1171875,
+          0.7578125,
+          0.466796875,
+          1.25,
+          1.2734375
+        ],
+        "rollout_losses": [
+          0.0,
+          0.0,
+          0.65234375,
+          0.0,
+          0.0,
+          0.0,
+          0.578125,
+          0.0
+        ],
+        "mean_delta_norm": 304320.0,
+        "rollout_active_ratio": 1.0,
+        "rollout_nonzero_ratio": 0.25,
+        "self_loss_head": 0.712890625,
+        "self_loss_tail": 1.26171875,
+        "self_rollout_head": 0.0,
+        "self_rollout_tail": 0.2890625,
+        "rollout_zone_loss_tail": 0.0,
+        "routing_entropy_loss_tail": 0.0,
+        "trajectory_vitality_loss_tail": 0.0,
+        "world_surprise_mean": 5.832630664110184,
+        "intermediate_state_variance": 0.026423557079397142,
+        "c_t_drift_mean": 2878.9852294921875,
+        "world_summary_drift_mean": 111.48171329498291,
+        "uncertainty_mean": 0.0,
+        "progress_next_mean": -0.735107421875,
+        "progress_trend_mean": -1.0,
+        "progress_plateau_mean": 0.661505127325654,
+        "exit_invalid_count": 0.0,
+        "nan_to_num_trigger_count": 0.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": 902.1892013549805,
+            "std": 425.54571533203125
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": 577.7382888793945,
+            "std": 94.24457550048828
+          },
+          "chunk_gamma_std": {
+            "mean": 6157.424987792969,
+            "std": 888.3056030273438
+          },
+          "chunk_beta_mean": {
+            "mean": -210.03867149353027,
+            "std": 172.00877380371094
+          },
+          "chunk_beta_std": {
+            "mean": 5977.5250244140625,
+            "std": 1014.6032104492188
+          },
+          "dense_path_gain": {
+            "mean": 0.030029296875,
+            "std": 0.0
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765625,
+            "std": 0.0
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": 720.8784255981445,
+            "std": 145.54855346679688
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_std_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": 515.185791015625,
+            "std": 114.71388244628906
+          },
+          "chunk_gamma_std_std": {
+            "mean": 4921.4686279296875,
+            "std": 1073.2703857421875
+          },
+          "chunk_beta_mean_std": {
+            "mean": 224.57205486297607,
+            "std": 103.65679931640625
+          },
+          "chunk_beta_std_std": {
+            "mean": 4760.397766113281,
+            "std": 959.029541015625
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        },
+        "probe_from_mixed_model": true
+      }
+    },
+    "python_code": {
+      "stage1": {
+        "mean_kl": 5.164936065673828,
+        "mean_hidden_delta": 8.0,
+        "hard_loop_var": 0.0,
+        "soft_loop_var": 0.1875,
+        "c_t_var": 52705140.0,
+        "exit_score_var": 5.105255695525557e-06,
+        "sampled_exit_score_var": 0.0003275253693573177,
+        "two_step_improvement_mean": 0.0,
+        "self_check_mean": 0.4345703125,
+        "jepa_crystal_mean": 0.0,
+        "uncertainty_mean": 0.0,
+        "world_surprise_mean": 8.956901550292969,
+        "intermediate_state_variance": 0.018520241603255272,
+        "c_t_drift_mean": 0.0,
+        "world_summary_drift_mean": 101.00325012207031,
+        "world_summary_drift_std": 11.418428421020508,
+        "c_t_delta_norm_mean": 0.0,
+        "c_t_delta_norm_std": 0.0,
+        "pred_delta_c_cos_adjacent": 0.0,
+        "math_lane_score_mean": 0.0,
+        "math_summary_gate_mean": 0.0,
+        "r_t_drift_mean": 0.0,
+        "r_t_trust_mean": 0.0,
+        "r_t_switch_mean": 0.0,
+        "progress_next_mean": 0.9189453125,
+        "progress_next_std": 0.08179257810115814,
+        "progress_trend_mean": -0.99951171875,
+        "progress_trend_std": 0.001291870721615851,
+        "progress_plateau_mean": 0.04715728759765625,
+        "progress_plateau_std": 0.02780590020120144,
+        "progress_vs_rollout_corr": 0.0,
+        "progress_vs_exit_corr": -0.8866734504699707,
+        "exit_invalid_count": 0.0,
+        "exit_score_postfix_clamped_ratio": 0.0,
+        "bernoulli_invalid_prevented_count": 0.0,
+        "nan_to_num_trigger_count": 0.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": 1112.435775756836,
+            "std": 50.01905822753906
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": 484.5068359375,
+            "std": 25.25697898864746
+          },
+          "chunk_gamma_std": {
+            "mean": 5494.5,
+            "std": 222.11187744140625
+          },
+          "chunk_beta_mean": {
+            "mean": 170.341796875,
+            "std": 63.027679443359375
+          },
+          "chunk_beta_std": {
+            "mean": 5249.125,
+            "std": 218.22805786132812
+          },
+          "dense_path_gain": {
+            "mean": 0.030029296875,
+            "std": 0.0
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765625,
+            "std": 0.0
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": 1100.9006881713867,
+            "std": 50.019718170166016
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_std_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": 479.4931640625,
+            "std": 25.091567993164062
+          },
+          "chunk_gamma_std_std": {
+            "mean": 5297.5,
+            "std": 218.9193572998047
+          },
+          "chunk_beta_mean_std": {
+            "mean": 167.783203125,
+            "std": 60.46238327026367
+          },
+          "chunk_beta_std_std": {
+            "mean": 5046.875,
+            "std": 212.82266235351562
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        }
+      },
+      "stage2": {
+        "losses": [
+          201.83065795898438,
+          172.83407592773438,
+          177.49864196777344,
+          193.08859252929688,
+          192.59628295898438,
+          176.73666381835938,
+          225.01768493652344,
+          214.14657592773438
+        ],
+        "self_losses": [
+          0.02587890625,
+          0.029296875,
+          0.06103515625,
+          0.0260009765625,
+          0.03759765625,
+          0.052978515625,
+          0.052734375,
+          0.056640625
+        ],
+        "rollout_losses": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mean_delta_norm": 359424.0,
+        "rollout_active_ratio": 1.0,
+        "rollout_nonzero_ratio": 0.0,
+        "self_loss_head": 0.027587890625,
+        "self_loss_tail": 0.0546875,
+        "self_rollout_head": 0.0,
+        "self_rollout_tail": 0.0,
+        "rollout_zone_loss_tail": 0.0,
+        "routing_entropy_loss_tail": 0.0,
+        "trajectory_vitality_loss_tail": 0.0,
+        "world_surprise_mean": 8.956901550292969,
+        "intermediate_state_variance": 0.01852024148683995,
+        "c_t_drift_mean": 0.0,
+        "world_summary_drift_mean": 101.00325202941895,
+        "uncertainty_mean": 0.0,
+        "progress_next_mean": 0.9189453125,
+        "progress_trend_mean": -0.99951171875,
+        "progress_plateau_mean": 0.04715728759765625,
+        "exit_invalid_count": 0.0,
+        "nan_to_num_trigger_count": 0.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": 1112.435775756836,
+            "std": 50.01905822753906
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": 484.5068359375,
+            "std": 25.25697898864746
+          },
+          "chunk_gamma_std": {
+            "mean": 5494.5,
+            "std": 222.11187744140625
+          },
+          "chunk_beta_mean": {
+            "mean": 170.341796875,
+            "std": 63.027679443359375
+          },
+          "chunk_beta_std": {
+            "mean": 5249.125,
+            "std": 218.22805786132812
+          },
+          "dense_path_gain": {
+            "mean": 0.030029296875,
+            "std": 0.0
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765625,
+            "std": 0.0
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": 1100.9006881713867,
+            "std": 50.019718170166016
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_std_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": 479.4931640625,
+            "std": 25.091567993164062
+          },
+          "chunk_gamma_std_std": {
+            "mean": 5297.5,
+            "std": 218.9193572998047
+          },
+          "chunk_beta_mean_std": {
+            "mean": 167.783203125,
+            "std": 60.46238327026367
+          },
+          "chunk_beta_std_std": {
+            "mean": 5046.875,
+            "std": 212.82266235351562
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        },
+        "probe_from_mixed_model": true
+      }
+    },
+    "arc_agi": {
+      "stage1": {
+        "mean_kl": 4.372441291809082,
+        "mean_hidden_delta": 7.21875,
+        "hard_loop_var": 0.0,
+        "soft_loop_var": 0.109375,
+        "c_t_var": 20745792.0,
+        "exit_score_var": 8.738890755921602e-06,
+        "sampled_exit_score_var": 0.00032056873897090554,
+        "two_step_improvement_mean": 0.0,
+        "self_check_mean": 0.459716796875,
+        "jepa_crystal_mean": 0.0,
+        "uncertainty_mean": 0.0,
+        "world_surprise_mean": 9.180728912353516,
+        "intermediate_state_variance": 0.021567080169916153,
+        "c_t_drift_mean": 0.0,
+        "world_summary_drift_mean": 112.36741638183594,
+        "world_summary_drift_std": 6.329831600189209,
+        "c_t_delta_norm_mean": 0.0,
+        "c_t_delta_norm_std": 0.0,
+        "pred_delta_c_cos_adjacent": 0.0,
+        "math_lane_score_mean": 0.0,
+        "math_summary_gate_mean": 0.0,
+        "r_t_drift_mean": 0.0,
+        "r_t_trust_mean": 0.0,
+        "r_t_switch_mean": 0.0,
+        "progress_next_mean": 0.724609375,
+        "progress_next_std": 0.10907813906669617,
+        "progress_trend_mean": -1.0,
+        "progress_trend_std": 0.0,
+        "progress_plateau_mean": 0.08203125,
+        "progress_plateau_std": 0.01904296875,
+        "progress_vs_rollout_corr": 0.0,
+        "progress_vs_exit_corr": -0.9851074814796448,
+        "exit_invalid_count": 0.0,
+        "exit_score_postfix_clamped_ratio": 0.0,
+        "bernoulli_invalid_prevented_count": 0.0,
+        "nan_to_num_trigger_count": 0.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": 1133.9832611083984,
+            "std": 57.285003662109375
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": 530.0672607421875,
+            "std": 16.73615837097168
+          },
+          "chunk_gamma_std": {
+            "mean": 5477.8125,
+            "std": 154.1423797607422
+          },
+          "chunk_beta_mean": {
+            "mean": -70.990966796875,
+            "std": 36.489803314208984
+          },
+          "chunk_beta_std": {
+            "mean": 5260.125,
+            "std": 159.8397216796875
+          },
+          "dense_path_gain": {
+            "mean": 0.030029296875,
+            "std": 0.0
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765625,
+            "std": 0.0
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": 1122.454574584961,
+            "std": 57.284053802490234
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_std_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": 530.4327392578125,
+            "std": 17.26661491394043
+          },
+          "chunk_gamma_std_std": {
+            "mean": 5274.1875,
+            "std": 151.128662109375
+          },
+          "chunk_beta_mean_std": {
+            "mean": 74.373779296875,
+            "std": 33.38633728027344
+          },
+          "chunk_beta_std_std": {
+            "mean": 5043.875,
+            "std": 155.34713745117188
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        }
+      },
+      "stage2": {
+        "losses": [
+          180.22567749023438,
+          212.45614624023438,
+          192.45565795898438,
+          188.50277709960938,
+          209.49911499023438,
+          189.34286499023438,
+          199.85848999023438,
+          195.61630249023438
+        ],
+        "self_losses": [
+          0.0458984375,
+          0.0419921875,
+          0.03759765625,
+          0.041748046875,
+          0.0380859375,
+          0.0380859375,
+          0.0341796875,
+          0.0419921875
+        ],
+        "rollout_losses": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "mean_delta_norm": 357888.0,
+        "rollout_active_ratio": 1.0,
+        "rollout_nonzero_ratio": 0.0,
+        "self_loss_head": 0.0439453125,
+        "self_loss_tail": 0.0380859375,
+        "self_rollout_head": 0.0,
+        "self_rollout_tail": 0.0,
+        "rollout_zone_loss_tail": 0.0,
+        "routing_entropy_loss_tail": 0.0,
+        "trajectory_vitality_loss_tail": 0.0,
+        "world_surprise_mean": 9.180729627609253,
+        "intermediate_state_variance": 0.021567080868408084,
+        "c_t_drift_mean": 0.0,
+        "world_summary_drift_mean": 112.3674201965332,
+        "uncertainty_mean": 0.0,
+        "progress_next_mean": 0.724609375,
+        "progress_trend_mean": -1.0,
+        "progress_plateau_mean": 0.08203125,
+        "exit_invalid_count": 0.0,
+        "nan_to_num_trigger_count": 0.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": 1133.9832611083984,
+            "std": 57.285003662109375
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": 530.0672607421875,
+            "std": 16.73615837097168
+          },
+          "chunk_gamma_std": {
+            "mean": 5477.8125,
+            "std": 154.1423797607422
+          },
+          "chunk_beta_mean": {
+            "mean": -70.990966796875,
+            "std": 36.489803314208984
+          },
+          "chunk_beta_std": {
+            "mean": 5260.125,
+            "std": 159.8397216796875
+          },
+          "dense_path_gain": {
+            "mean": 0.030029296875,
+            "std": 0.0
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765625,
+            "std": 0.0
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": 1122.454574584961,
+            "std": 57.284053802490234
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_std_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": 530.4327392578125,
+            "std": 17.26661491394043
+          },
+          "chunk_gamma_std_std": {
+            "mean": 5274.1875,
+            "std": 151.128662109375
+          },
+          "chunk_beta_mean_std": {
+            "mean": 74.373779296875,
+            "std": 33.38633728027344
+          },
+          "chunk_beta_std_std": {
+            "mean": 5043.875,
+            "std": 155.34713745117188
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        },
+        "probe_from_mixed_model": true
+      }
+    },
+    "mixed": {
+      "stage1": {
+        "mean_kl": NaN,
+        "mean_hidden_delta": NaN,
+        "hard_loop_var": 39.609375,
+        "soft_loop_var": 0.109375,
+        "c_t_var": NaN,
+        "exit_score_var": 0.007417012937366962,
+        "sampled_exit_score_var": 0.01129842922091484,
+        "two_step_improvement_mean": NaN,
+        "self_check_mean": NaN,
+        "jepa_crystal_mean": 0.0,
+        "uncertainty_mean": 0.0,
+        "world_surprise_mean": NaN,
+        "intermediate_state_variance": NaN,
+        "c_t_drift_mean": NaN,
+        "world_summary_drift_mean": NaN,
+        "world_summary_drift_std": NaN,
+        "c_t_delta_norm_mean": NaN,
+        "c_t_delta_norm_std": NaN,
+        "pred_delta_c_cos_adjacent": NaN,
+        "math_lane_score_mean": 0.0,
+        "math_summary_gate_mean": 0.0,
+        "r_t_drift_mean": 0.0,
+        "r_t_trust_mean": 0.0,
+        "r_t_switch_mean": 0.0,
+        "progress_next_mean": NaN,
+        "progress_next_std": NaN,
+        "progress_trend_mean": NaN,
+        "progress_trend_std": NaN,
+        "progress_plateau_mean": NaN,
+        "progress_plateau_std": NaN,
+        "progress_vs_rollout_corr": NaN,
+        "progress_vs_exit_corr": NaN,
+        "exit_invalid_count": 42.0,
+        "exit_score_postfix_clamped_ratio": 0.0,
+        "bernoulli_invalid_prevented_count": 0.0,
+        "nan_to_num_trigger_count": 42.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio": {
+            "mean": 0.6875000018626451,
+            "std": 0.40343576669692993
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.6250000298023224,
+            "std": 0.8068715929985046
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain": {
+            "mean": 0.03002929757349193,
+            "std": 1.1406325883811519e-09
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765904396772,
+            "std": 4.5625303535246076e-09
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.1311011016368866,
+            "std": 0.16925080120563507
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.2622022032737732,
+            "std": 0.33850160241127014
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        }
+      },
+      "stage2": {
+        "losses": [
+          165.11251831054688,
+          174.52267456054688,
+          155.16708374023438,
+          176.81881713867188,
+          NaN,
+          NaN,
+          NaN,
+          205.54647827148438
+        ],
+        "self_losses": [
+          0.0147705078125,
+          0.0186767578125,
+          0.0263671875,
+          0.0140380859375,
+          NaN,
+          NaN,
+          NaN,
+          0.01904296875
+        ],
+        "rollout_losses": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          NaN,
+          NaN,
+          NaN,
+          0.0
+        ],
+        "mean_delta_norm": NaN,
+        "rollout_active_ratio": 1.0,
+        "rollout_nonzero_ratio": 0.0,
+        "self_loss_head": 0.0167236328125,
+        "self_loss_tail": NaN,
+        "self_rollout_head": 0.0,
+        "self_rollout_tail": NaN,
+        "rollout_zone_loss_tail": 0.0,
+        "routing_entropy_loss_tail": 0.0,
+        "trajectory_vitality_loss_tail": 0.0,
+        "world_surprise_mean": NaN,
+        "intermediate_state_variance": NaN,
+        "c_t_drift_mean": NaN,
+        "world_summary_drift_mean": NaN,
+        "uncertainty_mean": 0.0,
+        "progress_next_mean": NaN,
+        "progress_trend_mean": NaN,
+        "progress_plateau_mean": NaN,
+        "exit_invalid_count": 42.0,
+        "nan_to_num_trigger_count": 42.0,
+        "modulation_summary": {
+          "modulated_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "gate_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio": {
+            "mean": 0.6875000018626451,
+            "std": 0.40343576669692993
+          },
+          "nonfinite_gate_count": {
+            "mean": 0.6250000298023224,
+            "std": 0.8068715929985046
+          },
+          "selected_chunk_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "selected_token_ratio": {
+            "mean": 1.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain": {
+            "mean": 0.03002929757349193,
+            "std": 1.1406325883811519e-09
+          },
+          "sparse_path_gain": {
+            "mean": 0.10009765904396772,
+            "std": 4.5625303535246076e-09
+          },
+          "modulated_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "unmodulated_path_energy_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "modulation_gain_low_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_mid_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "modulation_gain_high_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "gate_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "gate_saturation_ratio_std": {
+            "mean": 0.1311011016368866,
+            "std": 0.16925080120563507
+          },
+          "nonfinite_gate_count_std": {
+            "mean": 0.2622022032737732,
+            "std": 0.33850160241127014
+          },
+          "selected_chunk_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "selected_token_ratio_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "chunk_gamma_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_gamma_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_mean_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "chunk_beta_std_std": {
+            "mean": NaN,
+            "std": NaN
+          },
+          "dense_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          },
+          "sparse_path_gain_std": {
+            "mean": 0.0,
+            "std": 0.0
+          }
+        },
+        "probe_from_mixed_model": true
+      }
+    }
+  }
+}

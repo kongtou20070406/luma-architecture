@@ -1,0 +1,32 @@
+{
+  "c_t_var": 12217848.0,
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor",
+  "checkpoint_lineage": [
+    {
+      "candidate_name": "A2-progress_shape_v1-h3+progress_exit_readout+summary_chunk_film_v2_progress+s_local_floor",
+      "path": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+      "stage2_steps": 4096,
+      "stage_name": "stage12_eval"
+    }
+  ],
+  "guard": {
+    "all_ok": true,
+    "c_t_var_ok": true,
+    "dialogue_ok": true,
+    "emotion_ok": true,
+    "rollout_nonzero_ok": true
+  },
+  "hard_loop_var": 0.0,
+  "load_checkpoint": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+  "metrics": {
+    "arc_agi_self_tail": 0.0458984375,
+    "dialogue_self_tail": 0.018524169921875,
+    "emotion_self_tail": 0.07373046875,
+    "math_self_tail": NaN,
+    "mixed_self_tail": NaN,
+    "python_code_self_tail": 0.08203125
+  },
+  "rollout_nonzero_max": 0.5,
+  "save_checkpoint": "/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/checkpoints/mid_rescreen__A2-progress_shape_v1-h3__progress_exit_readout__summary_chunk_film_v2_progress__s_local_floor.pt",
+  "score": NaN
+}

@@ -1,0 +1,59 @@
+{
+  "fixture_path": "/home/kt/ai/minimind/artifacts/luma_stage12_hard_math_dialogue.json",
+  "fixture_mode": "hard_math_dialogue",
+  "rollout_steps": 4,
+  "slow_k": 1,
+  "reason_loops": 8,
+  "enable_world_jepa": true,
+  "world_jepa_mode": "full",
+  "enable_self_check_ring": false,
+  "num_samples": 8,
+  "stage1": {
+    "mean_kl": 1.6500695943832397,
+    "mean_hidden_delta": 3.984375,
+    "hard_loop_var": 0.4375,
+    "soft_loop_var": 0.109375,
+    "c_t_var": 0.7681965231895447,
+    "exit_score_var": 2.3841839720262215e-05,
+    "sampled_exit_score_var": 0.0002947227330878377,
+    "two_step_improvement_mean": 0.19775390625,
+    "self_check_mean": 0.5
+  },
+  "stage2": {
+    "losses": [
+      23.99088478088379,
+      23.385719299316406,
+      25.319162368774414,
+      24.422821044921875,
+      23.768531799316406,
+      23.290306091308594,
+      22.71983528137207,
+      23.051393508911133
+    ],
+    "self_losses": [
+      0.796875,
+      0.9453125,
+      1.078125,
+      1.1953125,
+      0.81640625,
+      1.0,
+      1.046875,
+      1.0859375
+    ],
+    "rollout_losses": [
+      0.921875,
+      0.8984375,
+      0.75,
+      0.74609375,
+      0.6171875,
+      0.69921875,
+      0.62890625,
+      0.90234375
+    ],
+    "mean_delta_norm": 1.74609375,
+    "self_loss_head": 0.87109375,
+    "self_loss_tail": 1.06640625,
+    "self_rollout_head": 0.91015625,
+    "self_rollout_tail": 0.765625
+  }
+}

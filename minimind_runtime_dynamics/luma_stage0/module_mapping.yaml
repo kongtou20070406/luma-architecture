@@ -1,0 +1,35 @@
+stage0_module_mapping:
+  compression_zone:
+    source_repo: minimind
+    target_files:
+      - model/mamba3_module.py
+      - luma_stage0/config_schema.py
+    notes:
+      - "压缩区固定 24 层，5:1 组结构，block_repr 每3层抽样"
+      - "阶段0默认用算子可运行路径做短程验证，不在此阶段追求全量性能"
+
+  reason_loop_zone:
+    source_repo: minimind
+    target_files:
+      - luma_stage0/config_schema.py
+      - luma_stage0/metrics_schema.py
+    notes:
+      - "推理区循环 1~8，慢环 k=2，退出阈值 0.85"
+      - "停滞诊断与 c_t 影子化诊断在阶段0必须有接口"
+
+  jepa_pipeline:
+    source_repo: minimind
+    target_files:
+      - luma_stage0/config_schema.py
+      - scripts/luma_stage0_validate.py
+    notes:
+      - "阶段0仅搭建损失配置与日志接口，不做最终训练策略搜索"
+
+  observability:
+    source_repo: minimind
+    target_files:
+      - luma_stage0/metrics_schema.py
+      - scripts/luma_stage0_harness.py
+    notes:
+      - "统一输出 stage0_metrics.jsonl，便于后续 agent 跨窗口续接"
+

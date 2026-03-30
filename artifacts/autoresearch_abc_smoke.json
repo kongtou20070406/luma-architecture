@@ -1,0 +1,326 @@
+{
+  "fixture_path": "/home/kt/ai/minimind/artifacts/luma_stage12_competition_math_dialogue_emotion.json",
+  "fixture_mode": "competition_math_dialogue_emotion",
+  "rollout_steps": 10,
+  "slow_k": 1,
+  "reason_loops": 15,
+  "enable_world_jepa": true,
+  "world_jepa_mode": "full",
+  "enable_self_check_ring": true,
+  "self_check_k": 2,
+  "meta_dim": 64,
+  "meta_state": 16,
+  "c_t_dim": 32,
+  "self_check_dim": 16,
+  "enable_exit_jepa_crystal": false,
+  "reason_width_mult": 1.0,
+  "reason_shared_depth": 2,
+  "world_mask_strategy": "structured",
+  "world_full_simplify_loss": true,
+  "self_world_coupling_weight": 0.02,
+  "self_rollout_hierarchical": true,
+  "exit_two_step_aux_weight": 0.25,
+  "math_probe_rollout_steps": 0,
+  "math_probe_reason_loops": 0,
+  "math_probe_score_threshold": 0.0,
+  "math_probe_min_loops": 0,
+  "enable_persona_seed": true,
+  "persona_dir": "/home/kt/ai/luma_dataset",
+  "num_samples": 4,
+  "stage1": {
+    "mean_kl": 2.045485496520996,
+    "mean_hidden_delta": 4.71875,
+    "hard_loop_var": 1.0,
+    "soft_loop_var": 0.6875,
+    "c_t_var": 0.7043066024780273,
+    "exit_score_var": 0.0002172140229959041,
+    "sampled_exit_score_var": 0.0008138151606544852,
+    "two_step_improvement_mean": 0.03011067770421505,
+    "self_check_mean": 0.56396484375,
+    "jepa_crystal_mean": 0.0,
+    "world_surprise_mean": 11.432378768920898,
+    "intermediate_state_variance": 0.005853664129972458,
+    "c_t_drift_mean": 3.4298367500305176,
+    "world_summary_drift_mean": 0.08851084113121033
+  },
+  "stage2": {
+    "losses": [
+      24.06941032409668,
+      23.417743682861328,
+      21.54387092590332,
+      22.45444679260254,
+      11.980621337890625,
+      11.933990478515625,
+      12.822541236877441,
+      12.224567413330078
+    ],
+    "self_losses": [
+      1.046875,
+      0.8828125,
+      1.0546875,
+      0.92578125,
+      0.8203125,
+      0.86328125,
+      0.9453125,
+      0.64453125
+    ],
+    "rollout_losses": [
+      0.74609375,
+      0.69140625,
+      0.4296875,
+      0.71875,
+      0.52734375,
+      0.482421875,
+      0.65625,
+      0.59375
+    ],
+    "mean_delta_norm": 2.04736328125,
+    "self_loss_head": 0.96484375,
+    "self_loss_tail": 0.794921875,
+    "self_rollout_head": 0.71875,
+    "self_rollout_tail": 0.625
+  },
+  "per_task_from_mixed": true,
+  "per_task": {
+    "math": {
+      "stage1": {
+        "mean_kl": 0.677985668182373,
+        "mean_hidden_delta": 2.65625,
+        "hard_loop_var": 0.1875,
+        "soft_loop_var": 0.1875,
+        "c_t_var": 0.7801057696342468,
+        "exit_score_var": 4.3156200263183564e-05,
+        "sampled_exit_score_var": 0.0002466669538989663,
+        "two_step_improvement_mean": 0.1866048276424408,
+        "self_check_mean": 0.5431315302848816,
+        "jepa_crystal_mean": 0.0,
+        "world_surprise_mean": 11.42890739440918,
+        "intermediate_state_variance": 0.004178982228040695,
+        "c_t_drift_mean": 3.6070780754089355,
+        "world_summary_drift_mean": 0.11664137244224548
+      },
+      "stage2": {
+        "losses": [
+          6.064677715301514,
+          7.130380153656006,
+          20.90185546875,
+          19.902036666870117
+        ],
+        "self_losses": [
+          0.6328125,
+          0.7109375,
+          0.8828125,
+          0.734375
+        ],
+        "rollout_losses": [
+          0.515625,
+          0.427734375,
+          0.67578125,
+          0.53515625
+        ],
+        "mean_delta_norm": 2.04296875,
+        "self_loss_head": 0.671875,
+        "self_loss_tail": 0.80859375,
+        "self_rollout_head": 0.4716796875,
+        "self_rollout_tail": 0.60546875,
+        "world_surprise_mean": 11.4289071559906,
+        "intermediate_state_variance": 0.004178982111625373,
+        "c_t_drift_mean": 3.6070780158042908,
+        "world_summary_drift_mean": 0.11664137244224548,
+        "probe_from_mixed_model": true
+      }
+    },
+    "dialogue": {
+      "stage1": {
+        "mean_kl": 0.36250782012939453,
+        "mean_hidden_delta": 1.78125,
+        "hard_loop_var": 0.1875,
+        "soft_loop_var": 0.0,
+        "c_t_var": 0.195262610912323,
+        "exit_score_var": 0.00013992171443533152,
+        "sampled_exit_score_var": 0.0007754931575618684,
+        "two_step_improvement_mean": 0.0315755233168602,
+        "self_check_mean": 0.5859375,
+        "jepa_crystal_mean": 0.0,
+        "world_surprise_mean": 11.497222900390625,
+        "intermediate_state_variance": 0.00317878439091146,
+        "c_t_drift_mean": 4.966824531555176,
+        "world_summary_drift_mean": 0.14029176533222198
+      },
+      "stage2": {
+        "losses": [
+          7.277754306793213,
+          9.467412948608398,
+          16.523948669433594,
+          18.66575050354004
+        ],
+        "self_losses": [
+          0.478515625,
+          0.51171875,
+          0.51953125,
+          0.58203125
+        ],
+        "rollout_losses": [
+          0.640625,
+          0.640625,
+          0.43359375,
+          0.4453125
+        ],
+        "mean_delta_norm": 4.54296875,
+        "self_loss_head": 0.4951171875,
+        "self_loss_tail": 0.55078125,
+        "self_rollout_head": 0.640625,
+        "self_rollout_tail": 0.439453125,
+        "world_surprise_mean": 11.497223138809204,
+        "intermediate_state_variance": 0.00317878439091146,
+        "c_t_drift_mean": 4.966824769973755,
+        "world_summary_drift_mean": 0.14029176905751228,
+        "probe_from_mixed_model": true
+      }
+    },
+    "emotion": {
+      "stage1": {
+        "mean_kl": 0.8894567489624023,
+        "mean_hidden_delta": 3.03125,
+        "hard_loop_var": 2.1875,
+        "soft_loop_var": 0.75,
+        "c_t_var": 0.4848262071609497,
+        "exit_score_var": 6.696611762890825e-06,
+        "sampled_exit_score_var": 0.0003675876068882644,
+        "two_step_improvement_mean": 0.0338541679084301,
+        "self_check_mean": 0.529541015625,
+        "jepa_crystal_mean": 0.0,
+        "world_surprise_mean": 11.461198806762695,
+        "intermediate_state_variance": 0.0049331155605614185,
+        "c_t_drift_mean": 4.27132511138916,
+        "world_summary_drift_mean": 0.11220602691173553
+      },
+      "stage2": {
+        "losses": [
+          20.97429084777832,
+          22.729604721069336,
+          20.934085845947266,
+          21.294586181640625
+        ],
+        "self_losses": [
+          0.91015625,
+          1.03125,
+          0.56640625,
+          0.72265625
+        ],
+        "rollout_losses": [
+          0.5546875,
+          0.59765625,
+          0.43359375,
+          0.5546875
+        ],
+        "mean_delta_norm": 3.318359375,
+        "self_loss_head": 0.970703125,
+        "self_loss_tail": 0.64453125,
+        "self_rollout_head": 0.576171875,
+        "self_rollout_tail": 0.494140625,
+        "world_surprise_mean": 11.461198806762695,
+        "intermediate_state_variance": 0.0049331155605614185,
+        "c_t_drift_mean": 4.271324694156647,
+        "world_summary_drift_mean": 0.11220602877438068,
+        "probe_from_mixed_model": true
+      }
+    },
+    "persona_seed": {
+      "stage1": {
+        "mean_kl": 0.8005795478820801,
+        "mean_hidden_delta": 2.9375,
+        "hard_loop_var": 0.0,
+        "soft_loop_var": 0.25,
+        "c_t_var": 0.01634867861866951,
+        "exit_score_var": 1.5142371921683662e-05,
+        "sampled_exit_score_var": 0.0002507980680093169,
+        "two_step_improvement_mean": -0.012046655640006065,
+        "self_check_mean": 0.4319661557674408,
+        "jepa_crystal_mean": 0.0,
+        "world_surprise_mean": 13.271181106567383,
+        "intermediate_state_variance": 0.0073349932208657265,
+        "c_t_drift_mean": 1.5200481414794922,
+        "world_summary_drift_mean": 0.18748684227466583
+      },
+      "stage2": {
+        "losses": [
+          29.216638565063477,
+          28.394224166870117,
+          29.222694396972656,
+          29.818387985229492
+        ],
+        "self_losses": [
+          0.7890625,
+          0.765625,
+          0.7890625,
+          0.81640625
+        ],
+        "rollout_losses": [
+          0.4453125,
+          0.42578125,
+          0.43359375,
+          0.453125
+        ],
+        "mean_delta_norm": 0.494140625,
+        "self_loss_head": 0.77734375,
+        "self_loss_tail": 0.802734375,
+        "self_rollout_head": 0.435546875,
+        "self_rollout_tail": 0.443359375,
+        "world_surprise_mean": 13.271181583404541,
+        "intermediate_state_variance": 0.007334993104450405,
+        "c_t_drift_mean": 1.5200481712818146,
+        "world_summary_drift_mean": 0.18748684227466583,
+        "probe_from_mixed_model": true
+      }
+    },
+    "mixed": {
+      "stage1": {
+        "mean_kl": 0.3638540804386139,
+        "mean_hidden_delta": 1.8828125,
+        "hard_loop_var": 0.25,
+        "soft_loop_var": 0.1875,
+        "c_t_var": 0.7939330339431763,
+        "exit_score_var": 4.006506787845865e-05,
+        "sampled_exit_score_var": 0.00023231952218338847,
+        "two_step_improvement_mean": 0.12109375,
+        "self_check_mean": 0.56591796875,
+        "jepa_crystal_mean": 0.0,
+        "world_surprise_mean": 11.463716506958008,
+        "intermediate_state_variance": 0.0032666856423020363,
+        "c_t_drift_mean": 4.381956577301025,
+        "world_summary_drift_mean": 0.1299334615468979
+      },
+      "stage2": {
+        "losses": [
+          6.064677715301514,
+          7.277754306793213,
+          7.130380153656006,
+          9.467412948608398
+        ],
+        "self_losses": [
+          0.6328125,
+          0.478515625,
+          0.7109375,
+          0.51171875
+        ],
+        "rollout_losses": [
+          0.515625,
+          0.640625,
+          0.427734375,
+          0.640625
+        ],
+        "mean_delta_norm": 3.583984375,
+        "self_loss_head": 0.5556640625,
+        "self_loss_tail": 0.611328125,
+        "self_rollout_head": 0.578125,
+        "self_rollout_tail": 0.5341796875,
+        "world_surprise_mean": 11.463716268539429,
+        "intermediate_state_variance": 0.0032666855258867145,
+        "c_t_drift_mean": 4.381956517696381,
+        "world_summary_drift_mean": 0.12993345968425274,
+        "probe_from_mixed_model": true
+      }
+    }
+  }
+}

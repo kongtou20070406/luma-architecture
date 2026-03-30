@@ -1,0 +1,28 @@
+{
+  "ranked": [
+    "A2-progress_shape_v1-h3+token_selective_ct_routing",
+    "A2-progress_shape_v1-h3+lowrank_hyperbias_ct",
+    "A2-progress_shape_v1-h3+modulewise_ct_gate",
+    "A2-progress_shape_v1-h3+progress_exit_readout",
+    "A2-progress_shape_v1-h3",
+    "A2-progress_shape_v1-h3-softnear",
+    "A2-progress_shape_v1-h3-lite_local",
+    "A2-progress_shape_v1-h3+local_rollout_head",
+    "A2-progress_shape_v1-h3+structured_world_mask(light)",
+    "A2-progress_shape_v1-h3+dual_rate_self_predictor"
+  ],
+  "scores": {
+    "A2-progress_shape_v1-h3": 0.08455810546875,
+    "A2-progress_shape_v1-h3+dual_rate_self_predictor": 0.138653564453125,
+    "A2-progress_shape_v1-h3+local_rollout_head": 0.12843017578125,
+    "A2-progress_shape_v1-h3+lowrank_hyperbias_ct": 0.0639129638671875,
+    "A2-progress_shape_v1-h3+modulewise_ct_gate": 0.06812744140625,
+    "A2-progress_shape_v1-h3+progress_exit_readout": 0.071173095703125,
+    "A2-progress_shape_v1-h3+structured_world_mask(light)": 0.136956787109375,
+    "A2-progress_shape_v1-h3+token_selective_ct_routing": 0.0634735107421875,
+    "A2-progress_shape_v1-h3-lite_local": 0.0953704833984375,
+    "A2-progress_shape_v1-h3-softnear": 0.08455810546875
+  },
+  "status": "short_complete",
+  "ts": 1774775890.5688698
+}

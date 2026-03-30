@@ -1,0 +1,21 @@
+{
+  "c_t_var": 0.7142488956451416,
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout",
+  "guard": {
+    "all_ok": true,
+    "c_t_var_ok": true,
+    "dialogue_ok": true,
+    "emotion_ok": true,
+    "rollout_nonzero_ok": true
+  },
+  "hard_loop_var": 8.0,
+  "metrics": {
+    "dialogue_self_tail": 0.033447265625,
+    "emotion_self_tail": 0.038330078125,
+    "math_self_tail": 0.03173828125,
+    "mixed_self_tail": 0.02783203125,
+    "python_code_self_tail": 0.0673828125
+  },
+  "rollout_nonzero_max": 0.25,
+  "score": 0.04049072265625
+}

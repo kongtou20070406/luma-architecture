@@ -1706,6 +1706,9 @@
 
 ## 16. 2026-03-29 当前动力学主线推进
 
+> 本节从 `2026-03-29` 起，作为当前 dynamics 口径的 authoritative snapshot。
+> 若本文前文仍残留更早的候选池、送测名单或默认竞线表述，与本节冲突时一律以本节为准。
+
 ### 16.1 当前真正站住的动力学强化候选
 
 在本轮 `2048 -> 4096 -> 10240` 动力学筛选后，当前最值得扶正为“动力学增强主候选”的不是旧的 token-selective 系列，而是：
@@ -1785,6 +1788,85 @@
 执行约束：
 - 仅在同一候选、同一配置、同一 seed、同一数据桶口径下允许继训练
 - 报告必须显式记录 checkpoint lineage
+
+### 16.5 当前工作区 authoritative 对齐（2026-03-29）
+
+从这一小节开始，和当前工作区相关的动力学执行口径统一为：
+
+- 当前动力学增强主候选：
+  - `A2-progress_shape_v1-h3+progress_exit_readout`
+- 当前观察锚点：
+  - `A2-progress_shape_v1-h3`
+- 当前实现版本不再继续直接送中长程：
+  - `A2-progress_shape_v1-h3+token_selective_ct_routing`
+  - `A2-progress_shape_v1-h3+lowrank_hyperbias_ct`
+  - `A2-progress_shape_v1-h3+modulewise_ct_gate`
+
+与当前工作区对齐的程序入口：
+
+- 固定程序：
+  - `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+- 单候选 verifier：
+  - `/home/kt/ai/minimind/scripts/run_dynamics_candidate_eval.py`
+- 分级 runner：
+  - `/home/kt/ai/minimind/scripts/run_dynamics_autoresearch_local.py`
+- 矩阵生成脚本：
+  - `/home/kt/ai/minimind/scripts/build_luma_dynamics_matrix.py`
+
+当前工作区结论边界：
+
+- `2048`：有效
+- `4096`：有效
+- `10240`：有效，但当前只有 `progress_exit_readout` 站住
+- `20480`：不计正式结论，因为当时没有活着的训练进程
+- `mid_rerun`：不作为结构失败证据，因为当时被 `stage2_validate` 缺少 `import math` 的实现 bug 污染
+
+### 16.6 三条新结构候选的 Luma 版落点
+
+下一批候选不再写成旧 token-selective 直推，而统一落在：
+
+1. `summary_conditioned_chunk_film`
+- `c_t` 先控 `chunk summary / block_repr / world_summary`
+- 再回调 token 层的弱 FiLM / bias
+- 当前最优先
+
+2. `hierarchical_block_token_ct_routing`
+- 先 block-level gate
+- 再在 top-k block 内做轻量 token gate
+- token gate 默认优先走 residual delta / attn bias，而不是整段乘法
+
+3. `progress_query_focus_routing`
+- `focus_q` 由 `c_t + progress-shape(next improvement / trend / plateau)` 生成
+- 先打 `block_repr / chunk summary`
+- 再做局部 token top-k
+
+### 16.7 当前实验矩阵冻结口径
+
+围绕：
+
+- `A2-progress_shape_v1-h3+progress_exit_readout`
+
+展开 12 组实验矩阵：
+
+- `summary_chunk_film` 家族：4 组
+- `hierarchical_block_token` 家族：4 组
+- `progress_focus` 家族：4 组
+
+赛制默认：
+
+- 单候选 `cuda_smoke`
+- `2048`
+- `4096`
+- `10240`
+- `20480`
+
+说明：
+
+- 真正的正式排序至少要看到 `10240`
+- `20480` 只用于确认，不再用于海选
+- 具体矩阵由：
+  - `/home/kt/ai/minimind/scripts/build_luma_dynamics_matrix.py`
+  生成
 
 ### 16.5 当前仍需保留的实现级修复
 

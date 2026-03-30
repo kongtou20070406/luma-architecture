@@ -1,0 +1,10 @@
+{
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout",
+  "elapsed_sec": 7650.121310710907,
+  "pid": 481579,
+  "stage_name": "long_confirm",
+  "stage_steps": 20480,
+  "status": "running",
+  "timeout_sec": 43200,
+  "ts": 1774794237.4566863
+}

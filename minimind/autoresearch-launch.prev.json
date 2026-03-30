@@ -1,0 +1,37 @@
+{
+  "approvals": {},
+  "config": {
+    "direction": "lower",
+    "execution_policy": "danger_full_access",
+    "goal": "Run the fixed Luma dynamics autoresearch screening program on /home/kt/ai/minimind with watchdog: 2048 prescreen, 4096 rescreen, then promote top candidates to 10240/20480 using the program JSON and documented ranking rules.",
+    "guard": "cd /home/kt/ai/minimind && /home/kt/ai/.venvs/luma-global/bin/python scripts/check_dynamics_guard.py --summary artifacts/autoresearch_dynamics/latest_summary.json",
+    "iterations": 20,
+    "metric": "dynamics_composite_score_2048",
+    "parallel_mode": "serial",
+    "repos": [
+      {
+        "path": "/home/kt/ai/minimind",
+        "role": "primary",
+        "scope": "model/**,scripts/**,luma_stage0/**,trainer/**"
+      }
+    ],
+    "rollback_policy": "revert",
+    "run_tag": "luma-dynamics-screen-v1",
+    "scope": "model/**,scripts/**,luma_stage0/**,trainer/**",
+    "session_mode": "background",
+    "stop_condition": null,
+    "verify": "cd /home/kt/ai/minimind && /home/kt/ai/.venvs/luma-global/bin/python scripts/run_dynamics_candidate_eval.py --json-out artifacts/autoresearch_dynamics/latest.json --metrics-out artifacts/autoresearch_dynamics/latest_metrics.jsonl --summary-out artifacts/autoresearch_dynamics/latest_summary.json",
+    "web_search": "disabled"
+  },
+  "created_at": "2026-03-29T07:03:54Z",
+  "defaults": {},
+  "mode": "loop",
+  "notes": [
+    "Baseline score 0.05007781982421875 with guard pass. Fixed program source: luma_stage0/dynamics_autoresearch_program.json. Prefer candidate order from Luma_Dynamics_Literature_Midcourse_Plan. Use watchdog-managed background fresh start."
+  ],
+  "original_goal": "Execute the fixed Luma dynamics screening program from luma_stage0/dynamics_autoresearch_program.json in /home/kt/ai/minimind. Start from the measured A2-progress_shape_v1-h3 baseline, run 2048-step prescreen first, promote by the documented plan, and manage the run with a watchdog under background fresh start.",
+  "prompt_text": "Execute the fixed Luma dynamics screening program from luma_stage0/dynamics_autoresearch_program.json in /home/kt/ai/minimind. Start from the measured A2-progress_shape_v1-h3 baseline, run 2048-step prescreen first, promote by the documented plan, and manage the run with a watchdog under background fresh start.",
+  "resume_seed": {},
+  "updated_at": "2026-03-29T07:03:54Z",
+  "version": 1
+}
