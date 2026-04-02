@@ -1,6 +1,6 @@
 # private data
-luma_dataset/
-**/luma_dataset/
+luma_dataset/persona_seed/
+luma_dataset/**/persona_seed/
 minimind_runtime_dynamics/dataset/
 **/dataset/private*/
 **/persona_seed/

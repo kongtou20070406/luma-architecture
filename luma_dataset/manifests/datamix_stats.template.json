@@ -1,0 +1,16 @@
+{
+  "workspace": "/home/kt/ai/luma_dataset",
+  "manifest": "/home/kt/ai/luma_dataset/manifests/datamix_v1.yaml",
+  "persona_seed_files": [
+    "persona_seed/pretrain.jsonl",
+    "persona_seed/wechat_pretrain.jsonl"
+  ],
+  "bucket_docs": [
+    "buckets/dialogue_quality/README.md",
+    "buckets/empathy_support/README.md",
+    "buckets/persona_seed/README.md",
+    "buckets/smart_code_python/README.md",
+    "buckets/smart_math_reasoning/README.md",
+    "buckets/smart_reasoning_dialogue/README.md"
+  ]
+}

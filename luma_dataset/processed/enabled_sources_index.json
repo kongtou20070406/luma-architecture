@@ -1,0 +1,49 @@
+[
+  {
+    "dataset_id": "openai/gsm8k",
+    "raw_path": "/home/kt/ai/luma_dataset/raw/openai__gsm8k.json",
+    "sample_path": "/home/kt/ai/luma_dataset/processed/openai__gsm8k.sample.jsonl",
+    "rows": 16
+  },
+  {
+    "dataset_id": "EleutherAI/hendrycks_math",
+    "raw_path": "/home/kt/ai/luma_dataset/raw/EleutherAI__hendrycks_math.json",
+    "sample_path": "/home/kt/ai/luma_dataset/processed/EleutherAI__hendrycks_math.sample.jsonl",
+    "rows": 16
+  },
+  {
+    "dataset_id": "ricdomolm/MATH-500",
+    "raw_path": "/home/kt/ai/luma_dataset/raw/ricdomolm__MATH-500.json",
+    "sample_path": "/home/kt/ai/luma_dataset/processed/ricdomolm__MATH-500.sample.jsonl",
+    "rows": 16
+  },
+  {
+    "dataset_id": "Maxwell-Jia/AIME_2024",
+    "raw_path": "/home/kt/ai/luma_dataset/raw/Maxwell-Jia__AIME_2024.json",
+    "sample_path": "/home/kt/ai/luma_dataset/processed/Maxwell-Jia__AIME_2024.sample.jsonl",
+    "rows": 16
+  },
+  {
+    "dataset_id": "facebook/empathetic_dialogues",
+    "status": "fetch_failed",
+    "error": "HTTP Error 404: Not Found"
+  },
+  {
+    "dataset_id": "thu-coai/esconv",
+    "raw_path": "/home/kt/ai/luma_dataset/raw/thu-coai__esconv.json",
+    "sample_path": "/home/kt/ai/luma_dataset/processed/thu-coai__esconv.sample.jsonl",
+    "rows": 16
+  },
+  {
+    "dataset_id": "OpenAssistant/oasst1",
+    "raw_path": "/home/kt/ai/luma_dataset/raw/OpenAssistant__oasst1.json",
+    "sample_path": "/home/kt/ai/luma_dataset/processed/OpenAssistant__oasst1.sample.jsonl",
+    "rows": 16
+  },
+  {
+    "dataset_id": "HuggingFaceH4/ultrafeedback_binarized",
+    "raw_path": "/home/kt/ai/luma_dataset/raw/HuggingFaceH4__ultrafeedback_binarized.json",
+    "sample_path": "/home/kt/ai/luma_dataset/processed/HuggingFaceH4__ultrafeedback_binarized.sample.jsonl",
+    "rows": 16
+  }
+]

@@ -1,0 +1,8 @@
+cache/
+persona_seed/
+*.arrow
+*.parquet
+*.lock
+.DS_Store
+
+__pycache__/

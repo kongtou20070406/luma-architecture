@@ -18,7 +18,7 @@
 
 它**不包含**：
 
-- 私有 `luma_dataset/` 语料
+- 私有 `luma_dataset/persona_seed/` 语料
 - 训练权重 / checkpoint / `*.pth`
 - 本地虚拟环境
 - 运行缓存与日志残留
@@ -50,17 +50,20 @@
 ## 当前内容
 
 - `docs/plans/`
-  - Luma 总规划与当前冻结决策
+  - Luma 总规划（历史主文档）与当前执行计划
 - `docs/reports/`
-  - 各轮结构实验、JEPA 实验、depth / self-check / r_t 报告
+  - 已合并的主报告（Stage12 / Dynamics）与当前矩阵工件
 - `docs/reference/`
-  - loss 说明、环境说明等参考资料
+  - reference 入口、loss 说明、实现清单
 - `docs/agent/`
   - agent 工作日志与记忆协议
 - `minimind/`
   - 当前 Luma 主实现底座与实验脚本
+- `luma_dataset/`
+  - 公开可分享的数据工作区（manifests / scripts / bucket 文档）
+  - `persona_seed/` 私有语料默认不上传
 - `parameter-golf/`
-  - 小规模机制验证脚本与参考材料的精简版
+  - 可选机制验证材料（默认实验链不依赖）
 
 ## 代码现状
 
@@ -78,7 +81,7 @@
 
 这个公开仓默认不带：
 
-- `luma_dataset/`
+- `luma_dataset/persona_seed/`
 - `minimind/checkpoints/`
 - `minimind/out/`
 - 任何训练权重文件
@@ -95,9 +98,10 @@
 ## 推荐阅读顺序
 
 1. [Luma_v0.7.2_Agent_MasterPlan.md](docs/plans/Luma_v0.7.2_Agent_MasterPlan.md)
-2. [Luma_Loss_Reference.md](docs/reference/Luma_Loss_Reference.md)
-3. `docs/reports/` 下的各轮实验报告
-4. `minimind/model/model_minimind.py`
+2. [Luma_Execution_Plan_20260402.md](docs/plans/Luma_Execution_Plan_20260402.md)
+3. [docs/reference/README.md](docs/reference/README.md)
+4. [docs/reports/README.md](docs/reports/README.md)
+5. `minimind/model/model_minimind.py`
 
 ## 说明
 
