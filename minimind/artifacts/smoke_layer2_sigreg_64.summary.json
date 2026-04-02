@@ -1,0 +1,87 @@
+{
+  "bucket_scores": {
+    "arc_agi": {
+      "mean_loss": 22.357162475585938,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.25,
+      "self_loss_tail": 0.74609375,
+      "self_rollout_tail": 0.3203125
+    },
+    "dialogue": {
+      "mean_loss": 33.55936813354492,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 1.0,
+      "self_loss_tail": 1.18359375,
+      "self_rollout_tail": 0.650390625
+    },
+    "emotion": {
+      "mean_loss": 27.179532051086426,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.75,
+      "self_loss_tail": 1.02734375,
+      "self_rollout_tail": 0.62890625
+    },
+    "math": {
+      "mean_loss": 1.2136729955673218,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.0,
+      "self_loss_tail": 0.359375,
+      "self_rollout_tail": 0.0
+    },
+    "mixed": {
+      "mean_loss": 1.1911607384681702,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.0,
+      "self_loss_tail": 0.34375,
+      "self_rollout_tail": 0.0
+    },
+    "persona_seed": {
+      "mean_loss": 40.11036491394043,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 1.0,
+      "self_loss_tail": 1.16015625,
+      "self_rollout_tail": 0.60546875
+    },
+    "python_code": {
+      "mean_loss": 26.447917938232422,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.75,
+      "self_loss_tail": 1.0546875,
+      "self_rollout_tail": 0.69140625
+    }
+  },
+  "c_t_var": 0.6734925508499146,
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout",
+  "checkpoint_lineage": [],
+  "guard": {
+    "all_ok": false,
+    "c_t_var_ok": true,
+    "dialogue_ok": true,
+    "emotion_ok": false,
+    "rollout_nonzero_ok": true
+  },
+  "hard_loop_var": 1.75,
+  "layer2": {
+    "dmd_spectral_radius": 0.9249633022022872,
+    "forcing_top_abs_corr": 0.9724907109187435,
+    "paths": {
+      "csv_prefix": "/home/kt/ai/luma-architecture/minimind/artifacts/smoke_layer2_sigreg_64.layer2",
+      "json": "/home/kt/ai/luma-architecture/minimind/artifacts/smoke_layer2_sigreg_64.layer2.json",
+      "md": "/home/kt/ai/luma-architecture/minimind/artifacts/smoke_layer2_sigreg_64.layer2.md"
+    },
+    "pod_effective_rank": 2,
+    "pod_top1_energy_ratio": 0.9986479425449365
+  },
+  "load_checkpoint": null,
+  "metrics": {
+    "arc_agi_self_tail": 0.74609375,
+    "dialogue_self_tail": 1.18359375,
+    "emotion_self_tail": 1.02734375,
+    "math_self_tail": 0.359375,
+    "mixed_self_tail": 0.34375,
+    "python_code_self_tail": 1.0546875
+  },
+  "rollout_nonzero_max": 1.0,
+  "save_checkpoint": null,
+  "score": 0.683203125
+}

@@ -394,6 +394,24 @@ class LumaConfig(PretrainedConfig):
         self.enable_world_jepa = kwargs.get("enable_world_jepa", True)
         self.world_jepa_mode = kwargs.get("world_jepa_mode", "scaffold")
         self.world_full_simplify_loss = kwargs.get("world_full_simplify_loss", False)
+        self.enable_sigreg_world = kwargs.get("enable_sigreg_world", False)
+        self.enable_sigreg_rollout = kwargs.get("enable_sigreg_rollout", False)
+        self.enable_sigreg_delta = kwargs.get("enable_sigreg_delta", False)
+        self.world_sigreg_weight = kwargs.get("world_sigreg_weight", 0.05)
+        self.world_sigreg_num_slices = kwargs.get("world_sigreg_num_slices", 128)
+        self.world_sigreg_t_min = kwargs.get("world_sigreg_t_min", 0.2)
+        self.world_sigreg_t_max = kwargs.get("world_sigreg_t_max", 4.0)
+        self.world_sigreg_num_points = kwargs.get("world_sigreg_num_points", 17)
+        self.world_sigreg_lambda = kwargs.get("world_sigreg_lambda", 1.0)
+        self.world_sigreg_eps = kwargs.get("world_sigreg_eps", 1e-6)
+        self.sigreg_rollout_weight = kwargs.get("sigreg_rollout_weight", 0.05)
+        self.sigreg_delta_weight = kwargs.get("sigreg_delta_weight", 0.05)
+        self.sigreg_num_slices = kwargs.get("sigreg_num_slices", self.world_sigreg_num_slices)
+        self.sigreg_t_min = kwargs.get("sigreg_t_min", self.world_sigreg_t_min)
+        self.sigreg_t_max = kwargs.get("sigreg_t_max", self.world_sigreg_t_max)
+        self.sigreg_num_points = kwargs.get("sigreg_num_points", self.world_sigreg_num_points)
+        self.sigreg_lambda = kwargs.get("sigreg_lambda", self.world_sigreg_lambda)
+        self.sigreg_eps = kwargs.get("sigreg_eps", self.world_sigreg_eps)
         self.self_jepa_residual_reg = kwargs.get("self_jepa_residual_reg", 0.01)
         self.self_world_coupling_weight = kwargs.get("self_world_coupling_weight", 0.0)
         self.self_rollout_weight = kwargs.get("self_rollout_weight", 0.5)
@@ -483,6 +501,17 @@ class LumaConfig(PretrainedConfig):
         self.trajectory_vitality_weight = kwargs.get("trajectory_vitality_weight", 0.0)
         self.trajectory_c_t_drift_floor = kwargs.get("trajectory_c_t_drift_floor", 0.02)
         self.trajectory_world_drift_floor = kwargs.get("trajectory_world_drift_floor", 0.01)
+        # Residual-delta modulation options (opt-in)
+        self.routing_use_residual_branch = kwargs.get("routing_use_residual_branch", False)
+        # Gate scale applied to per-chunk sigmoid gate when using residual branch
+        self.ct_residual_gate_scale = kwargs.get("ct_residual_gate_scale", 0.15)
+        # Selection-only mode: apply a small fixed amplitude to selected chunks instead of learned gate
+        self.ct_selection_only = kwargs.get("ct_selection_only", False)
+        self.ct_selection_amplitude = kwargs.get("ct_selection_amplitude", 0.08)
+        # Local-energy alive-floor and rollout alive-floor weights/thresholds (defaults: disabled)
+        self.routing_local_delta_floor = kwargs.get("routing_local_delta_floor", 0.0)
+        self.routing_local_delta_floor_weight = kwargs.get("routing_local_delta_floor_weight", 0.0)
+        self.rollout_alive_weight = kwargs.get("rollout_alive_weight", 0.0)
         self.enable_reasoning_state_ring = kwargs.get("enable_reasoning_state_ring", False)
         self.r_t_dim = kwargs.get("r_t_dim", max(16, self.c_t_dim // 2))
         self.r_t_mode = kwargs.get("r_t_mode", "blend")
@@ -1427,8 +1456,24 @@ class LeWorldModelStyleJEPA(nn.Module):
             nn.SiLU(),
             nn.Linear(config.world_dim, config.world_dim, bias=False),
         )
-        self.var_floor = 0.10
-        self.var_weight = 0.05
+        self.enable_sigreg_world = bool(config.enable_sigreg_world)
+        self.sigreg_weight = float(config.world_sigreg_weight)
+        self.sigreg_num_slices = int(config.world_sigreg_num_slices)
+        self.sigreg_eps = float(config.world_sigreg_eps)
+        t_min = float(config.world_sigreg_t_min)
+        t_max = float(config.world_sigreg_t_max)
+        num_points = int(config.world_sigreg_num_points)
+        if num_points < 2:
+            num_points = 2
+        t = torch.linspace(t_min, t_max, num_points, dtype=torch.float32)
+        trap = torch.full((num_points,), (t_max - t_min) / max(1, num_points - 1), dtype=torch.float32)
+        trap[0] *= 0.5
+        trap[-1] *= 0.5
+        weight = torch.exp(-t.square() / (2.0 * float(config.world_sigreg_lambda) ** 2))
+        phi0 = torch.exp(-0.5 * t.square())
+        self.register_buffer("sigreg_t", t, persistent=False)
+        self.register_buffer("sigreg_weights", trap * weight, persistent=False)
+        self.register_buffer("sigreg_phi0", phi0, persistent=False)
         self.delta_weight = 0.10
         self._copy_online_to_target()
         for param in self.target_encoder.parameters():
@@ -1519,8 +1564,20 @@ class LeWorldModelStyleJEPA(nn.Module):
         return mask
 
     def _sigreg(self, world_online: torch.Tensor) -> torch.Tensor:
-        std = world_online.float().std(dim=(0, 1), unbiased=False)
-        return F.relu(self.var_floor - std).mean()
+        z = world_online.float().reshape(-1, self.world_dim)
+        if z.shape[0] <= 1:
+            return world_online.new_zeros(())
+        z = z - z.mean(dim=0, keepdim=True)
+        z = z / (z.std(dim=0, unbiased=False, keepdim=True) + self.sigreg_eps)
+        directions = torch.randn(self.sigreg_num_slices, self.world_dim, device=z.device, dtype=z.dtype)
+        directions = F.normalize(directions, dim=-1)
+        h = z @ directions.t()
+        x_t = h.unsqueeze(-1) * self.sigreg_t.view(1, 1, -1)
+        cos_mean = torch.cos(x_t).mean(dim=0)
+        sin_mean = torch.sin(x_t).mean(dim=0)
+        err = (cos_mean - self.sigreg_phi0.view(1, -1)).square() + sin_mean.square()
+        ep_stat = (err * self.sigreg_weights.view(1, -1)).sum(dim=-1) * z.shape[0]
+        return ep_stat.mean()
 
     def _masked_prediction(self, hidden_states: torch.Tensor, mask: torch.Tensor) -> dict:
         online_world = self._encode_online(hidden_states)
@@ -1553,8 +1610,8 @@ class LeWorldModelStyleJEPA(nn.Module):
             F.normalize(masked_target, dim=-1),
             dim=-1,
         ).mean()
-        sigreg_loss = self._sigreg(online_world)
-        world_loss = cosine_loss + self.var_weight * sigreg_loss
+        sigreg_loss = self._sigreg(online_world) if self.enable_sigreg_world else online_world.new_zeros(())
+        world_loss = cosine_loss + self.sigreg_weight * sigreg_loss
         if not self.simplify_loss:
             delta_target = (masked_target - visible_summary.expand_as(target_world)[mask]).detach()
             delta_loss = F.mse_loss(pred_delta[mask], delta_target)
@@ -1566,6 +1623,7 @@ class LeWorldModelStyleJEPA(nn.Module):
             "world_target": target_world,
             "world_pred": pred_world,
             "world_jepa_loss": world_loss,
+            "world_sigreg_loss": sigreg_loss,
             "world_surprise": surprise_value,
         }
 
@@ -1589,6 +1647,7 @@ class LeWorldModelStyleJEPA(nn.Module):
             "world_target": zeros_world,
             "world_pred": zeros_world,
             "world_jepa_loss": zero_loss,
+            "world_sigreg_loss": zero_loss,
             "world_surprise": zero_loss,
         }
 
@@ -1694,6 +1753,7 @@ class WorldLatentJEPA(nn.Module):
             "world_target": target_world,
             "world_pred": pred_world,
             "world_jepa_loss": world_loss,
+            "world_sigreg_loss": hidden_states.new_zeros(()),
             "world_surprise": observed_hidden.norm(dim=-1).mean(),
         }
 
@@ -1725,6 +1785,7 @@ class WorldLatentJEPA(nn.Module):
             "world_target": zeros_world,
             "world_pred": zeros_world,
             "world_jepa_loss": zero_loss,
+            "world_sigreg_loss": zero_loss,
             "world_surprise": zero_loss,
         }
 
@@ -2030,6 +2091,14 @@ class LumaReasonCore(nn.Module):
         self.routing_modulation_floor = float(config.routing_modulation_floor)
         self.routing_modulation_ceiling = float(config.routing_modulation_ceiling)
         self.routing_world_summary_cap = float(config.routing_world_summary_cap)
+        # Copy new residual/selection and alive-floor knobs from config
+        self.routing_use_residual_branch = bool(getattr(config, "routing_use_residual_branch", False))
+        self.ct_residual_gate_scale = float(getattr(config, "ct_residual_gate_scale", 0.15))
+        self.ct_selection_only = bool(getattr(config, "ct_selection_only", False))
+        self.ct_selection_amplitude = float(getattr(config, "ct_selection_amplitude", 0.08))
+        self.routing_local_delta_floor = float(getattr(config, "routing_local_delta_floor", 0.0))
+        self.routing_local_delta_floor_weight = float(getattr(config, "routing_local_delta_floor_weight", 0.0))
+        self.rollout_alive_weight = float(getattr(config, "rollout_alive_weight", 0.0))
         self.routing_tier_soft_only = bool(config.routing_tier_soft_only)
         self.routing_tier_entropy_floor = float(config.routing_tier_entropy_floor)
         self.routing_min_local_share = float(config.routing_min_local_share)
@@ -2391,7 +2460,20 @@ class LumaReasonCore(nn.Module):
         baseline_path_energy = (h + weak_dense).float().norm(dim=-1).mean()
 
         if is_summary_v1 or is_summary_v2 or is_hici or is_budget_v1 or is_budget_v2:
-            h = h + weak_dense + strong_summary_delta
+            # Optionally use a small gated residual delta branch instead of FiLM-style strong summary
+            if getattr(self, "routing_use_residual_branch", False):
+                local_delta = torch.tanh(self.local_delta_head(torch.cat([h, c_expand_tok], dim=-1)))
+                # Choose gate per-chunk: either selection-only fixed amplitude, or learned sigmoid gate scaled
+                if getattr(self, "ct_selection_only", False):
+                    gate_chunk_vals = selected_chunk_mask.to(dtype=dtype) * float(self.ct_selection_amplitude)
+                else:
+                    gate_chunk_vals = float(self.ct_residual_gate_scale) * torch.sigmoid(chunk_gate_logits).to(dtype)
+                gate_tok = self._expand_chunk_values(gate_chunk_vals.unsqueeze(-1), spans, seq_len)
+                h = h + weak_dense + gate_tok * local_delta
+                mod_stats["delta_local_norm_mean"] = local_delta.norm(dim=-1).mean()
+                mod_stats["delta_local_norm_std"] = local_delta.norm(dim=-1).std(unbiased=False)
+            else:
+                h = h + weak_dense + strong_summary_delta
         elif is_hier_v1:
             h = h + chunk_strength_tok * dense_gain * (torch.tanh(c_bias) + half * beta_tanh)
         elif is_hier_v2:
@@ -2562,6 +2644,25 @@ class LumaBackbone(nn.Module):
             progress_trend_weight=config.exit_progress_trend_weight,
             progress_plateau_weight=config.exit_progress_plateau_weight,
         )
+        self.enable_sigreg_rollout = bool(config.enable_sigreg_rollout)
+        self.enable_sigreg_delta = bool(config.enable_sigreg_delta)
+        self.sigreg_rollout_weight = float(config.sigreg_rollout_weight)
+        self.sigreg_delta_weight = float(config.sigreg_delta_weight)
+        self.sigreg_num_slices = int(config.sigreg_num_slices)
+        self.sigreg_eps = float(config.sigreg_eps)
+        sigreg_t_min = float(config.sigreg_t_min)
+        sigreg_t_max = float(config.sigreg_t_max)
+        sigreg_num_points = max(2, int(config.sigreg_num_points))
+        sigreg_lambda = max(1e-6, float(config.sigreg_lambda))
+        sigreg_t = torch.linspace(sigreg_t_min, sigreg_t_max, sigreg_num_points, dtype=torch.float32)
+        sigreg_trap = torch.full((sigreg_num_points,), (sigreg_t_max - sigreg_t_min) / max(1, sigreg_num_points - 1), dtype=torch.float32)
+        sigreg_trap[0] *= 0.5
+        sigreg_trap[-1] *= 0.5
+        sigreg_phi0 = torch.exp(-0.5 * sigreg_t.square())
+        sigreg_weight = torch.exp(-sigreg_t.square() / (2.0 * sigreg_lambda**2))
+        self.register_buffer("sigreg_t", sigreg_t, persistent=False)
+        self.register_buffer("sigreg_phi0", sigreg_phi0, persistent=False)
+        self.register_buffer("sigreg_weights", sigreg_trap * sigreg_weight, persistent=False)
         self.final_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def _hierarchical_rollout_horizons(self) -> set[int]:
@@ -2578,6 +2679,28 @@ class LumaBackbone(nn.Module):
             cursor *= 2
         horizons.add(max_horizon)
         return {h for h in horizons if h <= max_horizon}
+
+    def _sigreg_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        x = latent.float()
+        if x.dim() == 3:
+            x = x.reshape(-1, x.shape[-1])
+        elif x.dim() == 2:
+            pass
+        else:
+            return latent.new_zeros(())
+        if x.shape[0] <= 1:
+            return latent.new_zeros(())
+        x = x - x.mean(dim=0, keepdim=True)
+        x = x / (x.std(dim=0, unbiased=False, keepdim=True) + self.sigreg_eps)
+        dirs = torch.randn(self.sigreg_num_slices, x.shape[-1], device=x.device, dtype=x.dtype)
+        dirs = F.normalize(dirs, dim=-1)
+        proj = x @ dirs.t()
+        x_t = proj.unsqueeze(-1) * self.sigreg_t.view(1, 1, -1)
+        cos_mean = torch.cos(x_t).mean(dim=0)
+        sin_mean = torch.sin(x_t).mean(dim=0)
+        err = (cos_mean - self.sigreg_phi0.view(1, -1)).square() + sin_mean.square()
+        ep = (err * self.sigreg_weights.view(1, -1)).sum(dim=-1) * x.shape[0]
+        return ep.mean()
 
     def forward(self, input_ids: torch.Tensor, disable_ct_injection: bool = False) -> Tuple[torch.Tensor, dict]:
         h = self.embedding(input_ids)
@@ -2602,6 +2725,8 @@ class LumaBackbone(nn.Module):
         target_delta_c = torch.zeros_like(c_t)
         self_jepa_terms: List[torch.Tensor] = []
         residual_reg_terms: List[torch.Tensor] = []
+        sigreg_delta_terms: List[torch.Tensor] = []
+        sigreg_rollout_terms: List[torch.Tensor] = []
         rollout_loss_terms: List[torch.Tensor] = []
         delta_h_history: List[torch.Tensor] = []
         self_error_history: List[torch.Tensor] = []
@@ -2753,6 +2878,13 @@ class LumaBackbone(nn.Module):
                     ).mean()
                 )
                 residual_reg_terms.append(pred_delta_c.norm(dim=-1).mean() * self.config.self_jepa_residual_reg)
+                if self.enable_sigreg_delta:
+                    sigreg_delta_terms.append(self._sigreg_latent(pred_delta_c))
+                if self.enable_sigreg_rollout and rollout_state_preds:
+                    rollout_sigreg_slice = rollout_state_preds[: min(3, len(rollout_state_preds))]
+                    sigreg_rollout_terms.append(
+                        torch.stack([self._sigreg_latent(pred_state) for pred_state in rollout_sigreg_slice]).mean()
+                    )
                 if self.config.enable_world_jepa and self.config.self_world_coupling_weight > 0.0:
                     world_summary_for_coupling = self.world_latent_jepa.summarize(h)
                     if prev_world_summary is not None:
@@ -3015,6 +3147,12 @@ class LumaBackbone(nn.Module):
             self_jepa_loss = self_jepa_loss + progress_shape_loss + local_consistency_loss
         else:
             self_jepa_loss = h.new_zeros(()) + progress_shape_loss + local_consistency_loss
+        sigreg_delta_loss = torch.stack(sigreg_delta_terms).mean() if sigreg_delta_terms else h.new_zeros(())
+        sigreg_rollout_loss = torch.stack(sigreg_rollout_terms).mean() if sigreg_rollout_terms else h.new_zeros(())
+        if self.enable_sigreg_delta and self.sigreg_delta_weight > 0.0:
+            self_jepa_loss = self_jepa_loss + self.sigreg_delta_weight * sigreg_delta_loss
+        if self.enable_sigreg_rollout and self.sigreg_rollout_weight > 0.0:
+            self_jepa_loss = self_jepa_loss + self.sigreg_rollout_weight * sigreg_rollout_loss
         if trajectory_health_terms:
             self_jepa_loss = self_jepa_loss + torch.stack(trajectory_health_terms).mean()
         self_rollout_loss = torch.stack(rollout_loss_terms).mean() if rollout_loss_terms else h.new_zeros(())
@@ -3041,6 +3179,22 @@ class LumaBackbone(nn.Module):
                         dim=-1,
                     ).mean().detach()
                 )
+        # Alive-floor losses: local-energy floor and rollout nonzero floor (opt-in via config)
+        local_alive_floor_loss = h.new_zeros(())
+        if getattr(self, "routing_local_delta_floor_weight", 0.0) > 0.0:
+            local_norm = dynamics_modulation_summary.get("delta_local_norm_mean", h.new_zeros(()))
+            local_alive_floor_loss = torch.relu(
+                h.new_tensor(float(self.routing_local_delta_floor), device=device, dtype=dtype) - local_norm
+            ) * h.new_tensor(float(self.routing_local_delta_floor_weight), device=device, dtype=dtype)
+
+        rollout_alive_floor_loss = h.new_zeros(())
+        if getattr(self, "rollout_alive_weight", 0.0) > 0.0:
+            nonzero_flag = (self_rollout_loss.abs() > 1e-12).float() if isinstance(self_rollout_loss, torch.Tensor) else h.new_tensor(0.0)
+            nonzero_flag = nonzero_flag.to(device=device, dtype=dtype)
+            rollout_alive_floor_loss = torch.relu(
+                h.new_tensor(float(self.rollout_nonzero_low), device=device, dtype=dtype) - nonzero_flag
+            ) * h.new_tensor(float(self.rollout_alive_weight), device=device, dtype=dtype)
+
         return h, {
             "block_reprs": block_reprs,
             "loop_history": loop_history,
@@ -3053,11 +3207,15 @@ class LumaBackbone(nn.Module):
             "pred_delta_c": pred_delta_c,
             "target_delta_c": target_delta_c,
             "self_jepa_loss": self_jepa_loss,
+            "sigreg_delta_loss": sigreg_delta_loss,
+            "sigreg_rollout_loss": sigreg_rollout_loss,
             "self_progress_shape_loss": progress_shape_loss,
             "self_local_consistency_loss": local_consistency_loss,
             "trajectory_health_mean": torch.stack(trajectory_health_history).mean() if trajectory_health_history else h.new_zeros(()),
             "self_rollout_loss": self_rollout_loss,
             "slow_update_flags": slow_update_flags,
+            "local_alive_floor_loss": local_alive_floor_loss,
+            "rollout_alive_floor_loss": rollout_alive_floor_loss,
             "delta_h_history": delta_h_history,
             "self_error_history": self_error_history,
             "rollout_error_history": rollout_error_history,

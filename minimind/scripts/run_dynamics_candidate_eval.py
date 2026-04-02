@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from analyze_luma_dynamics_layer2 import run_layer2_analysis
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PROGRAM = ROOT / "luma_stage0" / "dynamics_autoresearch_program.json"
@@ -71,10 +72,29 @@ def _score_report(report: dict, program: dict) -> tuple[float, dict]:
         "emotion_ok": float(per_task["emotion"]["stage2"]["self_loss_tail"]) <= float(guards["max_emotion_self_tail"]),
     }
     guard_status["all_ok"] = all(guard_status.values())
+
+    def _tail_mean(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        width = max(1, min(2, len(values)))
+        return float(sum(values[-width:]) / width)
+
+    bucket_scores = {}
+    for bucket, bucket_payload in per_task.items():
+        stage2 = bucket_payload.get("stage2", {})
+        bucket_scores[bucket] = {
+            "self_loss_tail": float(stage2.get("self_loss_tail", 0.0)),
+            "self_rollout_tail": float(stage2.get("self_rollout_tail", 0.0)),
+            "rollout_nonzero_ratio": float(stage2.get("rollout_nonzero_ratio", 0.0)),
+            "rollout_active_ratio": float(stage2.get("rollout_active_ratio", 0.0)),
+            "mean_loss": _tail_mean(stage2.get("losses", [])),
+        }
+
     diagnostics = {
         "candidate": report.get("candidate_name"),
         "score": score,
         "metrics": metrics,
+        "bucket_scores": bucket_scores,
         "rollout_nonzero_max": rollout_nonzero,
         "c_t_var": float(stage1["c_t_var"]),
         "hard_loop_var": float(stage1["hard_loop_var"]),
@@ -94,6 +114,9 @@ def main() -> int:
     parser.add_argument("--json-out", type=Path, required=True)
     parser.add_argument("--metrics-out", type=Path, required=True)
     parser.add_argument("--summary-out", type=Path, default=None)
+    parser.add_argument("--layer2-json-out", type=Path, default=None)
+    parser.add_argument("--layer2-md-out", type=Path, default=None)
+    parser.add_argument("--layer2-csv-prefix", type=Path, default=None)
     parser.add_argument("--load-checkpoint", type=Path, default=None)
     parser.add_argument("--save-checkpoint", type=Path, default=None)
     parser.add_argument("--extra-arg", action="append", default=[], help="Extra raw CLI args forwarded to run_luma_stage12.py")
@@ -122,6 +145,10 @@ def main() -> int:
     args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
     if args.summary_out is not None:
         args.summary_out.parent.mkdir(parents=True, exist_ok=True)
+    if args.layer2_json_out is not None:
+        args.layer2_json_out.parent.mkdir(parents=True, exist_ok=True)
+    if args.layer2_md_out is not None:
+        args.layer2_md_out.parent.mkdir(parents=True, exist_ok=True)
     if args.save_checkpoint is not None:
         args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(cmd, cwd=ROOT, check=False)
@@ -130,6 +157,29 @@ def main() -> int:
 
     report = _load_json(args.json_out)
     score, diagnostics = _score_report(report, program)
+    layer2_json_out = args.layer2_json_out or args.json_out.with_suffix(".layer2.json")
+    layer2_md_out = args.layer2_md_out or args.json_out.with_suffix(".layer2.md")
+    layer2_csv_prefix = args.layer2_csv_prefix or args.json_out.with_suffix(".layer2")
+    layer2 = run_layer2_analysis(
+        report_path=args.json_out,
+        metrics_path=args.metrics_out,
+        json_out=layer2_json_out,
+        md_out=layer2_md_out,
+        csv_prefix=layer2_csv_prefix,
+    )
+    report["layer2_analysis"] = layer2
+    args.json_out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    diagnostics["layer2"] = {
+        "pod_effective_rank": int(layer2["pod"]["effective_rank"]),
+        "pod_top1_energy_ratio": float(layer2["pod"]["modes"][0]["energy_ratio"]) if layer2["pod"]["modes"] else 0.0,
+        "dmd_spectral_radius": float(layer2["dmd"]["spectral_radius"]),
+        "forcing_top_abs_corr": float(layer2["forcing_response"]["top_abs_corr"]),
+        "paths": {
+            "json": str(layer2_json_out),
+            "md": str(layer2_md_out),
+            "csv_prefix": str(layer2_csv_prefix),
+        },
+    }
     if args.summary_out is not None:
         args.summary_out.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(diagnostics, ensure_ascii=False, sort_keys=True))

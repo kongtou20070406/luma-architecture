@@ -31,6 +31,19 @@ class CandidateResult:
     metrics_path: Path
     log_path: Path
     checkpoint_path: Path
+    bucket_scores: dict[str, dict[str, float]]
+    layer2: dict[str, Any]
+
+
+TSV_BUCKETS = [
+    "math",
+    "python_code",
+    "mixed",
+    "dialogue",
+    "emotion",
+    "persona_seed",
+    "arc_agi",
+]
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -44,6 +57,15 @@ def dump_json(path: Path, obj: dict[str, Any]) -> None:
 
 def sanitize(name: str) -> str:
     return name.replace("+", "__").replace("/", "_").replace(" ", "_")
+
+
+def to_extra_arg(key: str, value: Any) -> str | None:
+    flag = f"--{key.replace('_', '-')}"
+    if isinstance(value, bool):
+        return flag if value else None
+    if value is None:
+        return None
+    return f"{flag} {value}"
 
 
 def stage_timeout(program: dict[str, Any], steps: int) -> int:
@@ -65,7 +87,15 @@ def append_tsv(path: Path, row: dict[str, Any]) -> None:
         "metrics_path",
         "log_path",
         "checkpoint_path",
+        "bucket_scores_json",
+        "pod_effective_rank",
+        "pod_top1_energy_ratio",
+        "dmd_spectral_radius",
+        "forcing_top_abs_corr",
     ]
+    for bucket in TSV_BUCKETS:
+        fieldnames.append(f"{bucket}_self_tail")
+        fieldnames.append(f"{bucket}_rollout_tail")
     exists = path.exists()
     with path.open("a", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter="\t")
@@ -139,6 +169,11 @@ def run_one_candidate(
         "--save-checkpoint",
         str(checkpoint_path),
     ]
+    stage_eval_overrides = dict(program.get("stage_eval_overrides", {}).get(stage_name, {}))
+    for key, value in stage_eval_overrides.items():
+        extra_arg = to_extra_arg(key, value)
+        if extra_arg:
+            cmd.extend(["--extra-arg", extra_arg])
     if load_checkpoint is not None:
         cmd.extend(["--load-checkpoint", str(load_checkpoint)])
 
@@ -215,10 +250,14 @@ def run_one_candidate(
 
     score = None
     guard_all_ok = False
+    bucket_scores: dict[str, dict[str, float]] = {}
+    layer2: dict[str, Any] = {}
     if summary_path.exists():
         summary = load_json(summary_path)
         score = summary.get("score")
         guard_all_ok = bool(summary.get("guard", {}).get("all_ok", False))
+        bucket_scores = summary.get("bucket_scores", {}) or {}
+        layer2 = summary.get("layer2", {}) or {}
 
     dump_json(
         runtime_path,
@@ -243,6 +282,8 @@ def run_one_candidate(
         metrics_path=metrics_path,
         log_path=log_path,
         checkpoint_path=checkpoint_path,
+        bucket_scores=bucket_scores,
+        layer2=layer2,
     )
 
 
@@ -293,6 +334,19 @@ def run_stage(
                 "metrics_path": str(result.metrics_path),
                 "log_path": str(result.log_path),
                 "checkpoint_path": str(result.checkpoint_path),
+                "bucket_scores_json": json.dumps(result.bucket_scores, ensure_ascii=False, sort_keys=True),
+                "pod_effective_rank": result.layer2.get("pod_effective_rank", ""),
+                "pod_top1_energy_ratio": result.layer2.get("pod_top1_energy_ratio", ""),
+                "dmd_spectral_radius": result.layer2.get("dmd_spectral_radius", ""),
+                "forcing_top_abs_corr": result.layer2.get("forcing_top_abs_corr", ""),
+                **{
+                    f"{bucket}_self_tail": (result.bucket_scores.get(bucket, {}) or {}).get("self_loss_tail", "")
+                    for bucket in TSV_BUCKETS
+                },
+                **{
+                    f"{bucket}_rollout_tail": (result.bucket_scores.get(bucket, {}) or {}).get("self_rollout_tail", "")
+                    for bucket in TSV_BUCKETS
+                },
             },
         )
     return results

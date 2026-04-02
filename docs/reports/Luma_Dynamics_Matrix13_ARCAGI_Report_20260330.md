@@ -1,8 +1,8 @@
 # Luma Dynamics Matrix13 + Chollet ARC-AGI Report (2026-03-30)
 
 ## 1) Run Snapshot
-- Run directory: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823`
-- Program: `/home/kt/ai/minimind/luma_stage0/dynamics_autoresearch_program.json`
+- Run directory: `/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823`
+- Program: `/home/kt/ai/luma-architecture/minimind/luma_stage0/dynamics_autoresearch_program.json`
 - ARC setting: `enable_arc_agi=true`（Chollet ARC-AGI text-linearized bucket）
 - Final runtime state: `complete`
 - Stage coverage:
@@ -59,3 +59,8 @@
 1. 先修复 `mid/long` NaN 评分路径（至少把 NaN 作为显式 fail-score，而非参与排序）。
 2. 在 `summary_chunk_film_v2_progress+s_local_floor` 上做一次 10240 复验，确认 NaN 是否可复现。
 3. 在 ARC-AGI 桶上新增单独数值健康阈值（例如 `arc_agi_self_tail` finite-rate）后再用于长程排名。
+
+## 7) Artifact Cleanup Addendum
+- `retest_summary_slocalfloor_*` 的补测分桶分数与 guard 结果，已汇总到：
+  - `/home/kt/ai/luma-architecture/docs/reports/Luma_Artifacts_Cleanup_20260402.md`
+- 该补充用于避免清理历史日志后丢失关键数值边界。

@@ -1522,3 +1522,89 @@
   - unit: `luma-matrix13-arcagi-20260330_083823.service`
   - output: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823`
   - runtime: `/home/kt/ai/minimind/artifacts/autoresearch_dynamics_rescue13_arcagi_20260330_083823/autoresearch-runtime.json`
+
+## 2026-04-02 Workspace consolidation + handoff hardening
+- 路径收敛（关键）：
+  - 当前唯一执行主线固定为：`/home/kt/ai/luma-architecture/minimind`
+  - `minimind_runtime_dynamics` 已移除，不再作为任何 runner 的有效入口
+  - `parameter-golf` 当前仅保留可选参考角色，默认实验链不依赖
+- 运行状态确认：
+  - `sigreg8` 8组合矩阵链仍在运行（`run_dynamics_autoresearch_local.py` + `run_luma_stage12.py`）
+  - 活跃输出目录：`/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_sigreg8_15m80m_20260402`
+
+## 2026-04-02 Artifacts cleanup (traceability-first)
+- 先补报告再删文件，避免清理后失去可追溯证据。
+- 新增清理与补表报告：
+  - `/home/kt/ai/luma-architecture/docs/reports/Luma_Artifacts_Cleanup_20260402.md`
+  - 其中补齐了 `retest_summary_slocalfloor_*` 的分桶分数、guard、有效性边界。
+- 已删除：
+  - 旧重复目录：`/home/kt/ai/luma-architecture/artifacts`
+  - stale run 目录：`autoresearch_dynamics_15m80m_20260402`、`autoresearch_dynamics_15m80m_layer2_20260402`
+  - 0B 无效 service/launcher 日志
+  - 无用补测权重：`retest_summary_slocalfloor_20480_fixv1.pt`、`retest_summary_slocalfloor_20480_fixv2_fresh.pt`
+- 保留：
+  - `autoresearch_sigreg8_15m80m_20260402`
+  - `autoresearch_dynamics_matrix12_20260329_234325`
+  - `autoresearch_dynamics_rescue13_arcagi_20260330_083823`
+  - 以及已被报告直接引用的工件
+
+## 2026-04-02 Reports consolidation (reduce file count)
+- `docs/reports` 从大量散报告收敛为少量 canonical 报告 + 生成矩阵工件。
+- 新增：
+  - `Luma_Stage12_Consolidated_Report_20260402.md`
+  - `Luma_Dynamics_Consolidated_Report_20260402.md`
+  - `docs/reports/README.md`（报告总入口）
+- 删除：
+  - 已被并入的旧同类散报告（stage12、rollout、uncertainty、r_t、mid/long 分拆报告等）
+- 当前 reports 入口建议：
+  1. `docs/reports/README.md`
+  2. `Luma_Stage12_Consolidated_Report_20260402.md`
+  3. `Luma_Dynamics_Consolidated_Report_20260402.md`
+  4. `Luma_Dynamics_Matrix13_ARCAGI_Report_20260330.md`
+  5. `Luma_Artifacts_Cleanup_20260402.md`
+
+## 2026-04-02 Reference + Plan update (code-aligned)
+- 新增 reference 入口：
+  - `/home/kt/ai/luma-architecture/docs/reference/README.md`
+- 更新 `README.md`：
+  - 推荐阅读顺序改为先看 execution plan / reference index / reports index
+- 新增执行计划：
+  - `/home/kt/ai/luma-architecture/docs/plans/Luma_Execution_Plan_20260402.md`
+- 更新主计划：
+  - `/home/kt/ai/luma-architecture/docs/plans/Luma_v0.7.2_Agent_MasterPlan.md`
+  - 顶部增加 `2026-04-02` 高优先执行更新
+  - 将训练固定项改为当前 trainer 真实口径（不再写旧的“固定2-step + 简化总损失”）
+
+## 2026-04-02 Loss reference rewrite (implementation-true)
+- 彻底重写：
+  - `/home/kt/ai/luma-architecture/docs/reference/Luma_Loss_Reference.md`
+- 对齐到 `model_minimind.py` 当前真实损失组装：
+  - `L_total = L_lm + L_world + L_self + w_rollout*L_self_rollout + w_exit*L_exit_aux + L_rollout_zone + L_routing_entropy + L_trajectory_vitality`
+- 明确了三条 SIGReg 干预点与注入位置：
+  - `world_online` -> `L_world`
+  - `rollout_state_preds[:3]` -> `L_self`
+  - `pred_delta_c` -> `L_self`
+
+## 2026-04-02 Handoff note for next agent
+- 接手第一优先检查：
+  1. `ps` 活进程是否仍是 `sigreg8` 主链
+  2. `autoresearch-runtime.json` + `watchdog-heartbeat.json` 是否一致
+  3. 仅在 `luma-architecture/minimind` 路径下执行 runner/cleanup
+- 判断实验有效性时，继续执行当前边界：
+  - stale runtime 不算有效结果
+  - 实现 bug 污染不直接判结构失败
+  - NaN 分数不可直接用于 keep/kill 排序
+
+## 2026-04-02 Agent protocol upgraded with mechanical overrides
+- 更新文件：
+  - `/home/kt/ai/luma-architecture/docs/agent/AGENT_MEMORY_LOG_PROTOCOL.md`
+- 目标：
+  - 把 Mechanical Overrides（Step0、分阶段、强制验证、上下文衰减防护、编辑完整性、重命名安全搜索等）固化成可执行协议，降低后续接手风险。
+- 关键新增：
+  - `STEP 0 Rule`：>300 行结构改造前先清死代码，并独立记录。
+  - `PHASED EXECUTION`：每 phase 最多 5 文件，阶段间需验证与确认。
+  - `FORCED VERIFICATION`：按项目类型执行强制校验，不得把写文件当成功。
+  - `CONTEXT/READ/EDIT` 三类防错：10+轮重读、>500行分块读、编辑前后复读确认。
+  - 记录模板新增“有效性边界”字段，强制标注证据是否可用于结论。
+- 接手收益：
+  - 新 agent 可直接按协议执行，减少“改了但不可交接”的隐性失败。

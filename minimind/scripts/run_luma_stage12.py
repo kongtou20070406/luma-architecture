@@ -367,6 +367,17 @@ def build_tiny_luma_config(
     reason_loops: int | None,
     enable_world_jepa: bool,
     world_jepa_mode: str,
+    enable_sigreg_world: bool,
+    enable_sigreg_rollout: bool,
+    enable_sigreg_delta: bool,
+    world_sigreg_weight: float,
+    world_sigreg_num_slices: int,
+    world_sigreg_t_min: float,
+    world_sigreg_t_max: float,
+    world_sigreg_num_points: int,
+    world_sigreg_lambda: float,
+    sigreg_rollout_weight: float,
+    sigreg_delta_weight: float,
     enable_self_check_ring: bool,
     self_check_k: int,
     meta_dim: int,
@@ -466,6 +477,22 @@ def build_tiny_luma_config(
         world_dim=64,
         enable_world_jepa=enable_world_jepa,
         world_jepa_mode=world_jepa_mode,
+        enable_sigreg_world=enable_sigreg_world,
+        enable_sigreg_rollout=enable_sigreg_rollout,
+        enable_sigreg_delta=enable_sigreg_delta,
+        world_sigreg_weight=world_sigreg_weight,
+        world_sigreg_num_slices=world_sigreg_num_slices,
+        world_sigreg_t_min=world_sigreg_t_min,
+        world_sigreg_t_max=world_sigreg_t_max,
+        world_sigreg_num_points=world_sigreg_num_points,
+        world_sigreg_lambda=world_sigreg_lambda,
+        sigreg_rollout_weight=sigreg_rollout_weight,
+        sigreg_delta_weight=sigreg_delta_weight,
+        sigreg_num_slices=world_sigreg_num_slices,
+        sigreg_t_min=world_sigreg_t_min,
+        sigreg_t_max=world_sigreg_t_max,
+        sigreg_num_points=world_sigreg_num_points,
+        sigreg_lambda=world_sigreg_lambda,
         world_mask_strategy=world_mask_strategy,
         world_full_simplify_loss=world_full_simplify_loss,
         self_rollout_steps=rollout_steps,
@@ -868,9 +895,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     rollout_zone_losses = []
     routing_entropy_losses = []
     trajectory_vitality_losses = []
-    rollout_zone_losses = []
-    routing_entropy_losses = []
-    trajectory_vitality_losses = []
+    sigreg_world_losses = []
+    sigreg_rollout_losses = []
+    sigreg_delta_losses = []
     aborted_on_nonfinite = False
 
     for step in range(steps):
@@ -885,6 +912,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         rollout_zone_tensor = aux.get("rollout_activity_zone_loss", torch.zeros_like(loss.detach())).detach()
         routing_entropy_tensor = aux.get("routing_entropy_loss", torch.zeros_like(loss.detach())).detach()
         trajectory_vitality_tensor = aux.get("trajectory_vitality_loss", torch.zeros_like(loss.detach())).detach()
+        sigreg_world_tensor = aux.get("world_sigreg_loss", torch.zeros_like(loss.detach())).detach()
+        sigreg_rollout_tensor = aux.get("sigreg_rollout_loss", torch.zeros_like(loss.detach())).detach()
+        sigreg_delta_tensor = aux.get("sigreg_delta_loss", torch.zeros_like(loss.detach())).detach()
         finite_ok = bool(
             torch.isfinite(loss.detach()).item()
             and torch.isfinite(self_tensor).item()
@@ -901,6 +931,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
             rollout_zone_losses.append(float("nan"))
             routing_entropy_losses.append(float("nan"))
             trajectory_vitality_losses.append(float("nan"))
+            sigreg_world_losses.append(float("nan"))
+            sigreg_rollout_losses.append(float("nan"))
+            sigreg_delta_losses.append(float("nan"))
             aborted_on_nonfinite = True
             break
         loss.backward()
@@ -917,6 +950,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         rollout_zone_losses.append(float(rollout_zone_tensor))
         routing_entropy_losses.append(float(routing_entropy_tensor))
         trajectory_vitality_losses.append(float(trajectory_vitality_tensor))
+        sigreg_world_losses.append(float(sigreg_world_tensor))
+        sigreg_rollout_losses.append(float(sigreg_rollout_tensor))
+        sigreg_delta_losses.append(float(sigreg_delta_tensor))
 
     head = sum(self_losses[: max(1, min(2, len(self_losses)))]) / max(1, min(2, len(self_losses)))
     tail = sum(self_losses[-max(1, min(2, len(self_losses))):]) / max(1, min(2, len(self_losses)))
@@ -940,9 +976,15 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     zone_tail = tail_float(finite_zone)
     entropy_tail = tail_float(finite_entropy)
     vitality_tail = tail_float(finite_vitality)
+    world_sigreg_tail = tail_float([value for value in sigreg_world_losses if math.isfinite(value)])
+    rollout_sigreg_tail = tail_float([value for value in sigreg_rollout_losses if math.isfinite(value)])
+    delta_sigreg_tail = tail_float([value for value in sigreg_delta_losses if math.isfinite(value)])
     metric(metrics_path, "stage2_rollout_zone_loss_tail", True, zone_tail, "Tail rollout zone loss / rollout 活性区间损失尾值")
     metric(metrics_path, "stage2_routing_entropy_loss_tail", True, entropy_tail, "Tail routing entropy loss / routing 熵损失尾值")
     metric(metrics_path, "stage2_trajectory_vitality_loss_tail", True, vitality_tail, "Tail trajectory vitality loss / 轨迹活性损失尾值")
+    metric(metrics_path, "stage2_world_sigreg_loss_tail", True, world_sigreg_tail, "Tail world SIGReg loss / world SIGReg 损失尾值")
+    metric(metrics_path, "stage2_rollout_sigreg_loss_tail", True, rollout_sigreg_tail, "Tail rollout SIGReg loss / rollout SIGReg 损失尾值")
+    metric(metrics_path, "stage2_delta_sigreg_loss_tail", True, delta_sigreg_tail, "Tail delta SIGReg loss / delta SIGReg 损失尾值")
 
     return {
         "losses": losses,
@@ -958,6 +1000,9 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         "rollout_zone_loss_tail": zone_tail,
         "routing_entropy_loss_tail": entropy_tail,
         "trajectory_vitality_loss_tail": vitality_tail,
+        "world_sigreg_loss_tail": world_sigreg_tail,
+        "rollout_sigreg_loss_tail": rollout_sigreg_tail,
+        "delta_sigreg_loss_tail": delta_sigreg_tail,
         "nonfinite_abort": aborted_on_nonfinite,
     }
 
@@ -1035,6 +1080,9 @@ def bucket_probe_from_mixed_model(
             rollout_zone_losses.append(float(aux.get("rollout_activity_zone_loss", torch.zeros((), device=device)).detach()))
             routing_entropy_losses.append(float(aux.get("routing_entropy_loss", torch.zeros((), device=device)).detach()))
             trajectory_vitality_losses.append(float(aux.get("trajectory_vitality_loss", torch.zeros((), device=device)).detach()))
+            sigreg_world_losses.append(float(aux.get("world_sigreg_loss", torch.zeros((), device=device)).detach()))
+            sigreg_rollout_losses.append(float(aux.get("sigreg_rollout_loss", torch.zeros((), device=device)).detach()))
+            sigreg_delta_losses.append(float(aux.get("sigreg_delta_loss", torch.zeros((), device=device)).detach()))
             if aux.get("world_surprise_history"):
                 surprises.append(float(torch.stack(aux["world_surprise_history"]).float().mean().detach()))
             if aux.get("uncertainty_history"):
@@ -1113,6 +1161,9 @@ def bucket_probe_from_mixed_model(
         "rollout_zone_loss_tail": tail_float([x for x in rollout_zone_losses if math.isfinite(x)]),
         "routing_entropy_loss_tail": tail_float([x for x in routing_entropy_losses if math.isfinite(x)]),
         "trajectory_vitality_loss_tail": tail_float([x for x in trajectory_vitality_losses if math.isfinite(x)]),
+        "world_sigreg_loss_tail": tail_float([x for x in sigreg_world_losses if math.isfinite(x)]),
+        "rollout_sigreg_loss_tail": tail_float([x for x in sigreg_rollout_losses if math.isfinite(x)]),
+        "delta_sigreg_loss_tail": tail_float([x for x in sigreg_delta_losses if math.isfinite(x)]),
         "world_surprise_mean": mean_surprise,
         "intermediate_state_variance": mean_state_variance,
         "c_t_drift_mean": mean_ct_drift,
@@ -1164,6 +1215,17 @@ def main() -> None:
     parser.add_argument("--reason-loops", type=int, default=0)
     parser.add_argument("--disable-world-jepa", action="store_true")
     parser.add_argument("--world-jepa-mode", choices=["scaffold", "full"], default="scaffold")
+    parser.add_argument("--enable-sigreg-world", action="store_true")
+    parser.add_argument("--enable-sigreg-rollout", action="store_true")
+    parser.add_argument("--enable-sigreg-delta", action="store_true")
+    parser.add_argument("--world-sigreg-weight", type=float, default=0.05)
+    parser.add_argument("--world-sigreg-num-slices", type=int, default=128)
+    parser.add_argument("--world-sigreg-t-min", type=float, default=0.2)
+    parser.add_argument("--world-sigreg-t-max", type=float, default=4.0)
+    parser.add_argument("--world-sigreg-num-points", type=int, default=17)
+    parser.add_argument("--world-sigreg-lambda", type=float, default=1.0)
+    parser.add_argument("--sigreg-rollout-weight", type=float, default=0.05)
+    parser.add_argument("--sigreg-delta-weight", type=float, default=0.05)
     parser.add_argument("--enable-self-check-ring", action="store_true")
     parser.add_argument("--self-check-k", type=int, default=1)
     parser.add_argument("--meta-dim", type=int, default=64)
@@ -1222,6 +1284,15 @@ def main() -> None:
     parser.add_argument("--routing-modulation-floor", type=float, default=0.0)
     parser.add_argument("--routing-modulation-ceiling", type=float, default=1.0)
     parser.add_argument("--routing-world-summary-cap", type=float, default=1.0)
+    # Residual-delta modulation knobs (new)
+    parser.add_argument("--routing-use-residual-branch", action="store_true", help="Use gated residual-delta branch instead of FiLM for summary modulation")
+    parser.add_argument("--ct-residual-gate-scale", type=float, default=0.15, help="Scale applied to sigmoid gate for residual branch")
+    parser.add_argument("--ct-selection-only", action="store_true", help="Apply selection-only small fixed amplitude instead of learned gate")
+    parser.add_argument("--ct-selection-amplitude", type=float, default=0.08, help="Fixed amplitude used when ct-selection-only is enabled")
+    # Alive-floor knobs
+    parser.add_argument("--routing-local-delta-floor", type=float, default=0.0, help="Local delta norm floor (alive-floor threshold)")
+    parser.add_argument("--routing-local-delta-floor-weight", type=float, default=0.0, help="Weight for local delta alive-floor loss")
+    parser.add_argument("--rollout-alive-weight", type=float, default=0.0, help="Weight for rollout alive-floor loss")
     parser.add_argument("--routing-tier-soft-only", action="store_true")
     parser.add_argument("--routing-tier-entropy-floor", type=float, default=0.0)
     parser.add_argument("--routing-min-local-share", type=float, default=0.0)
@@ -1292,6 +1363,17 @@ def main() -> None:
         reason_loops=(args.reason_loops if args.reason_loops > 0 else None),
         enable_world_jepa=not args.disable_world_jepa,
         world_jepa_mode=args.world_jepa_mode,
+        enable_sigreg_world=args.enable_sigreg_world,
+        enable_sigreg_rollout=args.enable_sigreg_rollout,
+        enable_sigreg_delta=args.enable_sigreg_delta,
+        world_sigreg_weight=args.world_sigreg_weight,
+        world_sigreg_num_slices=args.world_sigreg_num_slices,
+        world_sigreg_t_min=args.world_sigreg_t_min,
+        world_sigreg_t_max=args.world_sigreg_t_max,
+        world_sigreg_num_points=args.world_sigreg_num_points,
+        world_sigreg_lambda=args.world_sigreg_lambda,
+        sigreg_rollout_weight=args.sigreg_rollout_weight,
+        sigreg_delta_weight=args.sigreg_delta_weight,
         enable_self_check_ring=args.enable_self_check_ring,
         self_check_k=args.self_check_k,
         meta_dim=args.meta_dim,
@@ -1430,6 +1512,17 @@ def main() -> None:
         "reason_loops": config.reason_active_loops,
         "enable_world_jepa": config.enable_world_jepa,
         "world_jepa_mode": config.world_jepa_mode,
+        "enable_sigreg_world": config.enable_sigreg_world,
+        "enable_sigreg_rollout": config.enable_sigreg_rollout,
+        "enable_sigreg_delta": config.enable_sigreg_delta,
+        "world_sigreg_weight": config.world_sigreg_weight,
+        "world_sigreg_num_slices": config.world_sigreg_num_slices,
+        "world_sigreg_t_min": config.world_sigreg_t_min,
+        "world_sigreg_t_max": config.world_sigreg_t_max,
+        "world_sigreg_num_points": config.world_sigreg_num_points,
+        "world_sigreg_lambda": config.world_sigreg_lambda,
+        "sigreg_rollout_weight": config.sigreg_rollout_weight,
+        "sigreg_delta_weight": config.sigreg_delta_weight,
         "enable_self_check_ring": config.enable_self_check_ring,
         "self_check_k": config.self_check_k,
         "meta_dim": config.meta_dim,
@@ -1532,6 +1625,17 @@ def main() -> None:
                 "fixture_mode": args.fixture_mode,
                 "config": {
                     "world_jepa_mode": config.world_jepa_mode,
+                    "enable_sigreg_world": config.enable_sigreg_world,
+                    "enable_sigreg_rollout": config.enable_sigreg_rollout,
+                    "enable_sigreg_delta": config.enable_sigreg_delta,
+                    "world_sigreg_weight": config.world_sigreg_weight,
+                    "world_sigreg_num_slices": config.world_sigreg_num_slices,
+                    "world_sigreg_t_min": config.world_sigreg_t_min,
+                    "world_sigreg_t_max": config.world_sigreg_t_max,
+                    "world_sigreg_num_points": config.world_sigreg_num_points,
+                    "world_sigreg_lambda": config.world_sigreg_lambda,
+                    "sigreg_rollout_weight": config.sigreg_rollout_weight,
+                    "sigreg_delta_weight": config.sigreg_delta_weight,
                     "reason_loops": config.reason_active_loops,
                     "reason_shared_depth": config.reason_shared_depth,
                     "rollout_steps": config.self_rollout_steps,

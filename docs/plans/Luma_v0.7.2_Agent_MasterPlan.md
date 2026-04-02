@@ -1,11 +1,29 @@
 # Luma v0.7.2 迁移总规划（Agent 执行版，最终一次性上线预训练）
 
+## 0.0 2026-04-02 执行更新（高优先）
+
+> 这份 v0.7.2 文档保留历史决策与完整推导；若与当前执行口径冲突，以本节和 `Luma_Execution_Plan_20260402.md` 为准。
+
+- 当前唯一主项目路径：
+  - `/home/kt/ai/luma-architecture/minimind`
+- `minimind_runtime_dynamics` 已移除，不再作为执行入口。
+- `parameter-golf` 当前仅作为可选参考材料；默认实验链不依赖。
+- 当前主线基线：
+  - `A2-progress_shape_v1-h3+progress_exit_readout`
+- 当前在跑矩阵：
+  - `sigreg` 8 组合（world / rollout / delta）
+  - 两阶段预算：`15M -> 80M tokens`
+- 报告入口已改为合并版：
+  - `docs/reports/README.md`
+  - `Luma_Stage12_Consolidated_Report_20260402.md`
+  - `Luma_Dynamics_Consolidated_Report_20260402.md`
+
 ## 0. 文档定位与硬性原则
 
 ### 0.1 目标
 - 本文档用于后续 agent 直接执行，不是讨论稿。
 - 目标是完成 Luma v0.7.2 在 `minimind` 主工程中的迁移与落地。
-- `parameter-golf` 仅用于小规模机制验证，不承载最终成品质量目标。
+- `parameter-golf` 仅用于小规模机制验证，不承载最终成品质量目标（当前默认实验链不依赖）。
 
 ### 0.2 硬性原则（必须遵守）
 - 最终成品训练 = **一次性全量预训练**（唯一正式 run）。
@@ -15,7 +33,7 @@
 
 ### 0.3 代码基地定位
 - 主实现底座：`minimind`（模型结构、训练主流程、日志与监控）。
-- 快速验证场：`parameter-golf`（小模块机制验证与诊断脚本）。
+- 快速验证场：`parameter-golf`（可选的小模块机制验证与诊断脚本）。
 
 ---
 
@@ -33,9 +51,28 @@
 ### 1.2 训练固定项
 - Self JEPA：预测残差 `Δc_t = c_{t+1} - c_t`。
 - World JEPA：`h` 上的 masked latent prediction（不做 raw hidden reconstruction）。
-- Rollout：固定 2-step 辅助损失。
-- 总损失（最终 run）固定形式：
-  - `L = L_lm + α*L_world + β*L_self + γ*L_rollout + λ*L_residual_reg`
+- Rollout（当前执行口径）：`one-step main + light two-step auxiliary`，并允许 `horizon=3/10` 作为中长程动力学验证。
+- 总损失（当前 trainer 真实口径）：
+  - `L_total = L_lm + L_world + L_self + w_rollout*L_self_rollout + w_exit*L_exit_aux + L_rollout_zone + L_routing_entropy + L_trajectory_vitality`
+  - 其中：
+    - `L_world` 在 `full` 模式下可含 `SIGReg(world_online)` 与 `delta` 子项
+    - `L_self` 在开启对应开关时可含 `SIGReg(pred_delta_c)` 与 `SIGReg(rollout_state_preds[:3])`
+  - 正式预训练的最终冻结式，仍以 Gate F 通过后的 run-lock 为准。
+
+### 1.2E 当前执行进度快照（2026-04-02）
+- 当前执行基线：
+  - `A2-progress_shape_v1-h3+progress_exit_readout`
+- 当前矩阵：
+  - `sigreg` 8 组合（`world / rollout / delta` 析因组合）
+- 当前两阶段预算：
+  - Stage1: `15M tokens`
+  - Stage2: `80M tokens`
+- 当前评估桶口径（统一输出）：
+  - `math / python_code / mixed / dialogue / emotion / persona_seed / arc_agi`
+- 当前有效运行目录：
+  - `/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_sigreg8_15m80m_20260402`
+- 当前报告入口（合并后）：
+  - `/home/kt/ai/luma-architecture/docs/reports/README.md`
 
 ### 1.2A 当前短程验证默认底座（2026-03-28 冻结）
 - 当前阶段1/2/短程阶段3默认实验底座：

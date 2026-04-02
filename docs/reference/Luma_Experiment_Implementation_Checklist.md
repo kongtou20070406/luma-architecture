@@ -1,5 +1,7 @@
 # Luma Experiment Implementation Checklist
 
+> 2026-04-02 更新：本清单仅维护“当前可复现实验链仍在使用”的候选语义；总入口见 `docs/reference/README.md`。
+
 这份清单专门回答一件事：
 
 - 某个实验名字在代码里到底改了什么

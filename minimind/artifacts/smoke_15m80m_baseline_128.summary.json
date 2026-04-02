@@ -1,0 +1,76 @@
+{
+  "bucket_scores": {
+    "arc_agi": {
+      "mean_loss": 23.42955493927002,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.125,
+      "self_loss_tail": 0.4560546875,
+      "self_rollout_tail": 0.0
+    },
+    "dialogue": {
+      "mean_loss": 21.198386192321777,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.5,
+      "self_loss_tail": 1.3671875,
+      "self_rollout_tail": 0.462890625
+    },
+    "emotion": {
+      "mean_loss": 24.198552131652832,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.0,
+      "self_loss_tail": 0.9482421875,
+      "self_rollout_tail": 0.0
+    },
+    "math": {
+      "mean_loss": 0.617089033126831,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.0,
+      "self_loss_tail": 0.101318359375,
+      "self_rollout_tail": 0.0
+    },
+    "mixed": {
+      "mean_loss": 0.5829061567783356,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.0,
+      "self_loss_tail": 0.1376953125,
+      "self_rollout_tail": 0.0
+    },
+    "persona_seed": {
+      "mean_loss": 25.971637725830078,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 1.0,
+      "self_loss_tail": 1.3671875,
+      "self_rollout_tail": 0.947265625
+    },
+    "python_code": {
+      "mean_loss": 25.107470512390137,
+      "rollout_active_ratio": 1.0,
+      "rollout_nonzero_ratio": 0.125,
+      "self_loss_tail": 0.859375,
+      "self_rollout_tail": 0.0
+    }
+  },
+  "c_t_var": 0.607894778251648,
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout",
+  "checkpoint_lineage": [],
+  "guard": {
+    "all_ok": false,
+    "c_t_var_ok": true,
+    "dialogue_ok": true,
+    "emotion_ok": false,
+    "rollout_nonzero_ok": true
+  },
+  "hard_loop_var": 1.6875,
+  "load_checkpoint": null,
+  "metrics": {
+    "arc_agi_self_tail": 0.4560546875,
+    "dialogue_self_tail": 1.3671875,
+    "emotion_self_tail": 0.9482421875,
+    "math_self_tail": 0.101318359375,
+    "mixed_self_tail": 0.1376953125,
+    "python_code_self_tail": 0.859375
+  },
+  "rollout_nonzero_max": 1.0,
+  "save_checkpoint": null,
+  "score": 0.5069580078125
+}

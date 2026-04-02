@@ -1,0 +1,30 @@
+{
+  "candidate": "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world",
+  "cmd": [
+    "/home/kt/ai/.venvs/luma-global/bin/python",
+    "/home/kt/ai/luma-architecture/minimind/scripts/run_dynamics_candidate_eval.py",
+    "--program",
+    "/home/kt/ai/luma-architecture/minimind/luma_stage0/dynamics_autoresearch_program.json",
+    "--candidate",
+    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world",
+    "--stage2-steps",
+    "14649",
+    "--json-out",
+    "/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_sigreg8_15m80m_20260402/reports/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__sigreg_world.json",
+    "--metrics-out",
+    "/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_sigreg8_15m80m_20260402/metrics/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__sigreg_world.jsonl",
+    "--summary-out",
+    "/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_sigreg8_15m80m_20260402/summaries/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__sigreg_world.json",
+    "--save-checkpoint",
+    "/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_sigreg8_15m80m_20260402/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__sigreg_world.pt",
+    "--extra-arg",
+    "--seq-len 1024"
+  ],
+  "load_checkpoint": null,
+  "save_checkpoint": "/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_sigreg8_15m80m_20260402/checkpoints/short_prescreen__A2-progress_shape_v1-h3__progress_exit_readout__sigreg_world.pt",
+  "stage_name": "short_prescreen",
+  "stage_steps": 14649,
+  "started_at": 1775092036.5438175,
+  "status": "running",
+  "timeout_sec": 43200
+}
