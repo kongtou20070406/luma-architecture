@@ -40,6 +40,7 @@ import argparse
 from transformers import AutoTokenizer
 
 from dataset.lm_dataset import PretrainDataset
+from dataset.packed_dataset import PackedPretrainDataset
 from luma_stage0.optimizers import LumaCosineScheduler, LumaMuonAdamWOptimizer, LumaOptimizerConfig
 from model.model_minimind import LumaConfig, LumaForCausalLM
 from trainer.trainer_utils import Logger, setup_seed
@@ -112,10 +113,11 @@ def build_phase0_config(args: argparse.Namespace) -> LumaConfig:
 # ---------------------------------------------------------------------------
 
 def _module_grad_norm(params) -> float:
+    """计算一组参数梯度的 L2 范数，强制转 float32 避免 bf16 下溢。"""
     total = 0.0
     for p in params:
         if p.grad is not None:
-            total += p.grad.data.float().norm(2).item() ** 2
+            total += p.grad.detach().float().norm(2).item() ** 2
     return math.sqrt(total)
 
 
@@ -344,17 +346,26 @@ if __name__ == "__main__":
     parser.add_argument("--exit_sampling_temperature", type=float, default=1.0)
     parser.add_argument("--use_compile", type=int, default=0, choices=[0, 1])
 
+    # 新增参数
+    parser.add_argument("--use_packing", type=int, default=1, choices=[0, 1],
+                        help="1=PackedPretrainDataset（推荐），0=原始 padding 数据集")
+    parser.add_argument("--model_dtype", type=str, default="bfloat16",
+                        choices=["bfloat16", "float32"],
+                        help="模型参数精度。bfloat16 显著节省 VRAM（推荐），float32 仅用于精度对比实验")
+
     args = parser.parse_args()
     setup_seed(42)
     os.makedirs(args.save_dir, exist_ok=True)
 
     device_type = "cuda" if "cuda" in args.device else "cpu"
-    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
-    autocast_ctx = nullcontext() if device_type == "cpu" else torch.cuda.amp.autocast(dtype=dtype)
+    # autocast 精度：仅在 model_dtype=float32 时开 autocast（bf16 参数本身已够）
+    autocast_ctx = nullcontext()
+    if device_type == "cuda" and args.model_dtype == "float32":
+        autocast_ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
 
     luma_config = build_phase0_config(args)
 
-    # ── model ─────────────────────────────────────────────────────────────
+    # ── tokenizer ─────────────────────────────────────────────────────────
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -363,10 +374,15 @@ if __name__ == "__main__":
     if luma_config.vocab_size < len(tokenizer):
         luma_config.vocab_size = len(tokenizer)
 
-    model = LumaForCausalLM(luma_config).to(args.device)
+    # ── model：参数直接存 bfloat16，节省约 50% VRAM ───────────────────────
+    # 关键 fp32 操作（softmax、cross_entropy、RMSNorm 内部计算）已在模型内
+    # 部显式转 float() 处理，不受参数精度影响。
+    param_dtype = torch.bfloat16 if args.model_dtype == "bfloat16" else torch.float32
+    model = LumaForCausalLM(luma_config).to(args.device, dtype=param_dtype)
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
-    Logger(f"Luma Refactor Params: {total_params:.3f}M")
-    Logger(f"Phase 0: all aux losses disabled, fixed LR mode")
+    vram_est_gb = total_params * (2 if param_dtype == torch.bfloat16 else 4) / 1024
+    Logger(f"Luma Refactor Params: {total_params:.3f}M  param_dtype={param_dtype}  ~{vram_est_gb:.2f}GB param VRAM")
+    Logger(f"Phase {args.phase}: all aux losses disabled, fixed LR mode")
 
     # ── optimizer (fixed LR: total_steps → ∞ so cosine factor ≈ 1.0) ────
     optimizer_config = LumaOptimizerConfig(
@@ -390,10 +406,22 @@ if __name__ == "__main__":
         scalar_base_lr=args.scalar_lr,
         min_lr_ratio=0.1,
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == "float16"))
+    # bf16 参数不需要 GradScaler（动态范围足够）
+    scaler = torch.cuda.amp.GradScaler(enabled=False)
 
     # ── data ──────────────────────────────────────────────────────────────
-    train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
+    if args.use_packing:
+        train_ds = PackedPretrainDataset(
+            args.data_path, tokenizer,
+            max_length=args.max_seq_len,
+            shuffle_docs=True,
+            min_doc_tokens=4,
+        )
+        Logger(f"PackedDataset: {len(train_ds)} packs × seq {args.max_seq_len}  "
+               f"(padding=0, 文档边界跨预测已屏蔽)")
+    else:
+        train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
+        Logger(f"PaddingDataset: {len(train_ds)} samples × seq {args.max_seq_len}")
     loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -402,7 +430,6 @@ if __name__ == "__main__":
         pin_memory=True,
         drop_last=True,
     )
-    Logger(f"Dataset: {len(train_ds)} samples → {args.iters} iters × batch {args.batch_size} × seq {args.max_seq_len}")
 
     if args.use_compile:
         model = torch.compile(model)
