@@ -183,7 +183,9 @@ def _infinite_loader(loader: DataLoader):
 
 def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
           loader: DataLoader, optimizer, scheduler, scaler,
-          autocast_ctx, metrics_path: Path):
+          autocast_ctx, metrics_path: Path,
+          compress_probe: torch.nn.Module = None,
+          compress_weight: float = 0.0):
 
     model.train()
     start_time = time.time()
@@ -199,8 +201,23 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
 
         with autocast_ctx:
             res = model(input_ids, labels=labels)
-            loss_lm = res.loss          # aux losses are all 0 in Phase 0
-            loss = loss_lm / args.accumulation_steps
+            loss_lm = res.loss
+
+            # ── Phase 2+: 压缩区辅助 loss ──────────────────────────────────
+            loss_compress_val = 0.0
+            if compress_probe is not None and compress_weight > 0:
+                raw = getattr(model, "_orig_mod", model)
+                h_compress = raw.last_aux["compression_h"]
+                logits_c = compress_probe(h_compress)
+                x_c = logits_c[:, :-1, :].contiguous()
+                y_c = labels[:, 1:].contiguous()
+                loss_compress = F.cross_entropy(
+                    x_c.view(-1, x_c.size(-1)), y_c.view(-1), ignore_index=-100
+                )
+                loss = (loss_lm + compress_weight * loss_compress) / args.accumulation_steps
+                loss_compress_val = loss_compress.item()
+            else:
+                loss = loss_lm / args.accumulation_steps
 
         scaler.scale(loss).backward()
 
@@ -208,7 +225,6 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
         do_grad_log = (step % args.grad_log_interval == 0)
         grad_metrics = {}
         if do_grad_log:
-            # unscale first so grad norms are in the original scale
             scaler.unscale_(optimizer.matrix_optimizer)
             scaler.unscale_(optimizer.scalar_optimizer)
             raw_model = getattr(model, "_orig_mod", model)
@@ -218,11 +234,16 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             if not do_grad_log:
                 scaler.unscale_(optimizer.matrix_optimizer)
                 scaler.unscale_(optimizer.scalar_optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            all_params = list(model.parameters())
+            if compress_probe is not None:
+                all_params += list(compress_probe.parameters())
+            torch.nn.utils.clip_grad_norm_(all_params, args.grad_clip)
             optimizer.step()
             scheduler.step()
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if compress_probe is not None:
+                compress_probe.zero_grad(set_to_none=True)
 
         # ── 日志 ────────────────────────────────────────────────────────────
         current_loss = loss.item() * args.accumulation_steps
@@ -231,7 +252,9 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
 
         record = {
             "step": step,
-            "loss_lm": current_loss,
+            "loss_lm": loss_lm.item(),
+            "loss_compress": loss_compress_val,
+            "loss_total": current_loss,
             "scalar_lr": scalar_lr,
             "matrix_lr": matrix_lr,
             "elapsed_s": round(time.time() - start_time, 1),
@@ -249,8 +272,9 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                 f"  ratio={grad_metrics.get('grad_ratio', 'n/a'):.2f}"
                 if grad_metrics else ""
             )
+            compress_line = f"  loss_c={loss_compress_val:.4f}" if compress_weight > 0 else ""
             Logger(
-                f"[{step}/{args.iters}] loss_lm={current_loss:.4f}"
+                f"[{step}/{args.iters}] loss_lm={loss_lm.item():.4f}{compress_line}"
                 f"  scalar_lr={scalar_lr:.2e}  eta={eta:.1f}min"
                 + grad_line
             )
@@ -353,6 +377,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_compile", type=int, default=0, choices=[0, 1])
 
     # 新增参数
+    parser.add_argument("--compress_weight", type=float, default=0.2,
+                        help="Phase 2: 压缩区辅助 loss 权重，0=关闭")
     parser.add_argument("--use_packing", type=int, default=1, choices=[0, 1],
                         help="1=PackedPretrainDataset（推荐），0=原始 padding 数据集")
     parser.add_argument("--model_dtype", type=str, default="bfloat16",
@@ -443,5 +469,21 @@ if __name__ == "__main__":
     metrics_path = ARTIFACTS_DIR / f"phase{args.phase}_metrics.jsonl"
     Logger(f"Metrics → {metrics_path}")
 
+    # ── Phase 2+: 压缩区辅助 probe（训练完可丢弃，不影响推理结构）────────
+    compress_probe = None
+    compress_weight = args.compress_weight
+    if args.phase >= 2 and compress_weight > 0:
+        compress_probe = torch.nn.Linear(
+            luma_config.hidden_size, luma_config.vocab_size, bias=False,
+        ).to(args.device, dtype=param_dtype)
+        # compress_probe 用独立 AdamW 优化（不走 Muon）
+        compress_probe_optim = torch.optim.AdamW(
+            compress_probe.parameters(), lr=args.scalar_lr, weight_decay=0.01,
+        )
+        # 把 compress_probe 的 param_groups 挂到主 optimizer 上，让 scheduler 能统一管理
+        optimizer.param_groups.extend(compress_probe_optim.param_groups)
+        Logger(f"Phase 2: compress_probe enabled, weight={compress_weight}")
+
     train(args, luma_config, model, loader, optimizer, scheduler, scaler,
-          autocast_ctx, metrics_path)
+          autocast_ctx, metrics_path,
+          compress_probe=compress_probe, compress_weight=compress_weight)

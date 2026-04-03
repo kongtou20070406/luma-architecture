@@ -404,6 +404,10 @@ class LumaConfig(PretrainedConfig):
         self.world_sigreg_num_points = kwargs.get("world_sigreg_num_points", 17)
         self.world_sigreg_lambda = kwargs.get("world_sigreg_lambda", 1.0)
         self.world_sigreg_eps = kwargs.get("world_sigreg_eps", 1e-6)
+        self.sigreg_world_source = kwargs.get("sigreg_world_source", "sigreg_on_online")
+        self.sigreg_world_fp32_only = kwargs.get("sigreg_world_fp32_only", True)
+        self.sigreg_world_warmup_steps = kwargs.get("sigreg_world_warmup_steps", 0)
+        self.world_delta_weight = kwargs.get("world_delta_weight", 0.10)
         self.sigreg_rollout_weight = kwargs.get("sigreg_rollout_weight", 0.05)
         self.sigreg_delta_weight = kwargs.get("sigreg_delta_weight", 0.05)
         self.sigreg_num_slices = kwargs.get("sigreg_num_slices", self.world_sigreg_num_slices)
@@ -413,6 +417,9 @@ class LumaConfig(PretrainedConfig):
         self.sigreg_lambda = kwargs.get("sigreg_lambda", self.world_sigreg_lambda)
         self.sigreg_eps = kwargs.get("sigreg_eps", self.world_sigreg_eps)
         self.self_jepa_residual_reg = kwargs.get("self_jepa_residual_reg", 0.01)
+        self.world_jepa_weight = kwargs.get("world_jepa_weight", 1.0)
+        self.self_jepa_weight = kwargs.get("self_jepa_weight", 1.0)
+        self.disable_self_jepa = kwargs.get("disable_self_jepa", False)
         self.self_world_coupling_weight = kwargs.get("self_world_coupling_weight", 0.0)
         self.self_rollout_weight = kwargs.get("self_rollout_weight", 0.5)
         self.self_rollout_steps = kwargs.get("self_rollout_steps", 2)
@@ -501,6 +508,9 @@ class LumaConfig(PretrainedConfig):
         self.trajectory_vitality_weight = kwargs.get("trajectory_vitality_weight", 0.0)
         self.trajectory_c_t_drift_floor = kwargs.get("trajectory_c_t_drift_floor", 0.02)
         self.trajectory_world_drift_floor = kwargs.get("trajectory_world_drift_floor", 0.01)
+        self.compression_dynamics_weight = kwargs.get("compression_dynamics_weight", 0.0)
+        self.compression_block_drift_floor = kwargs.get("compression_block_drift_floor", 0.01)
+        self.compression_block_var_floor = kwargs.get("compression_block_var_floor", 0.001)
         # Residual-delta modulation options (opt-in)
         self.routing_use_residual_branch = kwargs.get("routing_use_residual_branch", False)
         # Gate scale applied to per-chunk sigmoid gate when using residual branch
@@ -830,12 +840,24 @@ class CompressionZone(nn.Module):
                 if self.compression_mhc is not None:
                     mhc_streams = self.compression_mhc.init_streams(x)
                     _, x = self.compression_mhc(mhc_streams, self.compression_identity_block)
+        compression_block_drift_mean = x.new_zeros(())
+        compression_block_var_mean = x.new_zeros(())
+        if block_history:
+            # Compression dynamics should stay alive across block updates instead of collapsing
+            # into a single frozen representation.
+            # 压缩区的块级动力学应保持活性，不能过早坍缩成单一静态表示。
+            block_means = torch.stack([state.float().mean(dim=1) for state in block_history], dim=0)
+            compression_block_var_mean = block_means.var(dim=0, unbiased=False).mean()
+            if block_means.shape[0] > 1:
+                compression_block_drift_mean = (block_means[1:] - block_means[:-1]).norm(dim=-1).mean()
         x = self.transition_norm(x) * (1.0 + self.transition_scale)
         if self.post_math_adapter is not None:
             x, post_score = self.post_math_adapter(x)
             math_lane_scores.append(post_score)
         diagnostics = {
             "math_lane_score": torch.stack(math_lane_scores).mean() if math_lane_scores else x.new_zeros(()),
+            "compression_block_drift_mean": compression_block_drift_mean,
+            "compression_block_var_mean": compression_block_var_mean,
         }
         return x, block_reprs, diagnostics
 
@@ -1458,6 +1480,12 @@ class LeWorldModelStyleJEPA(nn.Module):
         )
         self.enable_sigreg_world = bool(config.enable_sigreg_world)
         self.sigreg_weight = float(config.world_sigreg_weight)
+        self.sigreg_world_source = str(config.sigreg_world_source)
+        if self.sigreg_world_source not in {"sigreg_on_online", "sigreg_on_encoder_latent"}:
+            self.sigreg_world_source = "sigreg_on_online"
+        self.sigreg_world_fp32_only = bool(config.sigreg_world_fp32_only)
+        self.sigreg_world_warmup_steps = int(max(0, config.sigreg_world_warmup_steps))
+        self.runtime_sigreg_step = 0
         self.sigreg_num_slices = int(config.world_sigreg_num_slices)
         self.sigreg_eps = float(config.world_sigreg_eps)
         t_min = float(config.world_sigreg_t_min)
@@ -1474,7 +1502,7 @@ class LeWorldModelStyleJEPA(nn.Module):
         self.register_buffer("sigreg_t", t, persistent=False)
         self.register_buffer("sigreg_weights", trap * weight, persistent=False)
         self.register_buffer("sigreg_phi0", phi0, persistent=False)
-        self.delta_weight = 0.10
+        self.delta_weight = float(config.world_delta_weight)
         self._copy_online_to_target()
         for param in self.target_encoder.parameters():
             param.requires_grad = False
@@ -1499,6 +1527,9 @@ class LeWorldModelStyleJEPA(nn.Module):
     def _encode_target(self, hidden_states: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             return self.target_encoder(self.observer_norm(hidden_states.detach()))
+
+    def set_runtime_sigreg_step(self, step: int) -> None:
+        self.runtime_sigreg_step = max(0, int(step))
 
     def summarize(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self._encode_online(hidden_states).mean(dim=1)
@@ -1563,13 +1594,14 @@ class LeWorldModelStyleJEPA(nn.Module):
         mask.scatter_(1, topk, True)
         return mask
 
-    def _sigreg(self, world_online: torch.Tensor) -> torch.Tensor:
-        z = world_online.float().reshape(-1, self.world_dim)
+    def _sigreg(self, latent: torch.Tensor) -> torch.Tensor:
+        z = latent.float() if self.sigreg_world_fp32_only else latent
+        z = z.reshape(-1, z.shape[-1])
         if z.shape[0] <= 1:
-            return world_online.new_zeros(())
+            return latent.new_zeros(())
         z = z - z.mean(dim=0, keepdim=True)
         z = z / (z.std(dim=0, unbiased=False, keepdim=True) + self.sigreg_eps)
-        directions = torch.randn(self.sigreg_num_slices, self.world_dim, device=z.device, dtype=z.dtype)
+        directions = torch.randn(self.sigreg_num_slices, z.shape[-1], device=z.device, dtype=z.dtype)
         directions = F.normalize(directions, dim=-1)
         h = z @ directions.t()
         x_t = h.unsqueeze(-1) * self.sigreg_t.view(1, 1, -1)
@@ -1580,7 +1612,8 @@ class LeWorldModelStyleJEPA(nn.Module):
         return ep_stat.mean()
 
     def _masked_prediction(self, hidden_states: torch.Tensor, mask: torch.Tensor) -> dict:
-        online_world = self._encode_online(hidden_states)
+        observed_hidden = self.observer_norm(hidden_states)
+        online_world = self.online_encoder(observed_hidden)
         target_world = self._encode_target(hidden_states)
         visible = (~mask).unsqueeze(-1).to(hidden_states.dtype)
         visible_count = visible.sum(dim=1).clamp_min(1.0)
@@ -1610,7 +1643,13 @@ class LeWorldModelStyleJEPA(nn.Module):
             F.normalize(masked_target, dim=-1),
             dim=-1,
         ).mean()
-        sigreg_loss = self._sigreg(online_world) if self.enable_sigreg_world else online_world.new_zeros(())
+        sigreg_source = online_world if self.sigreg_world_source == "sigreg_on_online" else observed_hidden
+        sigreg_source_float = sigreg_source.float()
+        sigreg_source_mean = sigreg_source_float.mean()
+        sigreg_source_std = sigreg_source_float.std(unbiased=False)
+        sigreg_enabled = self.enable_sigreg_world and self.runtime_sigreg_step >= self.sigreg_world_warmup_steps
+        sigreg_loss = self._sigreg(sigreg_source) if sigreg_enabled else online_world.new_zeros(())
+        sigreg_loss_step = online_world.new_tensor(float(self.runtime_sigreg_step if sigreg_enabled else -1.0))
         world_loss = cosine_loss + self.sigreg_weight * sigreg_loss
         if not self.simplify_loss:
             delta_target = (masked_target - visible_summary.expand_as(target_world)[mask]).detach()
@@ -1624,6 +1663,9 @@ class LeWorldModelStyleJEPA(nn.Module):
             "world_pred": pred_world,
             "world_jepa_loss": world_loss,
             "world_sigreg_loss": sigreg_loss,
+            "world_sigreg_source_mean": sigreg_source_mean,
+            "world_sigreg_source_std": sigreg_source_std,
+            "world_sigreg_loss_step": sigreg_loss_step,
             "world_surprise": surprise_value,
         }
 
@@ -1648,6 +1690,9 @@ class LeWorldModelStyleJEPA(nn.Module):
             "world_pred": zeros_world,
             "world_jepa_loss": zero_loss,
             "world_sigreg_loss": zero_loss,
+            "world_sigreg_source_mean": zero_loss,
+            "world_sigreg_source_std": zero_loss,
+            "world_sigreg_loss_step": hidden_states.new_tensor(-1.0),
             "world_surprise": zero_loss,
         }
 
@@ -1696,6 +1741,9 @@ class WorldLatentJEPA(nn.Module):
 
     def summarize(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.online_observer(self.observer_norm(hidden_states)).mean(dim=1)
+
+    def set_runtime_sigreg_step(self, step: int) -> None:
+        _ = step
 
     def _build_mask(self, hidden_states: torch.Tensor) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
@@ -1754,6 +1802,9 @@ class WorldLatentJEPA(nn.Module):
             "world_pred": pred_world,
             "world_jepa_loss": world_loss,
             "world_sigreg_loss": hidden_states.new_zeros(()),
+            "world_sigreg_source_mean": online_world.float().mean(),
+            "world_sigreg_source_std": online_world.float().std(unbiased=False),
+            "world_sigreg_loss_step": hidden_states.new_tensor(-1.0),
             "world_surprise": observed_hidden.norm(dim=-1).mean(),
         }
 
@@ -1786,6 +1837,9 @@ class WorldLatentJEPA(nn.Module):
             "world_pred": zeros_world,
             "world_jepa_loss": zero_loss,
             "world_sigreg_loss": zero_loss,
+            "world_sigreg_source_mean": zero_loss,
+            "world_sigreg_source_std": zero_loss,
+            "world_sigreg_loss_step": hidden_states.new_tensor(-1.0),
             "world_surprise": zero_loss,
         }
 
@@ -2705,6 +2759,10 @@ class LumaBackbone(nn.Module):
     def forward(self, input_ids: torch.Tensor, disable_ct_injection: bool = False) -> Tuple[torch.Tensor, dict]:
         h = self.embedding(input_ids)
         h, block_reprs, compression_diag = self.compression(h)
+        # Phase 2 auxiliary loss: expose compression output (stripped of memory tokens)
+        # so an external probe can give the compression zone its own gradient signal.
+        n_comp_mem = 8  # 4 local + 4 global memory tokens prepended by CompressionZone
+        compression_h = h[:, n_comp_mem:, :]  # (batch, seq_len, hidden) — aligned with input_ids
         batch_size = h.shape[0]
         h = torch.cat([self.reason_memory(batch_size), h], dim=1)
         streams = self.mhc.init_streams(h)
@@ -3196,6 +3254,7 @@ class LumaBackbone(nn.Module):
             ) * h.new_tensor(float(self.rollout_alive_weight), device=device, dtype=dtype)
 
         return h, {
+            "compression_h": compression_h,
             "block_reprs": block_reprs,
             "loop_history": loop_history,
             "c_t": c_t,
@@ -3233,6 +3292,8 @@ class LumaBackbone(nn.Module):
             "progress_plateau_history": progress_plateau_history,
             "world_surprise_history": world_surprise_history,
             "world_summary_history": world_summary_history,
+            "compression_block_drift_mean": compression_diag.get("compression_block_drift_mean", h.new_zeros(())),
+            "compression_block_var_mean": compression_diag.get("compression_block_var_mean", h.new_zeros(())),
             "exit_score_preclamp_nonfinite_history": exit_score_preclamp_nonfinite_history,
             "exit_score_postfix_clamped_ratio_history": exit_score_postfix_clamped_ratio_history,
             "bernoulli_invalid_prevented_history": bernoulli_invalid_prevented_history,
@@ -3298,6 +3359,7 @@ class LumaForCausalLM(PreTrainedModel):
         self.pre_lm_norm = LumaZCRMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         self.lm_head = FactorizedLMHead(self.config, self.model.embedding)
         self.last_aux: dict = {}
+        self._runtime_train_step: int = 0
 
     def _compute_loop_lm_proxy_losses(self, loop_history: List[torch.Tensor], labels: torch.Tensor) -> List[torch.Tensor]:
         """Luma estimates how useful each loop state would be for language modeling, then uses that as one leg of the exit supervision target.
@@ -3490,9 +3552,29 @@ class LumaForCausalLM(PreTrainedModel):
         aux["trajectory_vitality_loss"] = vitality_loss.detach()
         return vitality_loss
 
+    def _compute_compression_dynamics_loss(self, aux: dict, ref: torch.Tensor) -> torch.Tensor:
+        if self.config.compression_dynamics_weight <= 0.0:
+            aux["compression_dynamics_loss"] = ref.new_zeros(())
+            return ref.new_zeros(())
+        block_drift_mean = aux.get("compression_block_drift_mean", ref.new_zeros(())).float()
+        block_var_mean = aux.get("compression_block_var_mean", ref.new_zeros(())).float()
+        compression_penalty = (
+            torch.relu(ref.new_tensor(self.config.compression_block_drift_floor) - block_drift_mean)
+            + torch.relu(ref.new_tensor(self.config.compression_block_var_floor) - block_var_mean)
+        )
+        compression_loss = self.config.compression_dynamics_weight * compression_penalty
+        aux["compression_block_drift_mean_internal"] = block_drift_mean.detach()
+        aux["compression_block_var_mean_internal"] = block_var_mean.detach()
+        aux["compression_dynamics_loss"] = compression_loss.detach()
+        return compression_loss
+
     def forward(self, input_ids: torch.Tensor, labels: Optional[torch.Tensor] = None, **kwargs):
         disable_ct_injection = kwargs.pop("disable_ct_injection", False)
         del kwargs
+        sigreg_step = self._runtime_train_step if labels is not None else self._runtime_train_step
+        self.model.world_latent_jepa.set_runtime_sigreg_step(sigreg_step)
+        if labels is not None:
+            self._runtime_train_step += 1
         hidden_states, aux = self.model(input_ids, disable_ct_injection=disable_ct_injection)
         self.last_aux = aux
         logits = self.lm_head(self.pre_lm_norm(hidden_states))
@@ -3512,27 +3594,31 @@ class LumaForCausalLM(PreTrainedModel):
             rollout_zone_loss = self._compute_rollout_activity_zone_loss(aux, lm_loss)
             routing_entropy_loss = self._compute_routing_entropy_regularization(aux, lm_loss)
             trajectory_vitality_loss = self._compute_trajectory_vitality_loss(aux, lm_loss)
-            loss = lm_loss
-            loss = (
-                loss
-                + aux["world_jepa_loss"]
-                + aux["self_jepa_loss"]
-                + self.config.self_rollout_weight * aux["self_rollout_loss"]
-                + self.config.exit_aux_weight * aux["exit_aux_loss"]
-                + rollout_zone_loss
-                + routing_entropy_loss
-                + trajectory_vitality_loss
-            )
+            compression_dynamics_loss = self._compute_compression_dynamics_loss(aux, lm_loss)
+            world_term = self.config.world_jepa_weight * aux["world_jepa_loss"]
+            if self.config.disable_self_jepa:
+                self_jepa_term = logits.new_zeros(())
+                self_rollout_term = logits.new_zeros(())
+            else:
+                self_jepa_term = self.config.self_jepa_weight * aux["self_jepa_loss"]
+                self_rollout_term = self.config.self_rollout_weight * aux["self_rollout_loss"]
+            exit_aux_term = self.config.exit_aux_weight * aux["exit_aux_loss"]
+            aux["world_jepa_loss_effective"] = world_term.detach()
+            aux["self_jepa_loss_effective"] = self_jepa_term.detach()
+            aux["self_rollout_loss_effective"] = self_rollout_term.detach()
+            aux["exit_aux_loss_effective"] = exit_aux_term.detach()
+            loss = lm_loss + world_term + self_jepa_term + self_rollout_term + exit_aux_term + rollout_zone_loss + routing_entropy_loss + trajectory_vitality_loss + compression_dynamics_loss
         return MoeCausalLMOutputWithPast(
             loss=loss,
             aux_loss=(
-                aux["world_jepa_loss"]
-                + aux["self_jepa_loss"]
-                + self.config.self_rollout_weight * aux["self_rollout_loss"]
+                self.config.world_jepa_weight * aux["world_jepa_loss"]
+                + (logits.new_zeros(()) if self.config.disable_self_jepa else self.config.self_jepa_weight * aux["self_jepa_loss"])
+                + (logits.new_zeros(()) if self.config.disable_self_jepa else self.config.self_rollout_weight * aux["self_rollout_loss"])
                 + self.config.exit_aux_weight * aux["exit_aux_loss"]
                 + aux.get("rollout_activity_zone_loss", logits.new_zeros(()))
                 + aux.get("routing_entropy_loss", logits.new_zeros(()))
                 + aux.get("trajectory_vitality_loss", logits.new_zeros(()))
+                + aux.get("compression_dynamics_loss", logits.new_zeros(()))
             ),
             logits=logits,
             past_key_values=None,
