@@ -175,6 +175,12 @@ def log_jsonl(path: Path, record: dict) -> None:
 # Training loop
 # ---------------------------------------------------------------------------
 
+def _infinite_loader(loader: DataLoader):
+    """无限循环 DataLoader，确保可以跑任意步数。"""
+    while True:
+        yield from loader
+
+
 def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
           loader: DataLoader, optimizer, scheduler, scaler,
           autocast_ctx, metrics_path: Path):
@@ -183,7 +189,7 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
     start_time = time.time()
     step = 0
 
-    for input_ids, labels in loader:
+    for input_ids, labels in _infinite_loader(loader):
         step += 1
         if step > args.iters:
             break
