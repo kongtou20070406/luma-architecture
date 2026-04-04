@@ -9,8 +9,11 @@ import argparse
 import copy
 import json
 import math
+import shutil
 import sys
+import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Iterable
 
@@ -33,12 +36,51 @@ AIME_ROWS_URL = "https://datasets-server.huggingface.co/first-rows?dataset=Maxwe
 MATH500_ROWS_URL = "https://datasets-server.huggingface.co/first-rows?dataset=ricdomolm%2FMATH-500&config=default&split=train"
 MBPP_ROWS_URL = "https://datasets-server.huggingface.co/first-rows?dataset=google-research-datasets%2Fmbpp&config=full&split=train"
 CHOLLET_ARC_TRAINING_LIST_URL = "https://api.github.com/repos/fchollet/ARC-AGI/contents/data/training"
+CHOLLET_ARC_ZIP_URL = "https://codeload.github.com/fchollet/ARC-AGI/zip/refs/heads/master"
+DEFAULT_ARC_AGI_LOCAL_DIR = ROOT / "artifacts" / "arc_agi_local" / "training"
 
 
 def _fetch_json(url: str) -> dict:
     req = urllib.request.Request(url, headers={"User-Agent": "luma-stage12-eval/1.0"})
     with urllib.request.urlopen(req) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _load_arc_tasks_from_local_dir(local_dir: Path) -> list[tuple[str, dict]]:
+    tasks: list[tuple[str, dict]] = []
+    if not local_dir.exists():
+        return tasks
+    for path in sorted(local_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        task_id = path.stem
+        tasks.append((task_id, payload))
+    return tasks
+
+
+def _cache_arc_agi_training_from_zip(local_dir: Path) -> bool:
+    local_dir.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(CHOLLET_ARC_ZIP_URL, headers={"User-Agent": "luma-stage12-eval/1.0"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            archive_bytes = resp.read()
+    except Exception:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="luma_arcagi_") as tmpdir:
+            zip_path = Path(tmpdir) / "arc_agi.zip"
+            zip_path.write_bytes(archive_bytes)
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                members = [name for name in zf.namelist() if "/data/training/" in name and name.endswith(".json")]
+                for member in members:
+                    dst = local_dir / Path(member).name
+                    with zf.open(member) as src, dst.open("wb") as out:
+                        shutil.copyfileobj(src, out)
+    except Exception:
+        return False
+    return any(local_dir.glob("*.json"))
 
 
 def ensure_mixed_fixture(path: Path, math_count: int, dialogue_count: int, mode: str) -> Path:
@@ -251,13 +293,53 @@ def _grid_to_text(grid: list[list[int]]) -> str:
     return "\n".join(" ".join(str(cell) for cell in row) for row in grid)
 
 
-def load_chollet_arc_agi_texts(max_samples: int) -> list[str]:
+def load_chollet_arc_agi_texts(max_samples: int, local_dir: Path | None = None, offline_only: bool = False) -> list[str]:
     """Luma uses Chollet ARC-AGI tasks as text-linearized abstraction puzzles for bucket-level intelligence probing.
     Luma 使用 Chollet ARC-AGI 任务的文本线性化版本，作为抽象推理桶进行智能水平探测。
     """
 
-    listing = _fetch_json(CHOLLET_ARC_TRAINING_LIST_URL)
     texts: list[str] = []
+    arc_local_dir = (local_dir or DEFAULT_ARC_AGI_LOCAL_DIR).expanduser()
+    tasks = _load_arc_tasks_from_local_dir(arc_local_dir)
+    if not tasks and not offline_only:
+        if _cache_arc_agi_training_from_zip(arc_local_dir):
+            tasks = _load_arc_tasks_from_local_dir(arc_local_dir)
+
+    if tasks:
+        for task_id, task in tasks:
+            train_pairs = task.get("train", []) or []
+            test_pairs = task.get("test", []) or []
+            if not train_pairs or not test_pairs:
+                continue
+            prompt_lines = [f"# benchmark: Chollet ARC-AGI", f"# task_id: {task_id}", "User: Infer the transformation from training pairs."]
+            for idx, pair in enumerate(train_pairs[:3], start=1):
+                inp = pair.get("input", [])
+                out = pair.get("output", [])
+                if not inp or not out:
+                    continue
+                prompt_lines.append(f"Train-{idx} input:\n{_grid_to_text(inp)}")
+                prompt_lines.append(f"Train-{idx} output:\n{_grid_to_text(out)}")
+            test = test_pairs[0]
+            test_in = test.get("input", [])
+            test_out = test.get("output", [])
+            if not test_in or not test_out:
+                continue
+            prompt_lines.append(f"Test input:\n{_grid_to_text(test_in)}")
+            prompt_lines.append("Assistant: Let's reason carefully about the abstract grid transformation.")
+            prompt_lines.append(f"Answer grid:\n{_grid_to_text(test_out)}")
+            texts.append("\n".join(prompt_lines))
+            if len(texts) >= max_samples:
+                break
+        return texts
+
+    if offline_only:
+        return texts
+
+    try:
+        listing = _fetch_json(CHOLLET_ARC_TRAINING_LIST_URL)
+    except Exception:
+        return texts
+
     for item in listing:
         download_url = str(item.get("download_url", "")).strip()
         task_id = str(item.get("name", "")).replace(".json", "").strip()
@@ -303,6 +385,8 @@ def build_sample_groups(
     enable_python_code: bool = False,
     python_code_source: str = "public_mbpp",
     enable_arc_agi: bool = False,
+    arc_agi_local_dir: Path | None = None,
+    arc_agi_offline_only: bool = False,
 ) -> dict[str, list[torch.Tensor]]:
     payload = json.loads(fixture_path.read_text(encoding="utf-8"))
     groups: dict[str, list[str]] = {
@@ -347,7 +431,11 @@ def build_sample_groups(
                 for idx in range(min(len(python_code), len(payload.get("dialogue", [])))):
                     mixed.append(f"{payload['dialogue'][idx]}\n\n{python_code[idx]}")
     if enable_arc_agi:
-        arc_agi = load_chollet_arc_agi_texts(max_samples)
+        arc_agi = load_chollet_arc_agi_texts(
+            max_samples,
+            local_dir=arc_agi_local_dir,
+            offline_only=arc_agi_offline_only,
+        )
         if not arc_agi:
             raise RuntimeError("ARC-AGI enabled but no Chollet ARC-AGI samples were loaded.")
         groups["arc_agi"] = arc_agi
@@ -370,14 +458,23 @@ def build_tiny_luma_config(
     enable_sigreg_world: bool,
     enable_sigreg_rollout: bool,
     enable_sigreg_delta: bool,
+    sigreg_world_source: str,
+    sigreg_world_fp32_only: bool,
+    sigreg_world_warmup_steps: int,
     world_sigreg_weight: float,
     world_sigreg_num_slices: int,
     world_sigreg_t_min: float,
     world_sigreg_t_max: float,
     world_sigreg_num_points: int,
     world_sigreg_lambda: float,
+    world_delta_weight: float,
     sigreg_rollout_weight: float,
     sigreg_delta_weight: float,
+    world_jepa_weight: float,
+    self_jepa_weight: float,
+    self_rollout_weight: float,
+    exit_aux_weight: float,
+    disable_self_jepa: bool,
     enable_self_check_ring: bool,
     self_check_k: int,
     meta_dim: int,
@@ -452,6 +549,9 @@ def build_tiny_luma_config(
     trajectory_vitality_weight: float,
     trajectory_c_t_drift_floor: float,
     trajectory_world_drift_floor: float,
+    compression_dynamics_weight: float,
+    compression_block_drift_floor: float,
+    compression_block_var_floor: float,
 ) -> LumaConfig:
     reason_loops = reason_loops or max(4, rollout_steps * 2)
     base_intermediate = 256
@@ -480,14 +580,23 @@ def build_tiny_luma_config(
         enable_sigreg_world=enable_sigreg_world,
         enable_sigreg_rollout=enable_sigreg_rollout,
         enable_sigreg_delta=enable_sigreg_delta,
+        sigreg_world_source=sigreg_world_source,
+        sigreg_world_fp32_only=sigreg_world_fp32_only,
+        sigreg_world_warmup_steps=sigreg_world_warmup_steps,
         world_sigreg_weight=world_sigreg_weight,
         world_sigreg_num_slices=world_sigreg_num_slices,
         world_sigreg_t_min=world_sigreg_t_min,
         world_sigreg_t_max=world_sigreg_t_max,
         world_sigreg_num_points=world_sigreg_num_points,
         world_sigreg_lambda=world_sigreg_lambda,
+        world_delta_weight=world_delta_weight,
         sigreg_rollout_weight=sigreg_rollout_weight,
         sigreg_delta_weight=sigreg_delta_weight,
+        world_jepa_weight=world_jepa_weight,
+        self_jepa_weight=self_jepa_weight,
+        self_rollout_weight=self_rollout_weight,
+        exit_aux_weight=exit_aux_weight,
+        disable_self_jepa=disable_self_jepa,
         sigreg_num_slices=world_sigreg_num_slices,
         sigreg_t_min=world_sigreg_t_min,
         sigreg_t_max=world_sigreg_t_max,
@@ -563,6 +672,9 @@ def build_tiny_luma_config(
         trajectory_vitality_weight=trajectory_vitality_weight,
         trajectory_c_t_drift_floor=trajectory_c_t_drift_floor,
         trajectory_world_drift_floor=trajectory_world_drift_floor,
+        compression_dynamics_weight=compression_dynamics_weight,
+        compression_block_drift_floor=compression_block_drift_floor,
+        compression_block_var_floor=compression_block_var_floor,
         mamba_d_state=32,
         mamba_expand=2,
         mamba_headdim=32,
@@ -641,6 +753,8 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     exit_clamped_ratios = []
     bernoulli_invalid_prevented = []
     nan_to_num_triggers = []
+    sigreg_source_means = []
+    sigreg_source_stds = []
     modulation_stats: dict[str, list[float]] = {}
     r_t_switches = []
     with torch.no_grad():
@@ -734,6 +848,10 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
                 bernoulli_invalid_prevented.append(torch.stack(aux_on["bernoulli_invalid_prevented_history"]).float().sum())
             if aux_on.get("nan_to_num_trigger_history"):
                 nan_to_num_triggers.append(torch.stack(aux_on["nan_to_num_trigger_history"]).float().sum())
+            if "world_sigreg_source_mean" in aux_on:
+                sigreg_source_means.append(aux_on["world_sigreg_source_mean"].float())
+            if "world_sigreg_source_std" in aux_on:
+                sigreg_source_stds.append(aux_on["world_sigreg_source_std"].float())
             if aux_on.get("dynamics_modulation_summary"):
                 for key, value in aux_on["dynamics_modulation_summary"].items():
                     tensor = value if isinstance(value, torch.Tensor) else torch.tensor(float(value))
@@ -779,6 +897,8 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     exit_clamped_ratio = torch.stack(exit_clamped_ratios).mean().item() if exit_clamped_ratios else 0.0
     bernoulli_invalid_count = torch.stack(bernoulli_invalid_prevented).sum().item() if bernoulli_invalid_prevented else 0.0
     nan_to_num_count = torch.stack(nan_to_num_triggers).sum().item() if nan_to_num_triggers else 0.0
+    sigreg_source_mean = torch.stack(sigreg_source_means).mean().item() if sigreg_source_means else 0.0
+    sigreg_source_std = torch.stack(sigreg_source_stds).mean().item() if sigreg_source_stds else 0.0
 
     def _corr(pairs: list[tuple[torch.Tensor, torch.Tensor]]) -> float:
         if len(pairs) < 2:
@@ -827,6 +947,8 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     metric(metrics_path, "stage1_progress_vs_exit_corr", True, progress_vs_exit_corr, "Correlation between progress_next and exit score / progress_next 与 exit 分数相关性")
     metric(metrics_path, "stage1_exit_invalid_count", exit_invalid_count <= 0.0, exit_invalid_count, "Invalid exit-score count should stay zero / exit 非有限计数应为零")
     metric(metrics_path, "stage1_nan_to_num_trigger_count", True, nan_to_num_count, "nan_to_num trigger count / nan_to_num 触发次数")
+    metric(metrics_path, "stage1_sigreg_source_mean", True, sigreg_source_mean, "Mean SIGReg source activation / SIGReg 输入均值")
+    metric(metrics_path, "stage1_sigreg_source_std", True, sigreg_source_std, "Mean SIGReg source std / SIGReg 输入标准差")
 
     return {
         "mean_kl": mean_kl,
@@ -865,6 +987,8 @@ def stage1_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         "exit_score_postfix_clamped_ratio": exit_clamped_ratio,
         "bernoulli_invalid_prevented_count": bernoulli_invalid_count,
         "nan_to_num_trigger_count": nan_to_num_count,
+        "sigreg_source_mean": sigreg_source_mean,
+        "sigreg_source_std": sigreg_source_std,
         "modulation_summary": modulation_summary,
     }
 
@@ -895,10 +1019,35 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     rollout_zone_losses = []
     routing_entropy_losses = []
     trajectory_vitality_losses = []
+    compression_dynamics_losses = []
+    compression_block_drifts = []
+    compression_block_vars = []
     sigreg_world_losses = []
     sigreg_rollout_losses = []
     sigreg_delta_losses = []
+    sigreg_world_steps = []
+    sigreg_source_means = []
+    sigreg_source_stds = []
+    sigreg_world_steps = []
+    sigreg_source_means = []
+    sigreg_source_stds = []
+    grad_norm_totals = []
+    grad_norm_world_encoders = []
     aborted_on_nonfinite = False
+    first_nonfinite_step: int | None = None
+
+    def _grad_norm(params) -> float:
+        sq_sum = 0.0
+        has_grad = False
+        for param in params:
+            if param.grad is None:
+                continue
+            grad = param.grad.detach().float()
+            sq_sum += float(grad.pow(2).sum().item())
+            has_grad = True
+        if not has_grad:
+            return 0.0
+        return math.sqrt(max(0.0, sq_sum))
 
     for step in range(steps):
         batch = samples[step % len(samples)].unsqueeze(0).to(device)
@@ -912,14 +1061,29 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         rollout_zone_tensor = aux.get("rollout_activity_zone_loss", torch.zeros_like(loss.detach())).detach()
         routing_entropy_tensor = aux.get("routing_entropy_loss", torch.zeros_like(loss.detach())).detach()
         trajectory_vitality_tensor = aux.get("trajectory_vitality_loss", torch.zeros_like(loss.detach())).detach()
+        compression_dynamics_tensor = aux.get("compression_dynamics_loss", torch.zeros_like(loss.detach())).detach()
+        compression_block_drift_tensor = aux.get(
+            "compression_block_drift_mean_internal",
+            aux.get("compression_block_drift_mean", torch.zeros_like(loss.detach())),
+        ).detach()
+        compression_block_var_tensor = aux.get(
+            "compression_block_var_mean_internal",
+            aux.get("compression_block_var_mean", torch.zeros_like(loss.detach())),
+        ).detach()
         sigreg_world_tensor = aux.get("world_sigreg_loss", torch.zeros_like(loss.detach())).detach()
         sigreg_rollout_tensor = aux.get("sigreg_rollout_loss", torch.zeros_like(loss.detach())).detach()
         sigreg_delta_tensor = aux.get("sigreg_delta_loss", torch.zeros_like(loss.detach())).detach()
+        sigreg_step_tensor = aux.get("world_sigreg_loss_step", torch.full_like(loss.detach(), -1.0)).detach()
+        sigreg_source_mean_tensor = aux.get("world_sigreg_source_mean", torch.zeros_like(loss.detach())).detach()
+        sigreg_source_std_tensor = aux.get("world_sigreg_source_std", torch.zeros_like(loss.detach())).detach()
         finite_ok = bool(
             torch.isfinite(loss.detach()).item()
             and torch.isfinite(self_tensor).item()
             and torch.isfinite(rollout_tensor).item()
             and torch.isfinite(target_delta).all().item()
+            and torch.isfinite(compression_dynamics_tensor).item()
+            and torch.isfinite(compression_block_drift_tensor).item()
+            and torch.isfinite(compression_block_var_tensor).item()
         )
         if not finite_ok:
             losses.append(float("nan"))
@@ -931,12 +1095,30 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
             rollout_zone_losses.append(float("nan"))
             routing_entropy_losses.append(float("nan"))
             trajectory_vitality_losses.append(float("nan"))
+            compression_dynamics_losses.append(float("nan"))
+            compression_block_drifts.append(float("nan"))
+            compression_block_vars.append(float("nan"))
             sigreg_world_losses.append(float("nan"))
             sigreg_rollout_losses.append(float("nan"))
             sigreg_delta_losses.append(float("nan"))
+            sigreg_world_steps.append(float("nan"))
+            sigreg_source_means.append(float("nan"))
+            sigreg_source_stds.append(float("nan"))
+            grad_norm_totals.append(float("nan"))
+            grad_norm_world_encoders.append(float("nan"))
             aborted_on_nonfinite = True
+            if first_nonfinite_step is None:
+                first_nonfinite_step = step
             break
         loss.backward()
+        grad_norm_totals.append(_grad_norm(model.parameters()))
+        world_module = model.model.world_latent_jepa
+        if hasattr(world_module, "online_encoder"):
+            grad_norm_world_encoders.append(_grad_norm(world_module.online_encoder.parameters()))
+        elif hasattr(world_module, "online_observer"):
+            grad_norm_world_encoders.append(_grad_norm([world_module.online_observer.weight]))
+        else:
+            grad_norm_world_encoders.append(0.0)
         optimizer.step()
         model.model.update_world_jepa_ema()
 
@@ -950,9 +1132,15 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         rollout_zone_losses.append(float(rollout_zone_tensor))
         routing_entropy_losses.append(float(routing_entropy_tensor))
         trajectory_vitality_losses.append(float(trajectory_vitality_tensor))
+        compression_dynamics_losses.append(float(compression_dynamics_tensor))
+        compression_block_drifts.append(float(compression_block_drift_tensor))
+        compression_block_vars.append(float(compression_block_var_tensor))
         sigreg_world_losses.append(float(sigreg_world_tensor))
         sigreg_rollout_losses.append(float(sigreg_rollout_tensor))
         sigreg_delta_losses.append(float(sigreg_delta_tensor))
+        sigreg_world_steps.append(float(sigreg_step_tensor))
+        sigreg_source_means.append(float(sigreg_source_mean_tensor))
+        sigreg_source_stds.append(float(sigreg_source_std_tensor))
 
     head = sum(self_losses[: max(1, min(2, len(self_losses)))]) / max(1, min(2, len(self_losses)))
     tail = sum(self_losses[-max(1, min(2, len(self_losses))):]) / max(1, min(2, len(self_losses)))
@@ -973,18 +1161,43 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
     finite_zone = [value for value in rollout_zone_losses if math.isfinite(value)]
     finite_entropy = [value for value in routing_entropy_losses if math.isfinite(value)]
     finite_vitality = [value for value in trajectory_vitality_losses if math.isfinite(value)]
+    finite_compression = [value for value in compression_dynamics_losses if math.isfinite(value)]
+    finite_compression_drift = [value for value in compression_block_drifts if math.isfinite(value)]
+    finite_compression_var = [value for value in compression_block_vars if math.isfinite(value)]
     zone_tail = tail_float(finite_zone)
     entropy_tail = tail_float(finite_entropy)
     vitality_tail = tail_float(finite_vitality)
+    compression_tail = tail_float(finite_compression)
+    compression_drift_tail = tail_float(finite_compression_drift)
+    compression_var_tail = tail_float(finite_compression_var)
     world_sigreg_tail = tail_float([value for value in sigreg_world_losses if math.isfinite(value)])
     rollout_sigreg_tail = tail_float([value for value in sigreg_rollout_losses if math.isfinite(value)])
     delta_sigreg_tail = tail_float([value for value in sigreg_delta_losses if math.isfinite(value)])
+    finite_world_sigreg = [value for value in sigreg_world_losses if math.isfinite(value)]
+    world_sigreg_head = tail_float(finite_world_sigreg[: max(1, min(2, len(finite_world_sigreg)))]) if finite_world_sigreg else 0.0
+    world_sigreg_max = max(finite_world_sigreg) if finite_world_sigreg else 0.0
+    sigreg_source_mean = tail_float([value for value in sigreg_source_means if math.isfinite(value)])
+    sigreg_source_std = tail_float([value for value in sigreg_source_stds if math.isfinite(value)])
+    grad_norm_total_tail = tail_float([value for value in grad_norm_totals if math.isfinite(value)])
+    grad_norm_world_encoder_tail = tail_float([value for value in grad_norm_world_encoders if math.isfinite(value)])
+    valid_sigreg_steps = [int(value) for value in sigreg_world_steps if math.isfinite(value) and value >= 0]
+    world_sigreg_loss_step = min(valid_sigreg_steps) if valid_sigreg_steps else -1
     metric(metrics_path, "stage2_rollout_zone_loss_tail", True, zone_tail, "Tail rollout zone loss / rollout 活性区间损失尾值")
     metric(metrics_path, "stage2_routing_entropy_loss_tail", True, entropy_tail, "Tail routing entropy loss / routing 熵损失尾值")
     metric(metrics_path, "stage2_trajectory_vitality_loss_tail", True, vitality_tail, "Tail trajectory vitality loss / 轨迹活性损失尾值")
+    metric(metrics_path, "stage2_compression_dynamics_loss_tail", True, compression_tail, "Tail compression dynamics loss / 压缩区动力学约束损失尾值")
+    metric(metrics_path, "stage2_compression_block_drift_tail", True, compression_drift_tail, "Tail compression block drift / 压缩区块漂移尾值")
+    metric(metrics_path, "stage2_compression_block_var_tail", True, compression_var_tail, "Tail compression block variance / 压缩区块方差尾值")
     metric(metrics_path, "stage2_world_sigreg_loss_tail", True, world_sigreg_tail, "Tail world SIGReg loss / world SIGReg 损失尾值")
+    metric(metrics_path, "stage2_world_sigreg_loss_head", True, world_sigreg_head, "Head world SIGReg loss / world SIGReg 损失头值")
+    metric(metrics_path, "stage2_world_sigreg_loss_max", True, world_sigreg_max, "Max world SIGReg loss / world SIGReg 损失最大值")
     metric(metrics_path, "stage2_rollout_sigreg_loss_tail", True, rollout_sigreg_tail, "Tail rollout SIGReg loss / rollout SIGReg 损失尾值")
     metric(metrics_path, "stage2_delta_sigreg_loss_tail", True, delta_sigreg_tail, "Tail delta SIGReg loss / delta SIGReg 损失尾值")
+    metric(metrics_path, "stage2_sigreg_source_mean", True, sigreg_source_mean, "Tail SIGReg source mean / SIGReg 输入均值尾值")
+    metric(metrics_path, "stage2_sigreg_source_std", True, sigreg_source_std, "Tail SIGReg source std / SIGReg 输入标准差尾值")
+    metric(metrics_path, "stage2_grad_norm_total_tail", True, grad_norm_total_tail, "Tail total grad norm / 总梯度范数尾值")
+    metric(metrics_path, "stage2_grad_norm_world_encoder_tail", True, grad_norm_world_encoder_tail, "Tail world encoder grad norm / world encoder 梯度范数尾值")
+    metric(metrics_path, "stage2_first_nonfinite_step", first_nonfinite_step is None, -1.0 if first_nonfinite_step is None else float(first_nonfinite_step), "First non-finite step index / 首次非有限值 step")
 
     return {
         "losses": losses,
@@ -1000,9 +1213,20 @@ def stage2_validate(model: LumaForCausalLM, samples: list[torch.Tensor], device:
         "rollout_zone_loss_tail": zone_tail,
         "routing_entropy_loss_tail": entropy_tail,
         "trajectory_vitality_loss_tail": vitality_tail,
+        "compression_dynamics_loss_tail": compression_tail,
+        "compression_block_drift_tail": compression_drift_tail,
+        "compression_block_var_tail": compression_var_tail,
         "world_sigreg_loss_tail": world_sigreg_tail,
+        "world_sigreg_loss_head": world_sigreg_head,
+        "world_sigreg_loss_max": world_sigreg_max,
+        "world_sigreg_loss_step": world_sigreg_loss_step,
         "rollout_sigreg_loss_tail": rollout_sigreg_tail,
         "delta_sigreg_loss_tail": delta_sigreg_tail,
+        "world_sigreg_source_mean": sigreg_source_mean,
+        "world_sigreg_source_std": sigreg_source_std,
+        "grad_norm_total_tail": grad_norm_total_tail,
+        "grad_norm_world_encoder_tail": grad_norm_world_encoder_tail,
+        "first_nonfinite_step": first_nonfinite_step,
         "nonfinite_abort": aborted_on_nonfinite,
     }
 
@@ -1050,6 +1274,12 @@ def bucket_probe_from_mixed_model(
     rollout_zone_losses = []
     routing_entropy_losses = []
     trajectory_vitality_losses = []
+    sigreg_world_losses = []
+    sigreg_rollout_losses = []
+    sigreg_delta_losses = []
+    sigreg_world_steps = []
+    sigreg_source_means = []
+    sigreg_source_stds = []
     surprises = []
     state_variances = []
     ct_drifts = []
@@ -1083,6 +1313,9 @@ def bucket_probe_from_mixed_model(
             sigreg_world_losses.append(float(aux.get("world_sigreg_loss", torch.zeros((), device=device)).detach()))
             sigreg_rollout_losses.append(float(aux.get("sigreg_rollout_loss", torch.zeros((), device=device)).detach()))
             sigreg_delta_losses.append(float(aux.get("sigreg_delta_loss", torch.zeros((), device=device)).detach()))
+            sigreg_world_steps.append(float(aux.get("world_sigreg_loss_step", torch.full((1,), -1.0, device=device)).detach().mean()))
+            sigreg_source_means.append(float(aux.get("world_sigreg_source_mean", torch.zeros((), device=device)).detach()))
+            sigreg_source_stds.append(float(aux.get("world_sigreg_source_std", torch.zeros((), device=device)).detach()))
             if aux.get("world_surprise_history"):
                 surprises.append(float(torch.stack(aux["world_surprise_history"]).float().mean().detach()))
             if aux.get("uncertainty_history"):
@@ -1162,8 +1395,13 @@ def bucket_probe_from_mixed_model(
         "routing_entropy_loss_tail": tail_float([x for x in routing_entropy_losses if math.isfinite(x)]),
         "trajectory_vitality_loss_tail": tail_float([x for x in trajectory_vitality_losses if math.isfinite(x)]),
         "world_sigreg_loss_tail": tail_float([x for x in sigreg_world_losses if math.isfinite(x)]),
+        "world_sigreg_loss_head": tail_float([x for x in sigreg_world_losses[: max(1, min(2, len(sigreg_world_losses)))] if math.isfinite(x)]),
+        "world_sigreg_loss_max": max([x for x in sigreg_world_losses if math.isfinite(x)], default=0.0),
+        "world_sigreg_loss_step": min([int(x) for x in sigreg_world_steps if math.isfinite(x) and x >= 0], default=-1),
         "rollout_sigreg_loss_tail": tail_float([x for x in sigreg_rollout_losses if math.isfinite(x)]),
         "delta_sigreg_loss_tail": tail_float([x for x in sigreg_delta_losses if math.isfinite(x)]),
+        "world_sigreg_source_mean": tail_float([x for x in sigreg_source_means if math.isfinite(x)]),
+        "world_sigreg_source_std": tail_float([x for x in sigreg_source_stds if math.isfinite(x)]),
         "world_surprise_mean": mean_surprise,
         "intermediate_state_variance": mean_state_variance,
         "c_t_drift_mean": mean_ct_drift,
@@ -1190,6 +1428,11 @@ def bucket_probe_from_mixed_model(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Luma stage1/stage2 validation with a tiny public text fixture.")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--force-fp32",
+        action="store_true",
+        help="Force model parameters and activations to float32 on CUDA for strict numeric stability checks.",
+    )
     parser.add_argument("--seq-len", type=int, default=48)
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--stage2-steps", type=int, default=8)
@@ -1218,14 +1461,23 @@ def main() -> None:
     parser.add_argument("--enable-sigreg-world", action="store_true")
     parser.add_argument("--enable-sigreg-rollout", action="store_true")
     parser.add_argument("--enable-sigreg-delta", action="store_true")
+    parser.add_argument("--sigreg-world-source", choices=["sigreg_on_online", "sigreg_on_encoder_latent"], default="sigreg_on_online")
+    parser.add_argument("--sigreg-world-fp32-only", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--sigreg-world-warmup-steps", type=int, default=0)
     parser.add_argument("--world-sigreg-weight", type=float, default=0.05)
     parser.add_argument("--world-sigreg-num-slices", type=int, default=128)
     parser.add_argument("--world-sigreg-t-min", type=float, default=0.2)
     parser.add_argument("--world-sigreg-t-max", type=float, default=4.0)
     parser.add_argument("--world-sigreg-num-points", type=int, default=17)
     parser.add_argument("--world-sigreg-lambda", type=float, default=1.0)
+    parser.add_argument("--world-delta-weight", type=float, default=0.10)
     parser.add_argument("--sigreg-rollout-weight", type=float, default=0.05)
     parser.add_argument("--sigreg-delta-weight", type=float, default=0.05)
+    parser.add_argument("--world-jepa-weight", type=float, default=1.0)
+    parser.add_argument("--self-jepa-weight", type=float, default=1.0)
+    parser.add_argument("--self-rollout-weight", type=float, default=0.5)
+    parser.add_argument("--exit-aux-weight", type=float, default=0.01)
+    parser.add_argument("--disable-self-jepa", action="store_true")
     parser.add_argument("--enable-self-check-ring", action="store_true")
     parser.add_argument("--self-check-k", type=int, default=1)
     parser.add_argument("--meta-dim", type=int, default=64)
@@ -1309,6 +1561,9 @@ def main() -> None:
     parser.add_argument("--trajectory-vitality-weight", type=float, default=0.0)
     parser.add_argument("--trajectory-c-t-drift-floor", type=float, default=0.02)
     parser.add_argument("--trajectory-world-drift-floor", type=float, default=0.01)
+    parser.add_argument("--compression-dynamics-weight", type=float, default=0.0)
+    parser.add_argument("--compression-block-drift-floor", type=float, default=0.01)
+    parser.add_argument("--compression-block-var-floor", type=float, default=0.001)
     parser.add_argument("--math-probe-rollout-steps", type=int, default=0)
     parser.add_argument("--math-probe-reason-loops", type=int, default=0)
     parser.add_argument("--math-probe-score-threshold", type=float, default=0.0)
@@ -1317,6 +1572,8 @@ def main() -> None:
     parser.add_argument("--enable-python-code", action="store_true")
     parser.add_argument("--python-code-source", choices=["public_mbpp", "local_repo"], default="public_mbpp")
     parser.add_argument("--enable-arc-agi", action="store_true")
+    parser.add_argument("--arc-agi-local-dir", type=str, default=str(DEFAULT_ARC_AGI_LOCAL_DIR))
+    parser.add_argument("--arc-agi-offline-only", action="store_true")
     parser.add_argument("--persona-dir", type=str, default=str(Path("/home/kt/ai/luma_dataset")))
     args = parser.parse_args()
 
@@ -1354,6 +1611,8 @@ def main() -> None:
         enable_python_code=args.enable_python_code,
         python_code_source=args.python_code_source,
         enable_arc_agi=args.enable_arc_agi,
+        arc_agi_local_dir=Path(args.arc_agi_local_dir),
+        arc_agi_offline_only=args.arc_agi_offline_only,
     )
     mixed_samples = sample_groups["mixed"]
     config = build_tiny_luma_config(
@@ -1366,14 +1625,23 @@ def main() -> None:
         enable_sigreg_world=args.enable_sigreg_world,
         enable_sigreg_rollout=args.enable_sigreg_rollout,
         enable_sigreg_delta=args.enable_sigreg_delta,
+        sigreg_world_source=args.sigreg_world_source,
+        sigreg_world_fp32_only=args.sigreg_world_fp32_only,
+        sigreg_world_warmup_steps=args.sigreg_world_warmup_steps,
         world_sigreg_weight=args.world_sigreg_weight,
         world_sigreg_num_slices=args.world_sigreg_num_slices,
         world_sigreg_t_min=args.world_sigreg_t_min,
         world_sigreg_t_max=args.world_sigreg_t_max,
         world_sigreg_num_points=args.world_sigreg_num_points,
         world_sigreg_lambda=args.world_sigreg_lambda,
+        world_delta_weight=args.world_delta_weight,
         sigreg_rollout_weight=args.sigreg_rollout_weight,
         sigreg_delta_weight=args.sigreg_delta_weight,
+        world_jepa_weight=args.world_jepa_weight,
+        self_jepa_weight=args.self_jepa_weight,
+        self_rollout_weight=args.self_rollout_weight,
+        exit_aux_weight=args.exit_aux_weight,
+        disable_self_jepa=args.disable_self_jepa,
         enable_self_check_ring=args.enable_self_check_ring,
         self_check_k=args.self_check_k,
         meta_dim=args.meta_dim,
@@ -1448,8 +1716,14 @@ def main() -> None:
         trajectory_vitality_weight=args.trajectory_vitality_weight,
         trajectory_c_t_drift_floor=args.trajectory_c_t_drift_floor,
         trajectory_world_drift_floor=args.trajectory_world_drift_floor,
+        compression_dynamics_weight=args.compression_dynamics_weight,
+        compression_block_drift_floor=args.compression_block_drift_floor,
+        compression_block_var_floor=args.compression_block_var_floor,
     )
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+    if args.force_fp32:
+        dtype = torch.float32
+    else:
+        dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     model = LumaForCausalLM(config).to(device=device, dtype=dtype)
     loaded_checkpoint_meta = None
     if args.load_checkpoint:
@@ -1515,14 +1789,23 @@ def main() -> None:
         "enable_sigreg_world": config.enable_sigreg_world,
         "enable_sigreg_rollout": config.enable_sigreg_rollout,
         "enable_sigreg_delta": config.enable_sigreg_delta,
+        "sigreg_world_source": config.sigreg_world_source,
+        "sigreg_world_fp32_only": config.sigreg_world_fp32_only,
+        "sigreg_world_warmup_steps": config.sigreg_world_warmup_steps,
         "world_sigreg_weight": config.world_sigreg_weight,
         "world_sigreg_num_slices": config.world_sigreg_num_slices,
         "world_sigreg_t_min": config.world_sigreg_t_min,
         "world_sigreg_t_max": config.world_sigreg_t_max,
         "world_sigreg_num_points": config.world_sigreg_num_points,
         "world_sigreg_lambda": config.world_sigreg_lambda,
+        "world_delta_weight": config.world_delta_weight,
         "sigreg_rollout_weight": config.sigreg_rollout_weight,
         "sigreg_delta_weight": config.sigreg_delta_weight,
+        "world_jepa_weight": config.world_jepa_weight,
+        "self_jepa_weight": config.self_jepa_weight,
+        "self_rollout_weight": config.self_rollout_weight,
+        "exit_aux_weight": config.exit_aux_weight,
+        "disable_self_jepa": config.disable_self_jepa,
         "enable_self_check_ring": config.enable_self_check_ring,
         "self_check_k": config.self_check_k,
         "meta_dim": config.meta_dim,
@@ -1592,6 +1875,9 @@ def main() -> None:
         "trajectory_vitality_weight": args.trajectory_vitality_weight,
         "trajectory_c_t_drift_floor": args.trajectory_c_t_drift_floor,
         "trajectory_world_drift_floor": args.trajectory_world_drift_floor,
+        "compression_dynamics_weight": args.compression_dynamics_weight,
+        "compression_block_drift_floor": args.compression_block_drift_floor,
+        "compression_block_var_floor": args.compression_block_var_floor,
         "enable_compression_mhc": args.enable_compression_mhc,
         "enable_reasoning_state_ring": args.enable_reasoning_state_ring,
         "r_t_dim": args.r_t_dim,
@@ -1605,7 +1891,11 @@ def main() -> None:
         "enable_python_code": args.enable_python_code,
         "python_code_source": args.python_code_source,
         "enable_arc_agi": args.enable_arc_agi,
+        "arc_agi_local_dir": args.arc_agi_local_dir,
+        "arc_agi_offline_only": args.arc_agi_offline_only,
         "persona_dir": args.persona_dir,
+        "force_fp32": args.force_fp32,
+        "model_dtype": str(dtype),
         "num_samples": len(mixed_samples),
         "stage1": stage1,
         "stage2": stage2,
@@ -1628,14 +1918,23 @@ def main() -> None:
                     "enable_sigreg_world": config.enable_sigreg_world,
                     "enable_sigreg_rollout": config.enable_sigreg_rollout,
                     "enable_sigreg_delta": config.enable_sigreg_delta,
+                    "sigreg_world_source": config.sigreg_world_source,
+                    "sigreg_world_fp32_only": config.sigreg_world_fp32_only,
+                    "sigreg_world_warmup_steps": config.sigreg_world_warmup_steps,
                     "world_sigreg_weight": config.world_sigreg_weight,
                     "world_sigreg_num_slices": config.world_sigreg_num_slices,
                     "world_sigreg_t_min": config.world_sigreg_t_min,
                     "world_sigreg_t_max": config.world_sigreg_t_max,
                     "world_sigreg_num_points": config.world_sigreg_num_points,
                     "world_sigreg_lambda": config.world_sigreg_lambda,
+                    "world_delta_weight": config.world_delta_weight,
                     "sigreg_rollout_weight": config.sigreg_rollout_weight,
                     "sigreg_delta_weight": config.sigreg_delta_weight,
+                    "world_jepa_weight": config.world_jepa_weight,
+                    "self_jepa_weight": config.self_jepa_weight,
+                    "self_rollout_weight": config.self_rollout_weight,
+                    "exit_aux_weight": config.exit_aux_weight,
+                    "disable_self_jepa": config.disable_self_jepa,
                     "reason_loops": config.reason_active_loops,
                     "reason_shared_depth": config.reason_shared_depth,
                     "rollout_steps": config.self_rollout_steps,
@@ -1644,6 +1943,8 @@ def main() -> None:
                     "dynamics_experiment": config.dynamics_experiment,
                     "self_loop_awareness_mode": config.self_loop_awareness_mode,
                     "enable_progress_exit_readout": config.enable_progress_exit_readout,
+                    "force_fp32": args.force_fp32,
+                    "model_dtype": str(dtype),
                     "routing_local_floor": config.routing_local_floor,
                     "routing_world_summary_cap": config.routing_world_summary_cap,
                     "routing_tier_entropy_floor": config.routing_tier_entropy_floor,

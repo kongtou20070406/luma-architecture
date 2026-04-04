@@ -1,0 +1,333 @@
+{
+  "phase": 6,
+  "total_steps": 1501,
+  "final_dod_rank": 3,
+  "final_energy_mode1_pct": 84.48,
+  "final_dmd_spectral_radius": 0.324973,
+  "dod_rank_trajectory": [
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3,
+    3
+  ],
+  "energy_mode1_pct_trajectory": [
+    91.0,
+    76.1,
+    56.2,
+    83.4,
+    84.0,
+    59.7,
+    92.4,
+    84.5,
+    84.5
+  ],
+  "dmd_spectral_radius_trajectory": [
+    0.8775,
+    0.6599,
+    0.5652,
+    0.5895,
+    0.5326,
+    0.3613,
+    0.0169,
+    0.325,
+    0.325
+  ],
+  "ct_dmd_spectral_radius_trajectory": [
+    0.9645,
+    0.9889,
+    0.9658,
+    0.9459,
+    0.9876,
+    0.9775,
+    0.9765,
+    0.9441,
+    0.9441
+  ],
+  "verdict": "FAIL: dod_rank=3 < target 5, mode1=84.5%",
+  "full_snapshots": [
+    {
+      "window_steps": 200,
+      "first_step": 1,
+      "last_step": 200,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          91.04,
+          6.43,
+          2.52
+        ],
+        "sv_top5": [
+          4.1895,
+          1.1137,
+          0.6973
+        ],
+        "energy_mode1_pct": 91.04,
+        "total_energy": 19.278215
+      },
+      "dmd": {
+        "spectral_radius": 0.877533,
+        "stable": true,
+        "eig_mags_top5": [
+          0.8775,
+          0.5366
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 91.04,
+      "dmd_spectral_radius": 0.877533
+    },
+    {
+      "window_steps": 200,
+      "first_step": 201,
+      "last_step": 400,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          76.1,
+          18.72,
+          5.18
+        ],
+        "sv_top5": [
+          0.8154,
+          0.4044,
+          0.2128
+        ],
+        "energy_mode1_pct": 76.1,
+        "total_energy": 0.873601
+      },
+      "dmd": {
+        "spectral_radius": 0.659908,
+        "stable": true,
+        "eig_mags_top5": [
+          0.6599,
+          0.0183
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 76.1,
+      "dmd_spectral_radius": 0.659908
+    },
+    {
+      "window_steps": 200,
+      "first_step": 401,
+      "last_step": 600,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          56.17,
+          36.69,
+          7.14
+        ],
+        "sv_top5": [
+          0.4788,
+          0.387,
+          0.1707
+        ],
+        "energy_mode1_pct": 56.17,
+        "total_energy": 0.408122
+      },
+      "dmd": {
+        "spectral_radius": 0.565199,
+        "stable": true,
+        "eig_mags_top5": [
+          0.5652,
+          0.0258
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 56.17,
+      "dmd_spectral_radius": 0.565199
+    },
+    {
+      "window_steps": 200,
+      "first_step": 601,
+      "last_step": 800,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          83.38,
+          16.32,
+          0.31
+        ],
+        "sv_top5": [
+          0.8877,
+          0.3927,
+          0.0538
+        ],
+        "energy_mode1_pct": 83.38,
+        "total_energy": 0.945206
+      },
+      "dmd": {
+        "spectral_radius": 0.589504,
+        "stable": true,
+        "eig_mags_top5": [
+          0.5895,
+          0.0074
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 83.38,
+      "dmd_spectral_radius": 0.589504
+    },
+    {
+      "window_steps": 200,
+      "first_step": 801,
+      "last_step": 1000,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          83.97,
+          15.88,
+          0.15
+        ],
+        "sv_top5": [
+          0.4055,
+          0.1763,
+          0.0173
+        ],
+        "energy_mode1_pct": 83.97,
+        "total_energy": 0.195811
+      },
+      "dmd": {
+        "spectral_radius": 0.532641,
+        "stable": true,
+        "eig_mags_top5": [
+          0.5326,
+          0.1276
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 83.97,
+      "dmd_spectral_radius": 0.532641
+    },
+    {
+      "window_steps": 200,
+      "first_step": 1001,
+      "last_step": 1200,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          59.74,
+          25.12,
+          15.14
+        ],
+        "sv_top5": [
+          0.3408,
+          0.221,
+          0.1716
+        ],
+        "energy_mode1_pct": 59.74,
+        "total_energy": 0.194421
+      },
+      "dmd": {
+        "spectral_radius": 0.361316,
+        "stable": true,
+        "eig_mags_top5": [
+          0.3613,
+          0.048
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 59.74,
+      "dmd_spectral_radius": 0.361316
+    },
+    {
+      "window_steps": 200,
+      "first_step": 1201,
+      "last_step": 1400,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          92.42,
+          6.44,
+          1.13
+        ],
+        "sv_top5": [
+          1.6021,
+          0.423,
+          0.1775
+        ],
+        "energy_mode1_pct": 92.42,
+        "total_energy": 2.777178
+      },
+      "dmd": {
+        "spectral_radius": 0.016887,
+        "stable": true,
+        "eig_mags_top5": [
+          0.0169,
+          0.0169
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 92.42,
+      "dmd_spectral_radius": 0.016887
+    },
+    {
+      "window_steps": 200,
+      "first_step": 1301,
+      "last_step": 1500,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          84.48,
+          15.15,
+          0.37
+        ],
+        "sv_top5": [
+          0.4019,
+          0.1702,
+          0.0266
+        ],
+        "energy_mode1_pct": 84.48,
+        "total_energy": 0.191215
+      },
+      "dmd": {
+        "spectral_radius": 0.324973,
+        "stable": true,
+        "eig_mags_top5": [
+          0.325,
+          0.0299
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 84.48,
+      "dmd_spectral_radius": 0.324973
+    },
+    {
+      "window_steps": 200,
+      "first_step": 1301,
+      "last_step": 1500,
+      "pod": {
+        "effective_rank": 3,
+        "energy_top5_pct": [
+          84.48,
+          15.15,
+          0.37
+        ],
+        "sv_top5": [
+          0.4019,
+          0.1702,
+          0.0266
+        ],
+        "energy_mode1_pct": 84.48,
+        "total_energy": 0.191215
+      },
+      "dmd": {
+        "spectral_radius": 0.324973,
+        "stable": true,
+        "eig_mags_top5": [
+          0.325,
+          0.0299
+        ]
+      },
+      "dod_rank": 3,
+      "energy_mode1_pct": 84.48,
+      "dmd_spectral_radius": 0.324973
+    }
+  ]
+}

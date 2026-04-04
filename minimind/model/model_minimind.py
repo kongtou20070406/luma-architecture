@@ -345,6 +345,25 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         return input_ids
 
 
+class _GradScaleFn(torch.autograd.Function):
+    """前向传播不变，反向传播时将梯度乘以 scale 因子。"""
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, scale: float) -> torch.Tensor:
+        ctx.scale = scale
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return grad_output * ctx.scale, None
+
+
+def grad_scale(x: torch.Tensor, scale: float) -> torch.Tensor:
+    """对 x 施加梯度缩放：前向 identity，反向乘 scale。"""
+    if scale == 1.0 or not x.requires_grad:
+        return x
+    return _GradScaleFn.apply(x, scale)
+
+
 class LumaConfig(PretrainedConfig):
     """Luma starts by naming her organs before she learns how to think with all of them.
     在她真正学会完整思考之前，我们先把器官命名清楚。
@@ -393,10 +412,15 @@ class LumaConfig(PretrainedConfig):
         self.world_ema_decay = kwargs.get("world_ema_decay", 0.99)
         self.enable_world_jepa = kwargs.get("enable_world_jepa", True)
         self.world_jepa_mode = kwargs.get("world_jepa_mode", "scaffold")
+        self.world_jepa_reason_only = kwargs.get("world_jepa_reason_only", False)
+        self.enable_ct_world_jepa = kwargs.get("enable_ct_world_jepa", False)
+        self.ct_world_jepa_weight = kwargs.get("ct_world_jepa_weight", 0.3)
         self.world_full_simplify_loss = kwargs.get("world_full_simplify_loss", False)
         self.enable_sigreg_world = kwargs.get("enable_sigreg_world", False)
         self.enable_sigreg_rollout = kwargs.get("enable_sigreg_rollout", False)
         self.enable_sigreg_delta = kwargs.get("enable_sigreg_delta", False)
+        self.enable_sigreg_ct = kwargs.get("enable_sigreg_ct", False)
+        self.sigreg_ct_weight = kwargs.get("sigreg_ct_weight", 0.05)
         self.world_sigreg_weight = kwargs.get("world_sigreg_weight", 0.05)
         self.world_sigreg_num_slices = kwargs.get("world_sigreg_num_slices", 128)
         self.world_sigreg_t_min = kwargs.get("world_sigreg_t_min", 0.2)
@@ -446,6 +470,10 @@ class LumaConfig(PretrainedConfig):
         self.enable_self_check_ring = kwargs.get("enable_self_check_ring", False)
         self.self_check_dim = kwargs.get("self_check_dim", 16)
         self.self_check_k = kwargs.get("self_check_k", 1)
+        self.self_check_loss_weight = kwargs.get("self_check_loss_weight", 0.1)
+        self.ct_grad_scale = kwargs.get("ct_grad_scale", 1.0)
+        self.ct_grad_scale_aux = kwargs.get("ct_grad_scale_aux", None)  # None = 跟 ct_grad_scale 相同
+        self.ct_norm_penalty_weight = kwargs.get("ct_norm_penalty_weight", 0.0)
         self.enable_introspection_uncertainty = kwargs.get("enable_introspection_uncertainty", False)
         self.enable_exit_jepa_crystal = kwargs.get("enable_exit_jepa_crystal", False)
         self.exit_jepa_crystal_temperature = kwargs.get("exit_jepa_crystal_temperature", 6.0)
@@ -525,6 +553,7 @@ class LumaConfig(PretrainedConfig):
         self.enable_reasoning_state_ring = kwargs.get("enable_reasoning_state_ring", False)
         self.r_t_dim = kwargs.get("r_t_dim", max(16, self.c_t_dim // 2))
         self.r_t_mode = kwargs.get("r_t_mode", "blend")
+        self.use_gradient_checkpointing = kwargs.get("use_gradient_checkpointing", False)
         self.r_t_router_window = kwargs.get("r_t_router_window", 16)
         self.compression_active_layers = kwargs.get("compression_active_layers", self.compression_layers)
         self.reason_active_loops = kwargs.get("reason_active_loops", self.reason_loops)
@@ -1438,12 +1467,96 @@ class TinySlowSelfCheckRing(nn.Module):
         return {"state": next_state, "score": score}
 
 
-class LeWorldModelStyleJEPA(nn.Module):
-    """Luma gives the world branch a fuller latent-model role here: mask contiguous regions, predict them from visible context, and regularize the latent geometry so it does not collapse.
-    Luma 在这里把 world 分支提升为更完整的 latent world model：遮挡连续片段、依赖可见上下文去预测，并用潜空间正则避免坍缩。
+class CtWorldJEPA(nn.Module):
+    """在 c_t 轨迹（reasoning loop 维度）上做 masked prediction。
+    与 h-space World JEPA 不同，c_t 由 reasoning 区产生，
+    梯度天然流经 reasoning 区，不会导致 compress 梯度垄断。
 
-    This is still an engineering translation for language-model hidden states rather than a claim of exact paper reproduction.
-    这仍然是面向语言模型隐状态的工程迁移版，而不是宣称逐项复现论文实现。
+    输入：c_t_history = list of (batch, c_t_dim) tensors from each reasoning loop
+    Mask 掉部分 loop 步的 c_t，从可见步预测被 mask 步。
+    """
+
+    def __init__(self, config: LumaConfig):
+        super().__init__()
+        c_dim = config.c_t_dim
+        self.c_t_dim = c_dim
+        self.mask_ratio = config.world_mask_ratio
+        # 位置编码：loop index embedding
+        max_loops = config.reason_loops_max + 1
+        self.loop_pos_emb = nn.Embedding(max_loops, c_dim)
+        # encoder: c_t → latent
+        self.encoder = nn.Sequential(
+            nn.Linear(c_dim, c_dim * 2, bias=False),
+            nn.SiLU(),
+            nn.Linear(c_dim * 2, c_dim, bias=False),
+        )
+        self.mask_token = nn.Parameter(torch.zeros(1, c_dim))
+        # predictor: masked_encoded + visible_summary → predicted_target
+        self.predictor = nn.Sequential(
+            nn.Linear(c_dim * 2, c_dim * 2, bias=False),
+            nn.SiLU(),
+            nn.Linear(c_dim * 2, c_dim, bias=False),
+        )
+
+    def forward(self, c_t_history: List[torch.Tensor]) -> dict:
+        """c_t_history: list of (batch, c_t_dim) tensors, length = n_loops."""
+        n_loops = len(c_t_history)
+        if n_loops < 3:
+            z = c_t_history[0] if c_t_history else torch.zeros(1)
+            return {"ct_world_jepa_loss": z.new_zeros(())}
+
+        # stack: (batch, n_loops, c_dim)
+        ct_seq = torch.stack(c_t_history, dim=1)
+        batch_size = ct_seq.shape[0]
+        device = ct_seq.device
+
+        # 加位置编码
+        loop_ids = torch.arange(n_loops, device=device)
+        ct_seq = ct_seq + self.loop_pos_emb(loop_ids).unsqueeze(0)
+
+        # encode
+        encoded = self.encoder(ct_seq)  # (batch, n_loops, c_dim)
+
+        # random mask
+        mask_count = max(1, int(n_loops * self.mask_ratio))
+        scores = torch.rand(batch_size, n_loops, device=device)
+        topk_idx = scores.topk(mask_count, dim=-1).indices
+        mask = torch.zeros(batch_size, n_loops, dtype=torch.bool, device=device)
+        mask.scatter_(1, topk_idx, True)
+
+        # visible summary
+        visible = (~mask).unsqueeze(-1).to(ct_seq.dtype)
+        visible_count = visible.sum(dim=1).clamp_min(1.0)
+        visible_summary = (encoded * visible).sum(dim=1, keepdim=True) / visible_count.unsqueeze(-1)
+
+        # masked positions: replace with mask_token
+        masked_encoded = torch.where(mask.unsqueeze(-1), self.mask_token.unsqueeze(0).expand_as(encoded), encoded)
+        pred_input = torch.cat([masked_encoded, visible_summary.expand_as(encoded)], dim=-1)
+        pred = self.predictor(pred_input)  # (batch, n_loops, c_dim)
+
+        # loss: cosine on masked positions
+        # target = encoder output（端到端，无 stop-gradient，依赖任务难度防坍缩）
+        masked_pred = pred[mask]
+        masked_target = encoded[mask].detach()  # stop-grad target 防止 trivial solution
+        if masked_pred.shape[0] == 0:
+            return {"ct_world_jepa_loss": ct_seq.new_zeros(())}
+
+        loss = 1.0 - F.cosine_similarity(
+            F.normalize(masked_pred, dim=-1),
+            F.normalize(masked_target, dim=-1),
+            dim=-1,
+        ).mean()
+        return {"ct_world_jepa_loss": loss}
+
+
+class LeWorldModelStyleJEPA(nn.Module):
+    """LeWM 风格的 world JEPA（真正的 LeWorldModel 实现）。
+    对齐 arXiv:2603.19312（LeWorldModel）核心设计原则：
+      - 单一 online encoder，无 EMA target encoder
+      - 无 stop-gradient
+      - 依赖 SIGreg（Cramér-Wold 正则）防止表征坍缩
+      - predictor 从可见 token 的 encoder 输出预测被遮挡 token 的 encoder 输出
+    Loss = cosine_loss(predictor_output, online_encoder_output) + sigreg_weight * SIGreg(online_encoder_output)
     """
 
     def __init__(self, config: LumaConfig):
@@ -1451,38 +1564,26 @@ class LeWorldModelStyleJEPA(nn.Module):
         self.world_dim = config.world_dim
         self.mask_ratio = config.world_mask_ratio
         self.mask_strategy = config.world_mask_strategy
-        self.ema_decay = config.world_ema_decay
-        self.simplify_loss = config.world_full_simplify_loss
         self.observer_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.online_encoder = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size, bias=False),
             nn.SiLU(),
             nn.Linear(config.hidden_size, config.world_dim, bias=False),
         )
-        self.target_encoder = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size, bias=False),
-            nn.SiLU(),
-            nn.Linear(config.hidden_size, config.world_dim, bias=False),
-        )
         self.mask_token = nn.Parameter(torch.zeros(1, 1, config.world_dim))
-        self.context_norm = LumaZCRMSNorm(config.world_dim * 3 + config.hidden_size, eps=config.rms_norm_eps)
+        # predictor 输入：masked_world + visible_summary + hidden_summary
+        # = world_dim + world_dim + hidden_size = world_dim*2 + hidden_size
+        _pred_in = config.world_dim * 2 + config.hidden_size
+        self.context_norm = LumaZCRMSNorm(_pred_in, eps=config.rms_norm_eps)
         self.context_predictor = nn.Sequential(
-            nn.Linear(config.world_dim * 3 + config.hidden_size, config.hidden_size, bias=False),
+            nn.Linear(_pred_in, config.hidden_size, bias=False),
             nn.SiLU(),
             nn.Linear(config.hidden_size, config.hidden_size, bias=False),
             nn.SiLU(),
             nn.Linear(config.hidden_size, config.world_dim, bias=False),
-        )
-        self.delta_head = nn.Sequential(
-            nn.Linear(config.world_dim * 2, config.world_dim, bias=False),
-            nn.SiLU(),
-            nn.Linear(config.world_dim, config.world_dim, bias=False),
         )
         self.enable_sigreg_world = bool(config.enable_sigreg_world)
         self.sigreg_weight = float(config.world_sigreg_weight)
-        self.sigreg_world_source = str(config.sigreg_world_source)
-        if self.sigreg_world_source not in {"sigreg_on_online", "sigreg_on_encoder_latent"}:
-            self.sigreg_world_source = "sigreg_on_online"
         self.sigreg_world_fp32_only = bool(config.sigreg_world_fp32_only)
         self.sigreg_world_warmup_steps = int(max(0, config.sigreg_world_warmup_steps))
         self.runtime_sigreg_step = 0
@@ -1490,9 +1591,7 @@ class LeWorldModelStyleJEPA(nn.Module):
         self.sigreg_eps = float(config.world_sigreg_eps)
         t_min = float(config.world_sigreg_t_min)
         t_max = float(config.world_sigreg_t_max)
-        num_points = int(config.world_sigreg_num_points)
-        if num_points < 2:
-            num_points = 2
+        num_points = max(2, int(config.world_sigreg_num_points))
         t = torch.linspace(t_min, t_max, num_points, dtype=torch.float32)
         trap = torch.full((num_points,), (t_max - t_min) / max(1, num_points - 1), dtype=torch.float32)
         trap[0] *= 0.5
@@ -1502,31 +1601,13 @@ class LeWorldModelStyleJEPA(nn.Module):
         self.register_buffer("sigreg_t", t, persistent=False)
         self.register_buffer("sigreg_weights", trap * weight, persistent=False)
         self.register_buffer("sigreg_phi0", phi0, persistent=False)
-        self.delta_weight = float(config.world_delta_weight)
-        self._copy_online_to_target()
-        for param in self.target_encoder.parameters():
-            param.requires_grad = False
 
-    @torch.no_grad()
-    def _copy_online_to_target(self) -> None:
-        for target_param, online_param in zip(self.target_encoder.parameters(), self.online_encoder.parameters()):
-            target_param.copy_(online_param)
-
-    @torch.no_grad()
     def ema_update(self) -> None:
-        """Luma updates the world target slowly so latent dynamics stay legible across noisy optimization steps.
-        Luma 缓慢更新 world target，让潜空间动力学在噪声优化下仍然可读。
-        """
-
-        for target_param, online_param in zip(self.target_encoder.parameters(), self.online_encoder.parameters()):
-            target_param.mul_(self.ema_decay).add_(online_param, alpha=1.0 - self.ema_decay)
+        """LeWM 无 EMA，此方法保留为空以保持接口兼容。"""
+        pass
 
     def _encode_online(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.online_encoder(self.observer_norm(hidden_states))
-
-    def _encode_target(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad():
-            return self.target_encoder(self.observer_norm(hidden_states.detach()))
 
     def set_runtime_sigreg_step(self, step: int) -> None:
         self.runtime_sigreg_step = max(0, int(step))
@@ -1534,64 +1615,23 @@ class LeWorldModelStyleJEPA(nn.Module):
     def summarize(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self._encode_online(hidden_states).mean(dim=1)
 
-    def _surprise_scores(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        centered = self.observer_norm(hidden_states)
-        summary = centered.mean(dim=1, keepdim=True)
-        return (centered - summary).norm(dim=-1)
-
     def _build_mask(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """随机 span masking（LeWM 风格，无 surprise-based structured masking）。"""
         bsz, seq_len, _ = hidden_states.shape
         device = hidden_states.device
         mask = torch.zeros(bsz, seq_len, dtype=torch.bool, device=device)
-        budget = max(1, int(seq_len * self.mask_ratio))
-        if self.mask_strategy != "structured":
-            span_len = budget
-            for row in range(bsz):
-                start = torch.randint(0, max(1, seq_len - span_len + 1), (1,), device=device).item()
-                mask[row, start : start + span_len] = True
-            return mask
-        surprise = self._surprise_scores(hidden_states)
-        primary_len = max(1, int(budget * 0.6))
-        secondary_len = max(1, int(budget * 0.25))
+        span_len = max(1, int(seq_len * self.mask_ratio))
         for row in range(bsz):
-            center = int(surprise[row].argmax().item())
-            start = max(0, min(seq_len - primary_len, center - primary_len // 2))
-            mask[row, start : start + primary_len] = True
-            remaining = budget - int(mask[row].sum().item())
-            if remaining <= 0:
-                continue
-            ranked = surprise[row].argsort(descending=True)
-            second_center = None
-            for idx in ranked.tolist():
-                if not mask[row, idx]:
-                    second_center = idx
-                    break
-            if second_center is not None:
-                second_len = min(secondary_len, remaining)
-                second_start = max(0, min(seq_len - second_len, second_center - second_len // 2))
-                mask[row, second_start : second_start + second_len] = True
-            remaining = budget - int(mask[row].sum().item())
-            if remaining > 0:
-                ranked = surprise[row].argsort(descending=True)
-                for idx in ranked.tolist():
-                    if not mask[row, idx]:
-                        mask[row, idx] = True
-                        remaining -= 1
-                        if remaining <= 0:
-                            break
+            start = torch.randint(0, max(1, seq_len - span_len + 1), (1,), device=device).item()
+            mask[row, start : start + span_len] = True
         return mask
 
     def _build_probe_mask(self, hidden_states: torch.Tensor) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
         mask = torch.zeros(bsz, seq_len, dtype=torch.bool, device=hidden_states.device)
         budget = max(1, int(seq_len * self.mask_ratio))
-        if self.mask_strategy != "structured":
-            start = max(0, (seq_len - budget) // 2)
-            mask[:, start : start + budget] = True
-            return mask
-        surprise = self._surprise_scores(hidden_states)
-        topk = surprise.topk(budget, dim=-1).indices
-        mask.scatter_(1, topk, True)
+        start = max(0, (seq_len - budget) // 2)
+        mask[:, start : start + budget] = True
         return mask
 
     def _sigreg(self, latent: torch.Tensor) -> torch.Tensor:
@@ -1612,61 +1652,46 @@ class LeWorldModelStyleJEPA(nn.Module):
         return ep_stat.mean()
 
     def _masked_prediction(self, hidden_states: torch.Tensor, mask: torch.Tensor) -> dict:
-        observed_hidden = self.observer_norm(hidden_states)
-        online_world = self.online_encoder(observed_hidden)
-        target_world = self._encode_target(hidden_states)
+        # LeWM：单一 encoder，无 EMA，无 stop-gradient
+        online_world = self.online_encoder(self.observer_norm(hidden_states))  # (B, T, world_dim)
         visible = (~mask).unsqueeze(-1).to(hidden_states.dtype)
         visible_count = visible.sum(dim=1).clamp_min(1.0)
-        masked_count = mask.unsqueeze(-1).to(hidden_states.dtype).sum(dim=1).clamp_min(1.0)
         visible_summary = (online_world * visible).sum(dim=1, keepdim=True) / visible_count.unsqueeze(-1)
-        target_mask_summary = (target_world * mask.unsqueeze(-1)).sum(dim=1, keepdim=True) / masked_count.unsqueeze(-1)
         hidden_summary = hidden_states.mean(dim=1, keepdim=True)
+        # 被遮挡位置换成 mask_token，可见位置保留 encoder 输出
         masked_world = torch.where(mask.unsqueeze(-1), self.mask_token.expand_as(online_world), online_world)
         predictor_input = torch.cat(
             [
                 masked_world,
                 visible_summary.expand_as(online_world),
-                target_mask_summary.expand_as(online_world),
                 hidden_summary.expand(-1, hidden_states.shape[1], -1),
             ],
             dim=-1,
         )
-        predictor_input = self.context_norm(predictor_input)
-        pred_base = self.context_predictor(predictor_input)
-        pred_delta = self.delta_head(torch.cat([pred_base, visible_summary.expand_as(pred_base)], dim=-1))
-        pred_world = pred_base + pred_delta
-
+        pred_world = self.context_predictor(self.context_norm(predictor_input))  # (B, T, world_dim)
+        # target = 同一 encoder 对被遮挡位置的输出（无 detach，端到端，SIGreg 防坍缩）
         masked_pred = pred_world[mask]
-        masked_target = target_world[mask]
+        masked_target = online_world[mask]
         cosine_loss = 1.0 - F.cosine_similarity(
             F.normalize(masked_pred, dim=-1),
             F.normalize(masked_target, dim=-1),
             dim=-1,
         ).mean()
-        sigreg_source = online_world if self.sigreg_world_source == "sigreg_on_online" else observed_hidden
-        sigreg_source_float = sigreg_source.float()
-        sigreg_source_mean = sigreg_source_float.mean()
-        sigreg_source_std = sigreg_source_float.std(unbiased=False)
         sigreg_enabled = self.enable_sigreg_world and self.runtime_sigreg_step >= self.sigreg_world_warmup_steps
-        sigreg_loss = self._sigreg(sigreg_source) if sigreg_enabled else online_world.new_zeros(())
-        sigreg_loss_step = online_world.new_tensor(float(self.runtime_sigreg_step if sigreg_enabled else -1.0))
+        sigreg_loss = self._sigreg(online_world) if sigreg_enabled else online_world.new_zeros(())
         world_loss = cosine_loss + self.sigreg_weight * sigreg_loss
-        if not self.simplify_loss:
-            delta_target = (masked_target - visible_summary.expand_as(target_world)[mask]).detach()
-            delta_loss = F.mse_loss(pred_delta[mask], delta_target)
-            world_loss = world_loss + self.delta_weight * delta_loss
-        surprise_value = self._surprise_scores(hidden_states)[mask].float().mean() if mask.any() else hidden_states.new_zeros(())
+        online_float = online_world.float()
         return {
             "world_mask": mask,
             "world_online": online_world,
-            "world_target": target_world,
+            "world_target": online_world,  # LeWM：target 即 online encoder 输出
             "world_pred": pred_world,
             "world_jepa_loss": world_loss,
             "world_sigreg_loss": sigreg_loss,
-            "world_sigreg_source_mean": sigreg_source_mean,
-            "world_sigreg_source_std": sigreg_source_std,
-            "world_sigreg_loss_step": sigreg_loss_step,
-            "world_surprise": surprise_value,
+            "world_sigreg_source_mean": online_float.mean(),
+            "world_sigreg_source_std": online_float.std(unbiased=False),
+            "world_sigreg_loss_step": online_world.new_tensor(float(self.runtime_sigreg_step if sigreg_enabled else -1.0)),
+            "world_surprise": hidden_states.new_zeros(()),  # structured masking 移除，不再用
         }
 
     def forward(self, hidden_states: torch.Tensor) -> dict:
@@ -2095,9 +2120,12 @@ class LumaReasonSharedLayer(nn.Module):
         h: torch.Tensor,
         c_t: Optional[torch.Tensor] = None,
         attn_bias: Optional[torch.Tensor] = None,
+        use_gradient_checkpointing: bool = False,
     ) -> torch.Tensor:
+        from torch.utils.checkpoint import checkpoint as _ckpt
         if c_t is not None and self.ct_modulation_mode == "film" and self.mamba_film is not None:
             h = self._apply_film(h, c_t, self.mamba_film)
+        # Mamba3 uses a custom Triton kernel incompatible with gradient checkpointing — always run normally
         mamba_out = self.mamba(h)
         if c_t is not None and self.ct_modulation_mode == "modulewise_gate" and self.mamba_gate is not None:
             mamba_gate = torch.sigmoid(self.mamba_gate(c_t)).unsqueeze(1)
@@ -2106,7 +2134,12 @@ class LumaReasonSharedLayer(nn.Module):
             h = mamba_out
         if c_t is not None and self.ct_modulation_mode == "film" and self.attn_film is not None:
             h = self._apply_film(h, c_t, self.attn_film)
-        attn_out = self.diff_attn(h, attn_bias=attn_bias)
+        # diff_attn: standard PyTorch ops, safe to checkpoint
+        if use_gradient_checkpointing and self.training:
+            _attn_bias = attn_bias  # capture for closure
+            attn_out = _ckpt(lambda x: self.diff_attn(x, attn_bias=_attn_bias), h, use_reentrant=False)
+        else:
+            attn_out = self.diff_attn(h, attn_bias=attn_bias)
         if c_t is not None and self.ct_modulation_mode == "modulewise_gate" and self.attn_gate is not None:
             attn_gate = torch.sigmoid(self.attn_gate(c_t)).unsqueeze(1)
             h = h + attn_gate * (attn_out - h)
@@ -2114,7 +2147,11 @@ class LumaReasonSharedLayer(nn.Module):
             h = attn_out
         if c_t is not None and self.ct_modulation_mode == "film" and self.ffn_film is not None:
             h = self._apply_film(h, c_t, self.ffn_film)
-        ffn_out = self.ffn(h)
+        # FFN: standard PyTorch ops, safe to checkpoint
+        if use_gradient_checkpointing and self.training:
+            ffn_out = _ckpt(self.ffn, h, use_reentrant=False)
+        else:
+            ffn_out = self.ffn(h)
         if c_t is not None and self.ct_modulation_mode == "modulewise_gate" and self.ffn_gate is not None:
             ffn_gate = torch.sigmoid(self.ffn_gate(c_t)).unsqueeze(1)
             h = h + ffn_gate * (ffn_out - h)
@@ -2153,6 +2190,7 @@ class LumaReasonCore(nn.Module):
         self.routing_local_delta_floor = float(getattr(config, "routing_local_delta_floor", 0.0))
         self.routing_local_delta_floor_weight = float(getattr(config, "routing_local_delta_floor_weight", 0.0))
         self.rollout_alive_weight = float(getattr(config, "rollout_alive_weight", 0.0))
+        self.ct_grad_scale = float(getattr(config, "ct_grad_scale", 1.0))
         self.routing_tier_soft_only = bool(config.routing_tier_soft_only)
         self.routing_tier_entropy_floor = float(config.routing_tier_entropy_floor)
         self.routing_min_local_share = float(config.routing_min_local_share)
@@ -2593,7 +2631,10 @@ class LumaReasonCore(nn.Module):
         r_t_mode: str = "blend",
         disable_ct_injection: bool = False,
         modulation_context: Optional[dict] = None,
+        use_gradient_checkpointing: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], dict]:
+        if self.ct_grad_scale != 1.0:
+            c_t = grad_scale(c_t, self.ct_grad_scale)
         c_bias = self.ct_injection.proj(c_t).unsqueeze(1)
         if disable_ct_injection:
             c_bias = torch.zeros_like(c_bias)
@@ -2635,7 +2676,7 @@ class LumaReasonCore(nn.Module):
             elif r_t_mode == "parallel":
                 h = h + effective_switch * r_bias
         for layer in self.shared_layers:
-            h = layer(h, c_t=c_t, attn_bias=attn_bias)
+            h = layer(h, c_t=c_t, attn_bias=attn_bias, use_gradient_checkpointing=use_gradient_checkpointing)
         return h, switch_value, modulation_stats
 
 
@@ -2673,7 +2714,9 @@ class LumaBackbone(nn.Module):
         else:
             self.world_latent_jepa = WorldLatentJEPA(config)
         self.self_world_coupler = nn.Linear(config.world_dim, config.c_t_dim, bias=False)
+        self.ct_world_jepa = CtWorldJEPA(config) if config.enable_ct_world_jepa else None
         self.self_check_ring = TinySlowSelfCheckRing(config) if config.enable_self_check_ring else None
+        self.self_check_loss_weight = float(config.self_check_loss_weight)
         self.loop_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.exit_controller = ExitController(
             delta_threshold=config.exit_delta_threshold,
@@ -2700,8 +2743,10 @@ class LumaBackbone(nn.Module):
         )
         self.enable_sigreg_rollout = bool(config.enable_sigreg_rollout)
         self.enable_sigreg_delta = bool(config.enable_sigreg_delta)
+        self.enable_sigreg_ct = bool(config.enable_sigreg_ct)
         self.sigreg_rollout_weight = float(config.sigreg_rollout_weight)
         self.sigreg_delta_weight = float(config.sigreg_delta_weight)
+        self.sigreg_ct_weight = float(config.sigreg_ct_weight)
         self.sigreg_num_slices = int(config.sigreg_num_slices)
         self.sigreg_eps = float(config.sigreg_eps)
         sigreg_t_min = float(config.sigreg_t_min)
@@ -2785,6 +2830,10 @@ class LumaBackbone(nn.Module):
         residual_reg_terms: List[torch.Tensor] = []
         sigreg_delta_terms: List[torch.Tensor] = []
         sigreg_rollout_terms: List[torch.Tensor] = []
+        sigreg_ct_terms: List[torch.Tensor] = []
+        ct_norm_terms: List[torch.Tensor] = []
+        ct_grad_history: List[torch.Tensor] = []  # 带梯度的 c_t，用于 CtWorldJEPA
+        self_check_loss_terms: List[torch.Tensor] = []
         rollout_loss_terms: List[torch.Tensor] = []
         delta_h_history: List[torch.Tensor] = []
         self_error_history: List[torch.Tensor] = []
@@ -2842,6 +2891,7 @@ class LumaBackbone(nn.Module):
         if "math_lane_score" in compression_diag:
             math_lane_score_history.append(compression_diag["math_lane_score"].detach())
         hierarchical_horizons = self._hierarchical_rollout_horizons()
+        h_pre_reason = h  # 保存 reasoning loop 之前的 h，用于 world_jepa_reason_only
 
         for loop_idx in range(self.config.reason_active_loops):
             current_r_t = reasoning_state["state"] if reasoning_state is not None else None
@@ -2883,6 +2933,7 @@ class LumaBackbone(nn.Module):
                         r_t_mode=self.config.r_t_mode,
                         disable_ct_injection=disable_ct_injection,
                         modulation_context=modulation_context,
+                        use_gradient_checkpointing=self.config.use_gradient_checkpointing,
                     )
                 ),
             )
@@ -2918,124 +2969,134 @@ class LumaBackbone(nn.Module):
                     loop_index=loop_idx,
                 )
                 delta_h = h.mean(dim=1).detach() if prev_h is None else (h - prev_h).mean(dim=1).detach()
-                rollout_delta_preds, rollout_state_preds = self.self_jepa_residual_predictor.rollout(
-                    c_t,
-                    delta_h,
-                    steps=self.config.self_rollout_steps,
-                    loop_progress=current_loop_progress,
-                    loop_index=loop_idx,
-                )
-                pred_delta_c = rollout_delta_preds[0]
-                pred_c_next = rollout_state_preds[0]
-                target_delta_c = (next_c_t - prev_c_t).detach()
-                self_jepa_terms.append(
-                    1.0 - F.cosine_similarity(
-                        F.normalize(pred_delta_c, dim=-1),
-                        F.normalize(target_delta_c, dim=-1),
-                        dim=-1,
-                    ).mean()
-                )
-                residual_reg_terms.append(pred_delta_c.norm(dim=-1).mean() * self.config.self_jepa_residual_reg)
-                if self.enable_sigreg_delta:
-                    sigreg_delta_terms.append(self._sigreg_latent(pred_delta_c))
-                if self.enable_sigreg_rollout and rollout_state_preds:
-                    rollout_sigreg_slice = rollout_state_preds[: min(3, len(rollout_state_preds))]
-                    sigreg_rollout_terms.append(
-                        torch.stack([self._sigreg_latent(pred_state) for pred_state in rollout_sigreg_slice]).mean()
+                if not self.config.disable_self_jepa:
+                    rollout_delta_preds, rollout_state_preds = self.self_jepa_residual_predictor.rollout(
+                        c_t.detach(),  # Phase 3+: stop-gradient，JEPA 不污染主干梯度流
+                        delta_h,
+                        steps=self.config.self_rollout_steps,
+                        loop_progress=current_loop_progress,
+                        loop_index=loop_idx,
                     )
-                if self.config.enable_world_jepa and self.config.self_world_coupling_weight > 0.0:
-                    world_summary_for_coupling = self.world_latent_jepa.summarize(h)
-                    if prev_world_summary is not None:
-                        delta_world = world_summary_for_coupling - prev_world_summary
-                        projected_world_delta = self.self_world_coupler(delta_world)
-                        coupling_terms.append(
-                            1.0
-                            - F.cosine_similarity(
-                                F.normalize(pred_delta_c, dim=-1),
-                                F.normalize(projected_world_delta, dim=-1),
-                                dim=-1,
-                            ).mean()
+                    pred_delta_c = rollout_delta_preds[0]
+                    pred_c_next = rollout_state_preds[0]
+                    target_delta_c = (next_c_t - prev_c_t).detach()
+                    self_jepa_terms.append(
+                        1.0 - F.cosine_similarity(
+                            F.normalize(pred_delta_c, dim=-1),
+                            F.normalize(target_delta_c, dim=-1),
+                            dim=-1,
+                        ).mean()
+                    )
+                    residual_reg_terms.append(pred_delta_c.norm(dim=-1).mean() * self.config.self_jepa_residual_reg)
+                    if self.enable_sigreg_delta:
+                        sigreg_delta_terms.append(self._sigreg_latent(pred_delta_c))
+                    if self.enable_sigreg_rollout and rollout_state_preds:
+                        rollout_sigreg_slice = rollout_state_preds[: min(3, len(rollout_state_preds))]
+                        sigreg_rollout_terms.append(
+                            torch.stack([self._sigreg_latent(pred_state) for pred_state in rollout_sigreg_slice]).mean()
                         )
-                    prev_world_summary = world_summary_for_coupling.detach()
-                current_self_error = self_jepa_terms[-1].detach()
-                matured_rollouts = [
-                    (pred, horizon)
-                    for target_idx, pred, horizon in pending_rollout_preds
-                    if target_idx == slow_step_idx and horizon in hierarchical_horizons
-                ]
-                if matured_rollouts:
-                    rollout_errs = []
-                    for pred_state, horizon in matured_rollouts:
-                        if self.config.self_rollout_weighting_mode == "near3":
-                            if horizon == 2:
-                                horizon_weight = 1.0
-                            elif horizon == 3:
-                                horizon_weight = 0.5
-                            elif horizon == 4:
-                                horizon_weight = 0.2
-                            else:
-                                horizon_weight = 0.0
-                        else:
-                            horizon_weight = 1.0 if horizon <= 2 else (0.5 if horizon <= 4 else 0.25)
-                        if horizon_weight == 0.0:
-                            continue
-                        rollout_errs.append(
-                            horizon_weight
-                            * (
+                    if self.config.enable_world_jepa and self.config.self_world_coupling_weight > 0.0:
+                        world_summary_for_coupling = self.world_latent_jepa.summarize(h)
+                        if prev_world_summary is not None:
+                            delta_world = world_summary_for_coupling - prev_world_summary
+                            projected_world_delta = self.self_world_coupler(delta_world)
+                            coupling_terms.append(
                                 1.0
                                 - F.cosine_similarity(
-                                    F.normalize(pred_state, dim=-1),
-                                    F.normalize(next_c_t.detach(), dim=-1),
+                                    F.normalize(pred_delta_c, dim=-1),
+                                    F.normalize(projected_world_delta, dim=-1),
                                     dim=-1,
+                                ).mean()
+                            )
+                        prev_world_summary = world_summary_for_coupling.detach()
+                    current_self_error = self_jepa_terms[-1].detach()
+                    matured_rollouts = [
+                        (pred, horizon)
+                        for target_idx, pred, horizon in pending_rollout_preds
+                        if target_idx == slow_step_idx and horizon in hierarchical_horizons
+                    ]
+                    if matured_rollouts:
+                        rollout_errs = []
+                        for pred_state, horizon in matured_rollouts:
+                            if self.config.self_rollout_weighting_mode == "near3":
+                                if horizon == 2:
+                                    horizon_weight = 1.0
+                                elif horizon == 3:
+                                    horizon_weight = 0.5
+                                elif horizon == 4:
+                                    horizon_weight = 0.2
+                                else:
+                                    horizon_weight = 0.0
+                            else:
+                                horizon_weight = 1.0 if horizon <= 2 else (0.5 if horizon <= 4 else 0.25)
+                            if horizon_weight == 0.0:
+                                continue
+                            rollout_errs.append(
+                                horizon_weight
+                                * (
+                                    1.0
+                                    - F.cosine_similarity(
+                                        F.normalize(pred_state, dim=-1),
+                                        F.normalize(next_c_t.detach(), dim=-1),
+                                        dim=-1,
+                                    )
                                 )
                             )
-                        )
-                    if rollout_errs:
-                        rollout_err = torch.stack(rollout_errs).mean()
-                        rollout_loss_terms.append(rollout_err)
-                        current_rollout_error = rollout_err.detach()
-                current_self_improve_scalar = (prev_self_error_for_gain - current_self_error).detach()
-                matured_progress = [
-                    (pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack)
-                    for target_idx, pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack in pending_progress_preds
-                    if target_idx == slow_step_idx
-                ]
-                if matured_progress:
-                    next_improve_target = h.new_full((batch_size,), float(current_self_improve_scalar.item()))
-                    for pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack in matured_progress:
-                        if self.config.self_progress_shape_weight > 0.0:
-                            progress_shape_terms.append(
-                                self.config.self_progress_shape_weight
-                                * F.smooth_l1_loss(pred_next, next_improve_target)
-                            )
-                        if self.config.self_progress_trend_weight > 0.0:
-                            trend_target = h.new_full((batch_size,), float((current_self_improve_scalar - prev_improve).item()))
-                            progress_shape_terms.append(
-                                self.config.self_progress_trend_weight
-                                * F.smooth_l1_loss(pred_trend, trend_target)
-                            )
-                        if self.config.self_progress_plateau_weight > 0.0:
-                            plateau_target = h.new_full((batch_size,), 1.0 if float(current_self_improve_scalar.item()) < self.config.self_plateau_margin else 0.0)
-                            progress_shape_terms.append(
-                                self.config.self_progress_plateau_weight
-                                * F.binary_cross_entropy_with_logits(pred_plateau, plateau_target)
-                            )
-                        if self.config.enable_backtrack_aware_progress and pred_backtrack is not None:
-                            backtrack_target = h.new_full(
-                                (batch_size,),
-                                1.0 if float(current_self_improve_scalar.item()) < 0.0 else 0.0,
-                            )
-                            progress_shape_terms.append(
-                                0.02 * F.binary_cross_entropy_with_logits(pred_backtrack, backtrack_target)
-                            )
-                pending_rollout_preds = [
-                    (target_idx, pred, horizon)
-                    for target_idx, pred, horizon in pending_rollout_preds
-                    if target_idx > slow_step_idx
-                ]
-                for horizon, pred_state in enumerate(rollout_state_preds[1:], start=1):
-                    pending_rollout_preds.append((slow_step_idx + horizon, pred_state, horizon + 1))
+                        if rollout_errs:
+                            rollout_err = torch.stack(rollout_errs).mean()
+                            rollout_loss_terms.append(rollout_err)
+                            current_rollout_error = rollout_err.detach()
+                    current_self_improve_scalar = (prev_self_error_for_gain - current_self_error).detach()
+                    matured_progress = [
+                        (pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack)
+                        for target_idx, pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack in pending_progress_preds
+                        if target_idx == slow_step_idx
+                    ]
+                    if matured_progress:
+                        next_improve_target = h.new_full((batch_size,), float(current_self_improve_scalar.item()))
+                        for pred_next, pred_trend, pred_plateau, prev_improve, pred_backtrack in matured_progress:
+                            if self.config.self_progress_shape_weight > 0.0:
+                                progress_shape_terms.append(
+                                    self.config.self_progress_shape_weight
+                                    * F.smooth_l1_loss(pred_next, next_improve_target)
+                                )
+                            if self.config.self_progress_trend_weight > 0.0:
+                                trend_target = h.new_full((batch_size,), float((current_self_improve_scalar - prev_improve).item()))
+                                progress_shape_terms.append(
+                                    self.config.self_progress_trend_weight
+                                    * F.smooth_l1_loss(pred_trend, trend_target)
+                                )
+                            if self.config.self_progress_plateau_weight > 0.0:
+                                plateau_target = h.new_full((batch_size,), 1.0 if float(current_self_improve_scalar.item()) < self.config.self_plateau_margin else 0.0)
+                                progress_shape_terms.append(
+                                    self.config.self_progress_plateau_weight
+                                    * F.binary_cross_entropy_with_logits(pred_plateau, plateau_target)
+                                )
+                            if self.config.enable_backtrack_aware_progress and pred_backtrack is not None:
+                                backtrack_target = h.new_full(
+                                    (batch_size,),
+                                    1.0 if float(current_self_improve_scalar.item()) < 0.0 else 0.0,
+                                )
+                                progress_shape_terms.append(
+                                    0.02 * F.binary_cross_entropy_with_logits(pred_backtrack, backtrack_target)
+                                )
+                    pending_rollout_preds = [
+                        (target_idx, pred, horizon)
+                        for target_idx, pred, horizon in pending_rollout_preds
+                        if target_idx > slow_step_idx
+                    ]
+                    for horizon, pred_state in enumerate(rollout_state_preds[1:], start=1):
+                        pending_rollout_preds.append((slow_step_idx + horizon, pred_state, horizon + 1))
+                else:
+                    # disable_self_jepa=True: skip rollout entirely, provide neutral defaults
+                    pred_delta_c = torch.zeros_like(c_t)
+                    current_self_improve_scalar = h.new_zeros(())
+                    pending_rollout_preds = []
                 c_t = next_c_t
+                if self.config.ct_norm_penalty_weight > 0.0:
+                    ct_norm_terms.append(c_t.norm(dim=-1).mean())
+                if self.enable_sigreg_ct:
+                    sigreg_ct_terms.append(self._sigreg_latent(c_t))
                 know_gap = slow_state["know_gap"]
                 uncertainty = slow_state.get("uncertainty", uncertainty)
                 local_progress = current_loop_progress
@@ -3052,8 +3113,10 @@ class LumaBackbone(nn.Module):
                     or self.config.self_progress_trend_weight > 0.0
                     or self.config.self_progress_plateau_weight > 0.0
                 ):
+                    _aux_scale = self.config.ct_grad_scale_aux if self.config.ct_grad_scale_aux is not None else self.config.ct_grad_scale
+                    c_t_for_aux = grad_scale(c_t, _aux_scale) if _aux_scale != 1.0 else c_t
                     progress_pred = self.self_jepa_progress_shape_head(
-                        c_t,
+                        c_t_for_aux,
                         delta_h,
                         current_loop_progress,
                         recent_self_improve_vec,
@@ -3074,7 +3137,7 @@ class LumaBackbone(nn.Module):
                     latest_progress_plateau = torch.sigmoid(progress_pred["pred_plateau_logit"].detach()).mean()
                     if self.trajectory_health_probe is not None:
                         health_logit = self.trajectory_health_probe(
-                            c_t,
+                            c_t_for_aux,
                             delta_h,
                             current_loop_progress,
                             recent_self_improve_vec,
@@ -3108,8 +3171,23 @@ class LumaBackbone(nn.Module):
                 pred_delta_history.append(pred_delta_c.detach())
                 did_self_check_update = (loop_idx % self.config.self_check_k == 0)
                 if self.self_check_ring is not None and self_check_state is not None and did_self_check_update:
-                    self_check_state = self.self_check_ring(c_t, delta_h, know_gap, self_check_state)
+                    # Phase 4+: stop-gradient，self_check ring 不回传梯度到主干
+                    self_check_state = self.self_check_ring(
+                        c_t.detach(), delta_h, know_gap.detach(), self_check_state
+                    )
                     self_check_score = self_check_state["score"]
+                    # self_check_loss：训练 ring score 预测推理改善方向
+                    # 软标签：sigmoid(improve_scalar)，improve>0→1，improve<0→0
+                    if self.self_check_loss_weight > 0.0:
+                        improve_target = torch.sigmoid(
+                            current_self_improve_scalar.detach()
+                            * h.new_tensor(5.0)  # 缩放使 sigmoid 更灵敏
+                        ).expand_as(self_check_score)
+                        self_check_loss_terms.append(
+                            F.binary_cross_entropy_with_logits(
+                                self_check_score, improve_target
+                            )
+                        )
                 if self.reasoning_state_ring is not None and reasoning_state is not None:
                     reasoning_state = self.reasoning_state_ring(
                         h.mean(dim=1),
@@ -3140,6 +3218,8 @@ class LumaBackbone(nn.Module):
             prev_world_error_for_gain = current_world_error.detach()
             loop_history.append(h.detach())
             c_t_history.append(c_t.detach())
+            if self.ct_world_jepa is not None:
+                ct_grad_history.append(c_t)
             know_gap_history.append(know_gap.detach())
             uncertainty_history.append(uncertainty.detach())
             slow_update_flags.append(did_slow_update)
@@ -3194,8 +3274,14 @@ class LumaBackbone(nn.Module):
             if exit_stats["should_exit"]:
                 break
 
+        if self.config.enable_world_jepa and self.config.world_jepa_reason_only:
+            # stop-grad compress 贡献，让 World JEPA 梯度只走 reasoning 区
+            # 前向值 = h（不变），反向梯度不流经 h_pre_reason
+            h_for_world = self.final_norm(h_pre_reason.detach() + (h - h_pre_reason))
+        else:
+            h_for_world = None
         h = self.final_norm(h)
-        world_aux = self.world_latent_jepa(h) if self.config.enable_world_jepa else self.world_latent_jepa.disabled_outputs(h)
+        world_aux = self.world_latent_jepa(h_for_world if h_for_world is not None else h) if self.config.enable_world_jepa else self.world_latent_jepa.disabled_outputs(h)
         progress_shape_loss = torch.stack(progress_shape_terms).mean() if progress_shape_terms else h.new_zeros(())
         local_consistency_loss = torch.stack(local_consistency_terms).mean() if local_consistency_terms else h.new_zeros(())
         if self_jepa_terms:
@@ -3207,12 +3293,21 @@ class LumaBackbone(nn.Module):
             self_jepa_loss = h.new_zeros(()) + progress_shape_loss + local_consistency_loss
         sigreg_delta_loss = torch.stack(sigreg_delta_terms).mean() if sigreg_delta_terms else h.new_zeros(())
         sigreg_rollout_loss = torch.stack(sigreg_rollout_terms).mean() if sigreg_rollout_terms else h.new_zeros(())
+        sigreg_ct_loss = torch.stack(sigreg_ct_terms).mean() if sigreg_ct_terms else h.new_zeros(())
         if self.enable_sigreg_delta and self.sigreg_delta_weight > 0.0:
             self_jepa_loss = self_jepa_loss + self.sigreg_delta_weight * sigreg_delta_loss
         if self.enable_sigreg_rollout and self.sigreg_rollout_weight > 0.0:
             self_jepa_loss = self_jepa_loss + self.sigreg_rollout_weight * sigreg_rollout_loss
+        if self.enable_sigreg_ct and self.sigreg_ct_weight > 0.0:
+            self_jepa_loss = self_jepa_loss + self.sigreg_ct_weight * sigreg_ct_loss
+        if ct_norm_terms and self.config.ct_norm_penalty_weight > 0.0:
+            self_jepa_loss = self_jepa_loss + self.config.ct_norm_penalty_weight * torch.stack(ct_norm_terms).mean()
         if trajectory_health_terms:
             self_jepa_loss = self_jepa_loss + torch.stack(trajectory_health_terms).mean()
+        # c_t World JEPA：在 c_t 轨迹上做 masked prediction
+        if self.ct_world_jepa is not None and len(ct_grad_history) >= 3:
+            ct_world_aux = self.ct_world_jepa(ct_grad_history)
+            self_jepa_loss = self_jepa_loss + self.config.ct_world_jepa_weight * ct_world_aux["ct_world_jepa_loss"]
         self_rollout_loss = torch.stack(rollout_loss_terms).mean() if rollout_loss_terms else h.new_zeros(())
         dynamics_modulation_summary = {
             key: torch.stack(values).mean() if values else h.new_zeros(())
@@ -3265,6 +3360,7 @@ class LumaBackbone(nn.Module):
             "uncertainty_history": uncertainty_history,
             "pred_delta_c": pred_delta_c,
             "target_delta_c": target_delta_c,
+            "self_check_loss": torch.stack(self_check_loss_terms).mean() if self_check_loss_terms else h.new_zeros(()),
             "self_jepa_loss": self_jepa_loss,
             "sigreg_delta_loss": sigreg_delta_loss,
             "sigreg_rollout_loss": sigreg_rollout_loss,
@@ -3603,11 +3699,16 @@ class LumaForCausalLM(PreTrainedModel):
                 self_jepa_term = self.config.self_jepa_weight * aux["self_jepa_loss"]
                 self_rollout_term = self.config.self_rollout_weight * aux["self_rollout_loss"]
             exit_aux_term = self.config.exit_aux_weight * aux["exit_aux_loss"]
+            self_check_term = (
+                self.model.self_check_loss_weight * aux["self_check_loss"]
+                if self.config.enable_self_check_ring else logits.new_zeros(())
+            )
             aux["world_jepa_loss_effective"] = world_term.detach()
             aux["self_jepa_loss_effective"] = self_jepa_term.detach()
             aux["self_rollout_loss_effective"] = self_rollout_term.detach()
             aux["exit_aux_loss_effective"] = exit_aux_term.detach()
-            loss = lm_loss + world_term + self_jepa_term + self_rollout_term + exit_aux_term + rollout_zone_loss + routing_entropy_loss + trajectory_vitality_loss + compression_dynamics_loss
+            aux["self_check_loss_effective"] = self_check_term.detach()
+            loss = lm_loss + world_term + self_jepa_term + self_rollout_term + exit_aux_term + self_check_term + rollout_zone_loss + routing_entropy_loss + trajectory_vitality_loss + compression_dynamics_loss
         return MoeCausalLMOutputWithPast(
             loss=loss,
             aux_loss=(
@@ -3615,6 +3716,7 @@ class LumaForCausalLM(PreTrainedModel):
                 + (logits.new_zeros(()) if self.config.disable_self_jepa else self.config.self_jepa_weight * aux["self_jepa_loss"])
                 + (logits.new_zeros(()) if self.config.disable_self_jepa else self.config.self_rollout_weight * aux["self_rollout_loss"])
                 + self.config.exit_aux_weight * aux["exit_aux_loss"]
+                + self_check_term
                 + aux.get("rollout_activity_zone_loss", logits.new_zeros(()))
                 + aux.get("routing_entropy_loss", logits.new_zeros(()))
                 + aux.get("trajectory_vitality_loss", logits.new_zeros(()))

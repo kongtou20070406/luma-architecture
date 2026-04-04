@@ -2,6 +2,91 @@
 
 > 记录规范见：/home/kt/ai/AGENT_MEMORY_LOG_PROTOCOL.md
 
+## 2026-04-03 11:50 FP32 严格防炸链路切换（用于后续重建工作流）
+- 阶段: dynamics constraints foreground 长链重启
+- 背景:
+  - 之前链路存在“分数非有限值被容错兜底”的行为，不符合当前“不要容错 NaN”的执行要求。
+  - 需要在 CUDA 上用全链路 FP32 降低数值炸裂概率，并把 non-finite 变成硬失败信号。
+- 已完成改造:
+  - 修改 `/home/kt/ai/luma-architecture/minimind/scripts/run_luma_stage12.py`
+    - 新增 `--force-fp32` 开关。
+    - CUDA 下可强制 `dtype=torch.float32`（不再默认 BF16）。
+    - 报告字段新增 `force_fp32`、`model_dtype`，用于回溯实验精度口径。
+  - 修改 `/home/kt/ai/luma-architecture/minimind/scripts/run_dynamics_constraints_iter100_fg.py`
+    - 默认透传 `--force-fp32` 到 stage12 评估。
+    - 遇到 `score=NaN/Inf` 直接判该次评估失败（不再 finite fallback）。
+    - 遇到 `first_nonfinite_step` 非空直接判失败（不再作为软惩罚继续）。
+    - `hard_pass` 与 objective 去掉 `score_finite` 容错逻辑，改为严格失败路径。
+- 校验:
+  - `python3 -m py_compile` 已通过：
+    - `minimind/scripts/run_luma_stage12.py`
+    - `minimind/scripts/run_dynamics_constraints_iter100_fg.py`
+    - `minimind/scripts/run_dynamics_candidate_eval.py`
+- 当前活跃链路（可直接接管）:
+  - 主进程:
+    - `PID=332037`
+    - `/home/kt/ai/.venvs/luma-global/bin/python scripts/run_dynamics_constraints_iter100_fg.py --iterations 100 --score-tolerance 0.15 --min-rollout-nonzero 0.03`
+  - 子训练进程（当前）:
+    - `PID=332071`
+    - `run_luma_stage12.py ... --force-fp32 ... --stage2-steps 4096`
+  - 当前产物目录:
+    - `/home/kt/ai/luma-architecture/minimind/artifacts/luma_dynamics_constraints_fg_20260403_115036`
+- 重建工作流（晚点重启直接用）:
+  1. 停旧链:
+     - `pkill -f run_dynamics_constraints_iter100_fg.py`
+     - `pkill -f run_dynamics_candidate_eval.py`
+     - `pkill -f run_luma_stage12.py`
+  2. 语法检查:
+     - `python3 -m py_compile minimind/scripts/run_luma_stage12.py minimind/scripts/run_dynamics_constraints_iter100_fg.py minimind/scripts/run_dynamics_candidate_eval.py`
+  3. 重启严格链:
+     - `cd /home/kt/ai/luma-architecture/minimind`
+     - `/home/kt/ai/.venvs/luma-global/bin/python scripts/run_dynamics_constraints_iter100_fg.py --iterations 100 --score-tolerance 0.15 --min-rollout-nonzero 0.03`
+  4. 运行监控:
+     - `ps -eo pid,ppid,cmd | rg 'run_dynamics_constraints_iter100_fg.py|run_dynamics_candidate_eval.py|run_luma_stage12.py' | rg -v rg`
+     - `ls -lt /home/kt/ai/luma-architecture/minimind/artifacts/luma_dynamics_constraints_fg_* | head`
+     - `tail -n 80 /home/kt/ai/luma-architecture/research-results.tsv`
+- 判定口径（当前冻结）:
+  - 先看“可训练性”：无 non-finite > 再看 rank/rollout > 最后看 score/bucket。
+  - 非有限值不再归类为“可容错波动”，一律按失败处理。
+
+## 2026-04-02 15:05 SIGReg 解耦矩阵切换（M0->M1）已落地并启动
+- 阶段: dynamics autoresearch 切换执行（单卡，后台长跑）
+- 本步目标:
+  - 将训练流程切换到 `M0 最小闭环 -> M1 逐项复耦 -> Stage2 Top2*强度扫描`
+  - 增加 SIGReg 位点/精度/warmup/诊断，先验证 world 分支可训练性
+- 已完成:
+  - 修改 `minimind/model/model_minimind.py`：
+    - 新增 loss 解耦开关：`world_jepa_weight/self_jepa_weight/self_rollout_weight/exit_aux_weight/disable_self_jepa`
+    - 新增 SIGReg 稳定开关：`sigreg_world_source/sigreg_world_fp32_only/sigreg_world_warmup_steps/world_delta_weight`
+    - 新增诊断输出：`world_sigreg_loss_step`、`sigreg_source_mean/std`
+  - 修改 `minimind/scripts/run_luma_stage12.py`：
+    - 新增 CLI 透传与报告字段：`grad_norm_total/grad_norm_world_encoder/first_nonfinite_step/world_sigreg_loss_head/tail/max`
+    - 修复 `bucket_probe_from_mixed_model` 缺少 `sigreg_world_steps` 定义导致的运行错误
+  - 修改 `minimind/scripts/run_dynamics_candidate_eval.py`：
+    - summary/guard 接入 `nonfinite_ok` 与 `sigreg_source_std_ok`
+  - 修改 `minimind/scripts/run_dynamics_autoresearch_local.py`：
+    - TSV 增列上述新诊断字段
+  - 重写 `minimind/luma_stage0/dynamics_autoresearch_program.json`：
+    - 新阶段链路：`4096 -> 10240 -> 14649 -> 78125`
+    - 新候选集合：M0(A1-A4+encoder位点) + M1递进复耦 + low/med/high 强度
+- 验证:
+  - `python3 -m py_compile`（4 脚本 + model）通过
+  - CUDA smoke 通过：
+    - `m0_a1_cosine`
+    - `m0_a2_cosine_sigreg_online`
+  - smoke 产物包含：
+    - 分桶分数（含 `arc_agi`）
+    - Layer2（`POD/DMD/forcing-response`）
+    - 新诊断字段
+- 运行状态:
+  - 已停旧链并启动新链：
+    - output: `/home/kt/ai/luma-architecture/minimind/artifacts/autoresearch_sigreg_decoupled_m0m1_20260402`
+    - 进程: `run_dynamics_autoresearch_local.py` -> `run_dynamics_candidate_eval.py` -> `run_luma_stage12.py`
+  - 当前在跑首个候选：`A2-progress_shape_v1-h3+progress_exit_readout+m0_a1_cosine`（4096）
+- 注意事项:
+  - `research-results.tsv` 仅在候选完成后追加；运行中主要看 `autoresearch-runtime.json` + `metrics/*.jsonl`
+  - `autoresearch-state.json` 当前仍显示 `starting`（脚本行为），以进程树和 runtime 为准判活跃状态
+
 ## [2026-03-28 12:26] Step 1 - Mamba3论文三要素工程落地（首版）
 - 阶段: 阶段0C Mamba3算子构建
 - 本步目标: 将 Mamba3 关键特性（指数梯形、复数状态、MIMO）以可运行方式接入 minimind，并保持 mamba 官方算子路径
@@ -1608,3 +1693,24 @@
   - 记录模板新增“有效性边界”字段，强制标注证据是否可用于结论。
 - 接手收益：
   - 新 agent 可直接按协议执行，减少“改了但不可交接”的隐性失败。
+
+## 2026-04-02 Compression dynamics constraint probe on R3/R4
+- 代码实现（可复现）：
+  - `/home/kt/ai/luma-architecture/minimind/model/model_minimind.py`
+  - `/home/kt/ai/luma-architecture/minimind/scripts/run_luma_stage12.py`
+- 新增配置项：
+  - `compression_dynamics_weight`
+  - `compression_block_drift_floor`
+  - `compression_block_var_floor`
+- 新增训练项：
+  - `compression_dynamics_loss = w * (relu(drift_floor - compression_block_drift_mean) + relu(var_floor - compression_block_var_mean))`
+  - 已并入总损失与 `aux_loss`，并写入 stage2 指标输出：
+    - `compression_dynamics_loss_tail`
+    - `compression_block_drift_tail`
+    - `compression_block_var_tail`
+- 冒烟实验目录：
+  - `/home/kt/ai/luma-architecture/minimind/artifacts/smoke_sigreg_compression_r3r4_20260402`
+- 结果边界（当前版本）：
+  - R3/R4 均可稳定跑通，无 `nonfinite_abort`
+  - 但当前一侧下界约束常出现“loss=0”（压缩区漂移/方差天然高于 floor），说明约束已接线但在部分配置下未形成有效训练压力。
+  - 后续若要让约束持续生效，应改为区间约束（low/high）或按统计自适应 floor。
