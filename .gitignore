@@ -1,9 +1,16 @@
-# private data
+# private data (persona = 用户真实发言)
 luma_dataset/persona_seed/
 luma_dataset/**/persona_seed/
+luma_dataset/synthetic/persona_private.jsonl
+luma_dataset/mixes/
 minimind_runtime_dynamics/dataset/
 **/dataset/private*/
 **/persona_seed/
+
+# large data / external datasets
+data/
+luma_dataset/synthetic/*.jsonl
+!luma_dataset/synthetic/arc_agi.jsonl
 
 # weights / checkpoints
 *.pth
@@ -35,6 +42,23 @@ wandb/
 # local artifacts not meant for sharing by default
 minimind/.wheels/
 minimind_runtime_dynamics/.wheels/
+
+# experiment artifacts (只保留 refactor/ 和 experiment_matrix 的轻量日志)
+minimind/artifacts/autoresearch*/
+minimind/artifacts/smoke_*/
+minimind/artifacts/luma_dynamics_*/
+minimind/artifacts/_launch_*/
+minimind/artifacts/arc_agi_local/
+minimind/artifacts/longrun_*/
+minimind/artifacts/*_2048/
+minimind/artifacts/rerun_*/
+
+# trainer symlinks to mixes
+minimind/dataset/pretrain_*.jsonl
+
+# misc temp
+autoresearch-state.json
+research-results.tsv
 
 # local compiled binaries
 **/*.cpython-*.so

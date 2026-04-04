@@ -1,0 +1,7 @@
+{"step": 1, "loss_lm": 37.5476188659668, "scalar_lr": 2.0077366615205012e-07, "matrix_lr": 0.008, "elapsed_s": 110.1}
+{"step": 1, "loss_lm": 36.75, "scalar_lr": 2.0077366615205012e-07, "matrix_lr": 0.008, "elapsed_s": 224.6}
+{"step": 1, "loss_lm": 37.0, "scalar_lr": 2.0077366615205012e-07, "matrix_lr": 0.008, "elapsed_s": 27.4}
+{"step": 2, "loss_lm": 35.25, "scalar_lr": 2.0077366615205012e-07, "matrix_lr": 0.008, "elapsed_s": 27.7}
+{"step": 3, "loss_lm": 34.75, "scalar_lr": 2.0077366615205012e-07, "matrix_lr": 0.008, "elapsed_s": 28.0}
+{"step": 4, "loss_lm": 33.25, "scalar_lr": 2.0077366615205012e-07, "matrix_lr": 0.008, "elapsed_s": 28.4}
+{"step": 5, "loss_lm": 30.625, "scalar_lr": 2.0077366615205012e-07, "matrix_lr": 0.008, "elapsed_s": 28.7}

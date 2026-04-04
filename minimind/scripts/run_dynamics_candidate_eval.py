@@ -43,6 +43,8 @@ def _resolve_candidate_args(program: dict, candidate: str | None) -> dict:
 
 def _score_report(report: dict, program: dict) -> tuple[float, dict]:
     per_task = report["per_task"]
+    stage1 = report["stage1"]
+    stage2 = report["stage2"]
     weights = program["score_formula"]["weights"]
     metrics = {}
     for metric_name in weights:
@@ -55,7 +57,6 @@ def _score_report(report: dict, program: dict) -> tuple[float, dict]:
             raise KeyError(f"unsupported score metric key: {metric_name}")
     score = sum(weights[name] * metrics[name] for name in weights)
 
-    stage1 = report["stage1"]
     guards = program["guard_rules"]
     rollout_watch_buckets = ["math", "python_code", "mixed", "persona_seed", "arc_agi"]
     rollout_candidates = []
@@ -70,7 +71,10 @@ def _score_report(report: dict, program: dict) -> tuple[float, dict]:
         "rollout_nonzero_ok": rollout_nonzero >= float(guards["min_any_rollout_nonzero_ratio"]),
         "dialogue_ok": float(per_task["dialogue"]["stage2"]["self_loss_tail"]) <= float(guards["max_dialogue_self_tail"]),
         "emotion_ok": float(per_task["emotion"]["stage2"]["self_loss_tail"]) <= float(guards["max_emotion_self_tail"]),
+        "nonfinite_ok": stage2.get("first_nonfinite_step") is None,
     }
+    if "min_sigreg_source_std" in guards:
+        guard_status["sigreg_source_std_ok"] = float(stage2.get("world_sigreg_source_std", 0.0)) >= float(guards["min_sigreg_source_std"])
     guard_status["all_ok"] = all(guard_status.values())
 
     def _tail_mean(values: list[float]) -> float:
@@ -102,6 +106,15 @@ def _score_report(report: dict, program: dict) -> tuple[float, dict]:
         "checkpoint_lineage": report.get("checkpoint_lineage", []),
         "load_checkpoint": report.get("load_checkpoint"),
         "save_checkpoint": report.get("save_checkpoint"),
+        "sigreg_source_mean": float(stage2.get("world_sigreg_source_mean", stage1.get("sigreg_source_mean", 0.0))),
+        "sigreg_source_std": float(stage2.get("world_sigreg_source_std", stage1.get("sigreg_source_std", 0.0))),
+        "first_nonfinite_step": stage2.get("first_nonfinite_step"),
+        "world_sigreg_loss_head": float(stage2.get("world_sigreg_loss_head", 0.0)),
+        "world_sigreg_loss_tail": float(stage2.get("world_sigreg_loss_tail", 0.0)),
+        "world_sigreg_loss_max": float(stage2.get("world_sigreg_loss_max", 0.0)),
+        "world_sigreg_loss_step": int(stage2.get("world_sigreg_loss_step", -1)),
+        "grad_norm_total_tail": float(stage2.get("grad_norm_total_tail", 0.0)),
+        "grad_norm_world_encoder_tail": float(stage2.get("grad_norm_world_encoder_tail", 0.0)),
     }
     return score, diagnostics
 

@@ -92,6 +92,15 @@ def append_tsv(path: Path, row: dict[str, Any]) -> None:
         "pod_top1_energy_ratio",
         "dmd_spectral_radius",
         "forcing_top_abs_corr",
+        "sigreg_source_mean",
+        "sigreg_source_std",
+        "first_nonfinite_step",
+        "world_sigreg_loss_head",
+        "world_sigreg_loss_tail",
+        "world_sigreg_loss_max",
+        "world_sigreg_loss_step",
+        "grad_norm_total_tail",
+        "grad_norm_world_encoder_tail",
     ]
     for bucket in TSV_BUCKETS:
         fieldnames.append(f"{bucket}_self_tail")
@@ -319,6 +328,7 @@ def run_stage(
             load_checkpoint=load_checkpoints.get(candidate),
         )
         results.append(result)
+        summary_payload = load_json(result.summary_path) if result.summary_path.exists() else {}
         append_tsv(
             results_tsv,
             {
@@ -339,6 +349,15 @@ def run_stage(
                 "pod_top1_energy_ratio": result.layer2.get("pod_top1_energy_ratio", ""),
                 "dmd_spectral_radius": result.layer2.get("dmd_spectral_radius", ""),
                 "forcing_top_abs_corr": result.layer2.get("forcing_top_abs_corr", ""),
+                "sigreg_source_mean": summary_payload.get("sigreg_source_mean", ""),
+                "sigreg_source_std": summary_payload.get("sigreg_source_std", ""),
+                "first_nonfinite_step": summary_payload.get("first_nonfinite_step", ""),
+                "world_sigreg_loss_head": summary_payload.get("world_sigreg_loss_head", ""),
+                "world_sigreg_loss_tail": summary_payload.get("world_sigreg_loss_tail", ""),
+                "world_sigreg_loss_max": summary_payload.get("world_sigreg_loss_max", ""),
+                "world_sigreg_loss_step": summary_payload.get("world_sigreg_loss_step", ""),
+                "grad_norm_total_tail": summary_payload.get("grad_norm_total_tail", ""),
+                "grad_norm_world_encoder_tail": summary_payload.get("grad_norm_world_encoder_tail", ""),
                 **{
                     f"{bucket}_self_tail": (result.bucket_scores.get(bucket, {}) or {}).get("self_loss_tail", "")
                     for bucket in TSV_BUCKETS

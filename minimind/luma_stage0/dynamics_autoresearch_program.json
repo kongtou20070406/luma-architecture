@@ -1,24 +1,23 @@
 {
-  "program_name": "luma_dynamics_sigreg_factorial_v1_15m80m",
-  "primary_repo": "/home/kt/ai/minimind",
-  "baseline_candidate": "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_none",
+  "program_name": "luma_sigreg_decoupled_m0m1_v1",
+  "primary_repo": "/home/kt/ai/luma-architecture/minimind",
+  "baseline_candidate": "A2-progress_shape_v1-h3+progress_exit_readout+m0_a1_cosine",
   "stages": {
-    "short_prescreen_steps": 14649,
-    "mid_rescreen_steps": 78125,
-    "long_round1_steps": 20480,
-    "long_confirm_steps": 20480
+    "short_prescreen_steps": 4096,
+    "mid_rescreen_steps": 10240,
+    "long_round1_steps": 14649,
+    "long_confirm_steps": 78125
   },
   "promotions": {
-    "to_mid_top_k": 5,
-    "to_long_top_k": 2,
-    "to_confirm_top_k": 1
+    "to_mid_top_k": 8,
+    "to_long_top_k": 5,
+    "to_confirm_top_k": 5
   },
   "timeouts_sec": {
-    "14649": 43200,
-    "78125": 259200,
-    "4096": 14400,
+    "4096": 21600,
     "10240": 43200,
-    "20480": 64800
+    "14649": 64800,
+    "78125": 345600
   },
   "stage_eval_overrides": {
     "short_prescreen": {
@@ -28,58 +27,148 @@
       "seq_len": 1024
     },
     "long_round1": {
-      "seq_len": 2048
+      "seq_len": 1024
     },
     "long_confirm": {
       "seq_len": 2048
     }
   },
   "candidate_priority": [
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_none",
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world",
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_rollout",
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_delta",
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world_rollout",
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world_delta",
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_rollout_delta",
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world_rollout_delta"
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a1_cosine",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a2_cosine_sigreg_online",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a3_cosine_delta",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a4_cosine_sigreg_delta_online",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a2_cosine_sigreg_encoder",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a4_cosine_sigreg_delta_encoder",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_self_from_a4e",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_self_rollout_from_a4e",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_exit_aux_from_a4e",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_full_regularizers_from_a4e",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_full_regularizers_from_a4e_sigreg_low",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_full_regularizers_from_a4e_sigreg_med",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_full_regularizers_from_a4e_sigreg_high"
   ],
   "candidate_overrides": {
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_none": {
-      "dynamics_experiment": "sigreg_matrix_none"
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a1_cosine": {
+      "dynamics_experiment": "sigreg_decoupled_m0_a1_cosine",
+      "world_full_simplify_loss": true,
+      "enable_sigreg_world": false
     },
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world": {
-      "dynamics_experiment": "sigreg_matrix_world",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a2_cosine_sigreg_online": {
+      "dynamics_experiment": "sigreg_decoupled_m0_a2_cosine_sigreg_online",
+      "world_full_simplify_loss": true,
       "enable_sigreg_world": true
     },
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_rollout": {
-      "dynamics_experiment": "sigreg_matrix_rollout",
-      "enable_sigreg_rollout": true
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a3_cosine_delta": {
+      "dynamics_experiment": "sigreg_decoupled_m0_a3_cosine_delta",
+      "world_full_simplify_loss": false,
+      "enable_sigreg_world": false
     },
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_delta": {
-      "dynamics_experiment": "sigreg_matrix_delta",
-      "enable_sigreg_delta": true
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a4_cosine_sigreg_delta_online": {
+      "dynamics_experiment": "sigreg_decoupled_m0_a4_cosine_sigreg_delta_online",
+      "world_full_simplify_loss": false,
+      "enable_sigreg_world": true
     },
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world_rollout": {
-      "dynamics_experiment": "sigreg_matrix_world_rollout",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a2_cosine_sigreg_encoder": {
+      "dynamics_experiment": "sigreg_decoupled_m0_a2_cosine_sigreg_encoder",
+      "world_full_simplify_loss": true,
       "enable_sigreg_world": true,
-      "enable_sigreg_rollout": true
+      "sigreg_world_source": "sigreg_on_encoder_latent"
     },
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world_delta": {
-      "dynamics_experiment": "sigreg_matrix_world_delta",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m0_a4_cosine_sigreg_delta_encoder": {
+      "dynamics_experiment": "sigreg_decoupled_m0_a4_cosine_sigreg_delta_encoder",
+      "world_full_simplify_loss": false,
       "enable_sigreg_world": true,
-      "enable_sigreg_delta": true
+      "sigreg_world_source": "sigreg_on_encoder_latent"
     },
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_rollout_delta": {
-      "dynamics_experiment": "sigreg_matrix_rollout_delta",
-      "enable_sigreg_rollout": true,
-      "enable_sigreg_delta": true
-    },
-    "A2-progress_shape_v1-h3+progress_exit_readout+sigreg_world_rollout_delta": {
-      "dynamics_experiment": "sigreg_matrix_world_rollout_delta",
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_self_from_a4e": {
+      "dynamics_experiment": "sigreg_decoupled_m1_self",
+      "world_full_simplify_loss": false,
       "enable_sigreg_world": true,
-      "enable_sigreg_rollout": true,
-      "enable_sigreg_delta": true
+      "sigreg_world_source": "sigreg_on_encoder_latent",
+      "disable_self_jepa": false,
+      "self_jepa_weight": 1.0,
+      "self_rollout_weight": 0.0,
+      "exit_aux_weight": 0.0
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_self_rollout_from_a4e": {
+      "dynamics_experiment": "sigreg_decoupled_m1_self_rollout",
+      "world_full_simplify_loss": false,
+      "enable_sigreg_world": true,
+      "sigreg_world_source": "sigreg_on_encoder_latent",
+      "disable_self_jepa": false,
+      "self_jepa_weight": 1.0,
+      "self_rollout_weight": 0.5,
+      "exit_aux_weight": 0.0
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_exit_aux_from_a4e": {
+      "dynamics_experiment": "sigreg_decoupled_m1_exit_aux",
+      "world_full_simplify_loss": false,
+      "enable_sigreg_world": true,
+      "sigreg_world_source": "sigreg_on_encoder_latent",
+      "disable_self_jepa": false,
+      "self_jepa_weight": 1.0,
+      "self_rollout_weight": 0.5,
+      "exit_aux_weight": 0.01
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_full_regularizers_from_a4e": {
+      "dynamics_experiment": "sigreg_decoupled_m1_full_regularizers",
+      "world_full_simplify_loss": false,
+      "enable_sigreg_world": true,
+      "sigreg_world_source": "sigreg_on_encoder_latent",
+      "disable_self_jepa": false,
+      "self_jepa_weight": 1.0,
+      "self_rollout_weight": 0.5,
+      "exit_aux_weight": 0.01,
+      "rollout_zone_weight": 0.02,
+      "routing_tier_entropy_weight": 0.01,
+      "routing_min_local_share_weight": 0.01,
+      "trajectory_vitality_weight": 0.02
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_full_regularizers_from_a4e_sigreg_low": {
+      "dynamics_experiment": "sigreg_decoupled_m1_full_regularizers_sigreg_low",
+      "world_full_simplify_loss": false,
+      "enable_sigreg_world": true,
+      "sigreg_world_source": "sigreg_on_encoder_latent",
+      "disable_self_jepa": false,
+      "self_jepa_weight": 1.0,
+      "self_rollout_weight": 0.5,
+      "exit_aux_weight": 0.01,
+      "rollout_zone_weight": 0.02,
+      "routing_tier_entropy_weight": 0.01,
+      "routing_min_local_share_weight": 0.01,
+      "trajectory_vitality_weight": 0.02,
+      "world_sigreg_weight": 0.01
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_full_regularizers_from_a4e_sigreg_med": {
+      "dynamics_experiment": "sigreg_decoupled_m1_full_regularizers_sigreg_med",
+      "world_full_simplify_loss": false,
+      "enable_sigreg_world": true,
+      "sigreg_world_source": "sigreg_on_encoder_latent",
+      "disable_self_jepa": false,
+      "self_jepa_weight": 1.0,
+      "self_rollout_weight": 0.5,
+      "exit_aux_weight": 0.01,
+      "rollout_zone_weight": 0.02,
+      "routing_tier_entropy_weight": 0.01,
+      "routing_min_local_share_weight": 0.01,
+      "trajectory_vitality_weight": 0.02,
+      "world_sigreg_weight": 0.03
+    },
+    "A2-progress_shape_v1-h3+progress_exit_readout+m1_full_regularizers_from_a4e_sigreg_high": {
+      "dynamics_experiment": "sigreg_decoupled_m1_full_regularizers_sigreg_high",
+      "world_full_simplify_loss": false,
+      "enable_sigreg_world": true,
+      "sigreg_world_source": "sigreg_on_encoder_latent",
+      "disable_self_jepa": false,
+      "self_jepa_weight": 1.0,
+      "self_rollout_weight": 0.5,
+      "exit_aux_weight": 0.01,
+      "rollout_zone_weight": 0.02,
+      "routing_tier_entropy_weight": 0.01,
+      "routing_min_local_share_weight": 0.01,
+      "trajectory_vitality_weight": 0.02,
+      "world_sigreg_weight": 0.06
     }
   },
   "fixed_eval_args": {
@@ -91,6 +180,8 @@
     "enable_python_code": true,
     "python_code_source": "public_mbpp",
     "enable_arc_agi": true,
+    "arc_agi_local_dir": "/home/kt/ai/luma-architecture/minimind/artifacts/arc_agi_local/training",
+    "arc_agi_offline_only": true,
     "persona_dir": "/home/kt/ai/luma_dataset",
     "rollout_steps": 10,
     "reason_loops": 15,
@@ -98,14 +189,18 @@
     "enable_sigreg_world": false,
     "enable_sigreg_rollout": false,
     "enable_sigreg_delta": false,
-    "world_sigreg_weight": 0.05,
+    "sigreg_world_source": "sigreg_on_online",
+    "sigreg_world_fp32_only": true,
+    "sigreg_world_warmup_steps": 256,
+    "world_sigreg_weight": 0.02,
     "world_sigreg_num_slices": 128,
     "world_sigreg_t_min": 0.2,
     "world_sigreg_t_max": 4.0,
     "world_sigreg_num_points": 17,
     "world_sigreg_lambda": 1.0,
-    "sigreg_rollout_weight": 0.05,
-    "sigreg_delta_weight": 0.05,
+    "world_delta_weight": 0.1,
+    "sigreg_rollout_weight": 0.0,
+    "sigreg_delta_weight": 0.0,
     "enable_self_check_ring": true,
     "self_check_k": 2,
     "reason_shared_depth": 2,
@@ -120,7 +215,16 @@
     "ct_modulation_mode": "additive",
     "routing_weak_gain": 0.03,
     "routing_strong_gain": 0.1,
-    "routing_progress_weight": 0.3
+    "routing_progress_weight": 0.3,
+    "world_jepa_weight": 1.0,
+    "self_jepa_weight": 0.0,
+    "self_rollout_weight": 0.0,
+    "exit_aux_weight": 0.0,
+    "disable_self_jepa": true,
+    "rollout_zone_weight": 0.0,
+    "routing_tier_entropy_weight": 0.0,
+    "routing_min_local_share_weight": 0.0,
+    "trajectory_vitality_weight": 0.0
   },
   "score_formula": {
     "direction": "lower",
@@ -134,15 +238,15 @@
     }
   },
   "guard_rules": {
-    "min_c_t_var": 0.2,
-    "min_any_rollout_nonzero_ratio": 0.05,
-    "max_dialogue_self_tail": 1.5,
-    "max_emotion_self_tail": 0.6
+    "min_c_t_var": 0.0,
+    "min_any_rollout_nonzero_ratio": 0.0,
+    "max_dialogue_self_tail": 10.0,
+    "max_emotion_self_tail": 10.0,
+    "min_sigreg_source_std": 0.0001
   },
   "notes": [
-    "This cycle is the 8-cell anti-collapse factorial matrix: baseline/world/rollout/delta and all combinations.",
-    "Promotion uses checkpoint lineage: short(15M) -> mid(80M) for the same candidate.",
-    "When failed:1 appears, inspect logs first and separate implementation bug vs structural failure.",
-    "Do not use stale runtime files as alive-process evidence."
+    "This run switches to SIGReg decomposition protocol: M0 minimal closure -> M1 progressive recoupling.",
+    "Stage schedule: 4096 -> 10240 -> 14649 (~15M) -> 78125 (~80M).",
+    "SIGReg diagnostics are mandatory: source mean/std, world sigreg head/tail/max, grad norms, and first_nonfinite_step."
   ]
 }
