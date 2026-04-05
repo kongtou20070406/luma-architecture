@@ -74,9 +74,8 @@ luma-architecture/
 │   ├── synthetic/      # 公开数据集 (math, code, scifi, etc.)
 │   ├── fetch_*.py      # 数据拉取脚本
 │   └── rebuild_mixes.py # DataMix 重建
-├── third_party/
-│   └── mamba-official/ # Mamba3 TileLang/Triton kernels
-└── parameter-golf/     # 可选机制验证材料
+└── third_party/
+    └── mamba-official/ # Mamba3 TileLang/Triton kernels
 ```
 
 ## 快速开始
@@ -121,7 +120,7 @@ python train_luma_refactor.py \
 - 训练权重 / checkpoint / `*.pth`
 - 本地虚拟环境和缓存
 
-## 推���阅读顺序
+## 推荐阅读顺序
 
 1. [Luma_Execution_Plan_v4](docs/plans/Luma_Execution_Plan_v4_20260405.md) — 当前全局路线图
 2. [Research Report](docs/research/Luma_Research_Report_SmallModel_NoBP.md) — 技术调研
@@ -136,4 +135,4 @@ python train_luma_refactor.py \
 
 ## License
 
-Apache-2.0. `parameter-golf/` 保留其 MIT 许可。
+Apache-2.0
