@@ -400,6 +400,12 @@ class LumaConfig(PretrainedConfig):
         self.c_t_dim = kwargs.get("c_t_dim", 64)
         self.router_dim = kwargs.get("router_dim", 256)
         self.slow_k = kwargs.get("slow_k", 2)
+        # AttnRes mode: "legacy" = current lerp, "paper" = Kimi Block AttnRes (direct replace),
+        # "paper_global_q" = paper output but global pseudo_query (AR5 variant)
+        self.attnres_mode = kwargs.get("attnres_mode", "legacy")
+        # Fine-grained overrides: if set, override attnres_mode for that zone only
+        self.attnres_compress_mode = kwargs.get("attnres_compress_mode", "")  # "" = follow attnres_mode
+        self.attnres_reason_mode = kwargs.get("attnres_reason_mode", "")  # "" = follow attnres_mode
         self.mhc_streams = kwargs.get("mhc_streams", 4)
         self.mhc_sinkhorn_iters = kwargs.get("mhc_sinkhorn_iters", 20)
         self.mhc_alpha_init = kwargs.get("mhc_alpha_init", 0.01)
@@ -810,11 +816,12 @@ class CompressionBlockAttentionResiduals(nn.Module):
         self.pseudo_query = nn.Parameter(torch.zeros(hidden_size))
         self.scale = nn.Parameter(torch.tensor(0.1))
 
-    def forward(self, current: torch.Tensor, block_reprs: List[torch.Tensor]) -> torch.Tensor:
+    def forward(self, current: torch.Tensor, block_reprs: List[torch.Tensor],
+                block_idx: int = -1) -> torch.Tensor:
         """Luma lets the current block reread earlier block memories before deciding what should stay in the residual path.
         Luma 让当前 block 在更新残差前先回看更早的 block 记忆，再决定哪些内容应留在主路径里。
         """
-
+        del block_idx  # legacy mode ignores block_idx
         if not block_reprs:
             return current
         stacked = torch.stack([self.norm(r) for r in block_reprs], dim=1)
@@ -823,6 +830,147 @@ class CompressionBlockAttentionResiduals(nn.Module):
         weights = torch.softmax(scores.float(), dim=1).to(stacked.dtype).unsqueeze(-1)
         mixed = (stacked * weights).sum(dim=1)
         return current + self.scale * (mixed - current)
+
+
+class PaperBlockAttnRes(nn.Module):
+    """Kimi-style Block AttnRes (arxiv 2603.15031): each block boundary has its own
+    pseudo-query, softmax attention over block reps directly replaces the hidden state.
+    RMSNorm on keys only, values stay raw. Zero-init queries → uniform weights at start.
+
+    Kimi 式 Block AttnRes：每个 block boundary 有独立 pseudo_query，
+    softmax attention 直接替换 hidden state，不做 lerp。
+    """
+
+    def __init__(self, hidden_size: int, max_blocks: int = 20, eps: float = 1e-6):
+        super().__init__()
+        self.norm = LumaZCRMSNorm(hidden_size, eps=eps)
+        # One pseudo_query per block position, zero-initialized
+        self.pseudo_queries = nn.Parameter(torch.zeros(max_blocks, hidden_size))
+        self.max_blocks = max_blocks
+
+    def forward(self, current: torch.Tensor, block_reprs: List[torch.Tensor],
+                block_idx: int = -1) -> torch.Tensor:
+        if not block_reprs:
+            return current
+        # V = [block_reprs..., current] (raw, no norm)
+        V = torch.stack(block_reprs + [current], dim=1)  # [B, N+1, T, D]
+        K = torch.stack([self.norm(r) for r in block_reprs] + [self.norm(current)], dim=1)
+        # Select query for this block position
+        qi = block_idx if 0 <= block_idx < self.max_blocks else min(len(block_reprs), self.max_blocks - 1)
+        query = self.pseudo_queries[qi]  # [D]
+        # logits = w_l · RMSNorm(v_i), no /sqrt(d)
+        logits = torch.einsum("d,bkld->bkl", query, K)  # [B, N+1, T]
+        weights = torch.softmax(logits.float(), dim=1).to(V.dtype).unsqueeze(-1)
+        h = (V * weights).sum(dim=1)  # [B, T, D]
+        return h
+
+
+class PaperBlockAttnResGlobalQ(nn.Module):
+    """AR5 variant: paper-style output (direct replace, V raw) but with a single
+    global pseudo_query instead of per-block queries.
+
+    AR5 变体：论文式输出（直接替换、V 不 norm），但用 1 个全局 pseudo_query。
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.norm = LumaZCRMSNorm(hidden_size, eps=eps)
+        self.pseudo_query = nn.Parameter(torch.zeros(hidden_size))
+
+    def forward(self, current: torch.Tensor, block_reprs: List[torch.Tensor],
+                block_idx: int = -1) -> torch.Tensor:
+        del block_idx
+        if not block_reprs:
+            return current
+        V = torch.stack(block_reprs + [current], dim=1)
+        K = torch.stack([self.norm(r) for r in block_reprs] + [self.norm(current)], dim=1)
+        logits = torch.einsum("d,bkld->bkl", self.pseudo_query, K)
+        weights = torch.softmax(logits.float(), dim=1).to(V.dtype).unsqueeze(-1)
+        h = (V * weights).sum(dim=1)
+        return h
+
+
+class PaperUnifiedAttnRes(nn.Module):
+    """Kimi-style AttnRes for the reasoning loop: per-loop pseudo_query,
+    loop_history + block_reprs merged into one V matrix, direct replace.
+
+    Kimi 式推理区 AttnRes：每轮循环独立 pseudo_query，
+    loop_history 和 block_reprs 合并到同一个 V 矩阵，直接替换。
+    """
+
+    def __init__(self, hidden_size: int, max_loops: int = 24, eps: float = 1e-6):
+        super().__init__()
+        self.norm = LumaZCRMSNorm(hidden_size, eps=eps)
+        self.pseudo_queries = nn.Parameter(torch.zeros(max_loops, hidden_size))
+        self.max_loops = max_loops
+
+    def _align(self, source: torch.Tensor, target_len: int) -> torch.Tensor:
+        slen = source.shape[1]
+        if slen == target_len:
+            return source
+        if slen < target_len:
+            return F.pad(source, (0, 0, target_len - slen, 0))
+        return source[:, -target_len:, :]
+
+    def forward(self, h: torch.Tensor, loop_history: List[torch.Tensor],
+                block_reprs: List[torch.Tensor], loop_idx: int = 0) -> torch.Tensor:
+        # Merge all sources: block_reprs (aligned) + loop_history (aligned) + current h
+        sources: List[torch.Tensor] = []
+        tgt_len = h.shape[1]
+        for br in block_reprs:
+            sources.append(self._align(br, tgt_len))
+        for lh in loop_history:
+            sources.append(self._align(lh, tgt_len))
+        sources.append(h)
+        if len(sources) <= 1:
+            return h
+        V = torch.stack(sources, dim=1)  # [B, N, T, D]
+        K = torch.stack([self.norm(s) for s in sources], dim=1)
+        qi = min(loop_idx, self.max_loops - 1)
+        query = self.pseudo_queries[qi]
+        logits = torch.einsum("d,bkld->bkl", query, K)
+        weights = torch.softmax(logits.float(), dim=1).to(V.dtype).unsqueeze(-1)
+        return (V * weights).sum(dim=1)
+
+
+class PaperUnifiedAttnResGlobalQ(nn.Module):
+    """AR5 variant for reasoning loop: paper-style output but with 2 global
+    pseudo_queries (loop + cross), merged V, direct replace.
+
+    AR5 推理区变体：论文式输出，但保留 2 个全局 pseudo_query（loop + cross），
+    所有源合并到一个 V 矩阵，直接替换。
+    """
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.norm = LumaZCRMSNorm(hidden_size, eps=eps)
+        self.pseudo_query = nn.Parameter(torch.zeros(hidden_size))
+
+    def _align(self, source: torch.Tensor, target_len: int) -> torch.Tensor:
+        slen = source.shape[1]
+        if slen == target_len:
+            return source
+        if slen < target_len:
+            return F.pad(source, (0, 0, target_len - slen, 0))
+        return source[:, -target_len:, :]
+
+    def forward(self, h: torch.Tensor, loop_history: List[torch.Tensor],
+                block_reprs: List[torch.Tensor], loop_idx: int = 0) -> torch.Tensor:
+        del loop_idx
+        sources: List[torch.Tensor] = []
+        tgt_len = h.shape[1]
+        for br in block_reprs:
+            sources.append(self._align(br, tgt_len))
+        for lh in loop_history:
+            sources.append(self._align(lh, tgt_len))
+        sources.append(h)
+        if len(sources) <= 1:
+            return h
+        V = torch.stack(sources, dim=1)
+        K = torch.stack([self.norm(s) for s in sources], dim=1)
+        logits = torch.einsum("d,bkld->bkl", self.pseudo_query, K)
+        weights = torch.softmax(logits.float(), dim=1).to(V.dtype).unsqueeze(-1)
+        return (V * weights).sum(dim=1)
 
 
 def _activation_offload_ctx():
@@ -877,7 +1025,14 @@ class CompressionZone(nn.Module):
             else:
                 layers.append(CompressionMambaLayer(config))
         self.layers = nn.ModuleList(layers)
-        self.compression_block_attnres = CompressionBlockAttentionResiduals(config.hidden_size, eps=config.rms_norm_eps)
+        max_blocks = config.compression_active_layers // config.block_repr_every + 2
+        cmode = config.attnres_compress_mode or config.attnres_mode
+        if cmode == "paper":
+            self.compression_block_attnres = PaperBlockAttnRes(config.hidden_size, max_blocks=max_blocks, eps=config.rms_norm_eps)
+        elif cmode == "paper_global_q":
+            self.compression_block_attnres = PaperBlockAttnResGlobalQ(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.compression_block_attnres = CompressionBlockAttentionResiduals(config.hidden_size, eps=config.rms_norm_eps)
         self.transition_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.transition_scale = nn.Parameter(torch.zeros(config.hidden_size))
 
@@ -905,7 +1060,7 @@ class CompressionZone(nn.Module):
                 # 一份 detach 后交给推理区安全回看。
                 block_history.append(x)
                 block_reprs.append(x.detach())
-                x = self.compression_block_attnres(x, block_history)
+                x = self.compression_block_attnres(x, block_history, block_idx=len(block_history) - 1)
                 if self.compression_mhc is not None:
                     mhc_streams = self.compression_mhc.init_streams(x)
                     _, x = self.compression_mhc(mhc_streams, self.compression_identity_block)
@@ -1113,7 +1268,9 @@ class UnifiedAttnRes(nn.Module):
             return F.pad(source, (0, 0, pad_len, 0))
         return source[:, -target_len:, :]
 
-    def forward(self, h: torch.Tensor, loop_history: List[torch.Tensor], block_reprs: List[torch.Tensor]) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, loop_history: List[torch.Tensor], block_reprs: List[torch.Tensor],
+                loop_idx: int = 0) -> torch.Tensor:
+        del loop_idx  # legacy mode ignores loop_idx
         loop_agg = self._aggregate(self.loop_pseudo_q, loop_history)
         cross_agg = self._aggregate(self.cross_pseudo_q, block_reprs)
         if loop_agg is not None:
@@ -2815,7 +2972,13 @@ class LumaBackbone(nn.Module):
             alpha_init=config.mhc_alpha_init,
         )
         self.reason_core = LumaReasonCore(config)
-        self.unified_attnres = UnifiedAttnRes(config.hidden_size, eps=config.rms_norm_eps)
+        rmode = config.attnres_reason_mode or config.attnres_mode
+        if rmode == "paper":
+            self.unified_attnres = PaperUnifiedAttnRes(config.hidden_size, max_loops=config.reason_loops_max + 2, eps=config.rms_norm_eps)
+        elif rmode == "paper_global_q":
+            self.unified_attnres = PaperUnifiedAttnResGlobalQ(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.unified_attnres = UnifiedAttnRes(config.hidden_size, eps=config.rms_norm_eps)
         self.introspection_state_stream = IntrospectionStateStream(config)
         # The introspection stream produces `know_gap` and `c_t`.
         # SelfJEPAResidualPredictor is a separate prediction head on top of that stream.
@@ -3071,7 +3234,7 @@ class LumaBackbone(nn.Module):
                     tensor = value if isinstance(value, torch.Tensor) else h.new_tensor(float(value))
                     tensor = tensor.float().mean()
                     dynamics_modulation_traces.setdefault(key, []).append(tensor.detach())
-            h = self.unified_attnres(h, loop_history, block_reprs)
+            h = self.unified_attnres(h, loop_history, block_reprs, loop_idx=loop_idx)
             did_slow_update = (loop_idx % self.config.slow_k == 0)
             if did_slow_update:
                 slow_step_idx += 1

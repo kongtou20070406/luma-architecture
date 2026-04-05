@@ -97,13 +97,14 @@ Matrix 1 (B' World-JEPA, ~4h) ──── 完成 ✅, B2' (sig=0.10) 胜出
 ┌───────────────────────────────────────────────┐
 │  M1 完成后立即并行:                            │
 │                                                │
-│  M7 (GaLore 优化器, ~2天) ←── 最高优先级！     │
-│    └─ 目标: 解锁 bs=2 → 预训练速度翻倍        │
+│  M9 (AttnRes 改造, ~4h) ←── 🔄 运行中          │
+│    └─ Kimi Block AttnRes vs 当前 lerp          │
+│                                                │
+│  M7 (训练吞吐量, ~4h) ←── M9 后立即开始        │
+│    └─ gradient accum=2 + activation offload    │
 │                                                │
 │  M5 (ES 预训练验证, ~3天) ←── 探索性验证       │
 │    └─ N=2 antithetic 快速验证能否收敛          │
-│       如果收敛 → 留作多卡扩展方案              │
-│       如果不收敛 → 放弃，专注 BP               │
 │                                                │
 │  M6 (数据效率, ~3-5天) ←── 并行                │
 │    ├─ 6a: Perplexity 修剪                      │
@@ -287,26 +288,64 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 **关键**: 不是简单 paraphrase（论文证明 paraphrase 饱和快），而是实体图扩展
 **判胜标准**: persona/empathy eval 提升 + loss 不恶化
 
-### Matrix 7: GaLore 优化器 — 解锁更大 batch
+### Matrix 7: 训练吞吐量提升 — 等效 bs=2
 
-**目标**：用梯度低秩投影降低优化器内存，尝试在 32GB VRAM 下实现 bs=2。
-**前置**：Matrix 1 完成
-**可与 Matrix 3-5 并行**
+**VRAM 分析结论 (2026-04-05)**：
+- 优化器状态已经 8-bit，仅占 **0.67 GB** — GaLore 节省空间极小
+- 瓶颈是**激活内存** (7.31 GB) 和 CUDA **碎片化** (reserved 16.44 vs peak 9.90)
+- **GaLore 单独无法解锁 bs=2**
 
-| 实验 | 优化器 | rank | 说明 |
-|---|---|---|---|
-| GL0 | 当前 Muon+AdamW (baseline) | — | 当前 VRAM: 16.44GB reserved |
-| GL1 | GaLore + AdamW | 128 | 梯度投影到 rank=128 |
-| GL2 | GaLore + AdamW | 64 | 更激进压缩 |
-| GL3 | GaLore + 8bit AdamW | 128 | GaLore + 量化优化器组合 |
+**新策略**：gradient accumulation（零 VRAM 开销）+ activation offload 验证
 
-**参考**: "GaLore" (Zhao et al., 2024) — 优化器内存降 65.5%
+| 实验 | 方法 | bs | accum | 等效 bs | 说明 |
+|---|---|---|---|---|---|
+| GL0 | 当前 baseline | 1 | 1 | 1 | 当前 VRAM: 9.90 peak |
+| GL1 | gradient accumulation | 1 | 2 | 2 | 零 VRAM 开销，速度 ~×2 step |
+| GL2 | activation offload compress | 1 | 2 | 2 | CPU offload 压缩区激活 |
+| GL3 | 真实 bs=2 + offload | 2 | 1 | 2 | ���试是否 OOM |
+| GL4 | 真实 bs=2 + offload + empty_cache | 2 | 1 | 2 | 碎片化控制 |
+
 **关键指标**:
-- VRAM 降到多少？能否 bs=2？
-- loss 收敛速度对比（GaLore 可能收敛稍慢）
-- 如果 bs=2 可行：训练速度翻倍，预训练从 25 天降到 ~13 天
+- GL1: 确认 accum=2 的 loss 收敛 ≈ baseline（理论上等价）
+- GL3/GL4: 真实 bs=2 是否 OOM？如果不 OOM → 速度翻倍
+- 如果真实 bs=2 不行 → GL1 (accum=2) 是最佳方案
 
-**判胜标准**: VRAM reserved < 20GB (允许 bs=2) + loss 不超过 baseline 10%
+**判胜标准**: 等效 bs=2 训练不 OOM + loss 不超过 baseline 5%
+
+### Matrix 9: AttnRes 改造 — Kimi Block Attention Residuals
+
+**目标**：将当前 lerp 残差注意力替换为论文 (arxiv 2603.15031) 的 Block Attention Residuals，验证对收敛和动力学的影响。
+**前置**：Matrix 1 ✅ (B2' baseline)
+**预计**：每实验 2100 步 × ~1.4s/step ≈ 49min，5 实验 ≈ 4h
+**脚本**：`minimind/scripts/run_matrix9_attnres.sh`
+
+**当前 vs 论文的三个关键差异**：
+1. **输出方式**：lerp (α·old + (1-α)·new) → 直接替换 (softmax attention 加权和)
+2. **Query**：全局共享 pseudo_query → 每层/每块独立 pseudo_query (zero-init)
+3. **Value 归一化**：V 经过 RMSNorm → V 保持 raw (只 norm K)
+
+| 实验 | CompressionZone | ReasoningLoop | Query 类型 | 说明 |
+|---|---|---|---|---|
+| AR0 | legacy (lerp) | legacy (lerp) | global | Baseline = B2' |
+| AR1 | paper (direct) | legacy (lerp) | per-block | 仅压缩区用论文式 |
+| AR2 | legacy (lerp) | paper (direct) | per-loop | 仅推理循环用论文式 |
+| AR3 | paper (direct) | paper (direct) | per-block/loop | 全量论文式 |
+| AR5 | paper_global_q | paper_global_q | global | 论文输出 + 全局 query |
+
+**实现细节**：
+- `PaperBlockAttnRes`: per-block 独立 query, RMSNorm on K only, V raw, direct replace
+- `PaperBlockAttnResGlobalQ`: 同上但单个全局 pseudo_query
+- `PaperUnifiedAttnRes`: per-loop 独立 query, 合并 loop_history + block_reprs
+- `PaperUnifiedAttnResGlobalQ`: 同上但单个全局 pseudo_query
+- AR4 (input-dependent query) 暂跳过，AR3 有效再加
+
+**判胜标准**:
+1. loss_lm ≤ AR0 baseline
+2. DOD v2_rank 健康 (≥5/52)
+3. MHC 不死亡
+4. VRAM 不显著增加 (< +1 GB)
+
+**状态**: 🔄 运行中 (2026-04-05 23:20 启动)
 
 ### Matrix 8: 推理时 A* 搜索 — 部署增强
 
@@ -379,37 +418,39 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 |--------|------|---------|------|------|
 | — | Matrix 0 (架构定型) | ~1h | **完成 ✅** | A1 (482M) 胜出 |
 | — | Matrix 1 (B' World-JEPA) | ~4h | **完成 ✅** | B2' (sig=0.10) 胜出 |
-| **P0** | **Matrix 7 (GaLore)** | **~2 天** | **M1 后立即开始** | **解锁 bs=2 → 速度翻倍** |
-| **P0** | **Matrix 5 (ES 验证)** | **~3 天** | **与 M7 并行** | **N=2 快速验证能否收敛** |
+| **P0** | **Matrix 9 (AttnRes 改造)** | **~4h** | **🔄 运行中** | **Kimi Block AttnRes vs lerp** |
+| **P0** | **Matrix 7 (训练吞吐量)** | **~4h** | **M9 后启动** | **accum=2 等效 bs=2** |
+| P1 | Matrix 5 (ES 验证) | ~3 天 | 与 M7 并行 | N=2 快速验证能否收敛 |
 | P1 | Matrix 6 (数据效率) | 3-5 天 | 与 M5/M7 并行 | EntiGraph 合成 + PPL 修剪 |
 | P1 | Matrix 3 (数据扩量) | 并行准备 | 数据收集中 | 不阻塞训练 |
 | P2 | Matrix 2 (Exit Policy) | ~3h | 预训练后 | fine-tune 阶段加入 |
 | P2 | Matrix 4 (MoR Routing) | 1-2 周 | 预训练后 | fine-tune 阶段加入 |
-| — | Gate F (配置冻结) | 0.5 天 | — | M1 + M7 结果决定 |
-| — | **正式预训练** | **~9-18 天** | — | **BP + GaLore (主线)** |
+| — | Gate F (配置冻结) | 0.5 天 | — | M9 + M7 结果决定 |
+| — | **正式预训练** | **~10-16 天** | — | **BP + accum=2 (主线)** |
 | P3 | Matrix 8 (A* 推理搜索) | ~3 天 | 部署阶段 | 推理时免费提升质量 |
 
 **决策树**:
 ```
-M7 (GaLore bs=2?)          M5 (ES N=2 收敛?)
-  ├─ YES → BP+GaLore bs=2    ├─ YES → 留作多卡方案
-  │        预训练 ~9 天        │        (单卡比 BP 慢)
-  └─ NO  → BP bs=1            └─ NO  → 放弃 ES
-           预训练 ~18 天
+M9 (AttnRes 改造)           M7 (训练吞吐量)
+  ├─ paper 胜出 → 更新 AttnRes   ├─ accum=2 收敛 → 等效 bs=2
+  └─ legacy 胜出 → 保持现状       └─ 真实 bs=2 不 OOM → 速度翻倍
+
+M5 (ES N=2 收敛?)
+  ├─ YES → 留作多卡方案
+  └─ NO  → 放弃 ES
 ```
 
-**ES 定位修正**：
-- 单卡 RTX 5090 上 ES 预训练比 BP **更慢**（N=30 前向传播 > 1 次反向传播）
-- ES 真正优势在多卡场景（30 扰动 → 30 卡并行）和非可微组件支持
-- 用 N=2 antithetic sampling 做最小验证：如果 100M pilot 收敛，说明 ES 路线可行，**留作未来多卡扩展方案**
-- 当前单卡主线：**GaLore + BP 是最务实的提速路径**
+**VRAM 分析修正 (2026-04-05)**：
+- 优化器状态已 8-bit，仅 **0.67 GB** — GaLore/MLorc/APOLLO 节省极小
+- 瓶颈是激活内存 (7.31 GB)，不是优化器
+- gradient accumulation=2 零 VRAM 开销，是最务实的提速路径
 
 **预训练时间估算** (482M, 2B tokens):
 | 方案 | bs | tokens/step | 速度 | 耗时 |
 |------|-----|-------------|------|------|
-| BP 当前 | 1 | 2048 | 1.6s/step | ~18 天 |
-| **BP + GaLore** | **2** | **4096** | **~2.5s/step** | **~9 天** |
-| ES N=2 bs=8 | 8 | 16384 | ~1.2s/step | ~? (sample efficiency 未知) |
+| BP 当前 | 1 | 2048 | 1.4s/step | ~16 天 |
+| **BP + accum=2** | **1** | **4096** | **~2.8s/step** | **~10 天** |
+| BP + 真实 bs=2 | 2 | 4096 | ~2s/step (如不 OOM) | ~7 天 |
 
 **预训练时间重估** (482M 模型):
 - 482M < 588M → 可能更快
@@ -425,6 +466,7 @@ M7 (GaLore bs=2?)          M5 (ES N=2 收敛?)
 1. ✅ Matrix 0 完成，A1 (482M) ���型
 2. ✅ arxiv_dl_code 20K 条拉取完成
 3. ✅ Matrix 1 完成，B2' (sig=0.10, mask=0.25) 胜出
-4. **→ 启动 Matrix 7 (GaLore)**: 最高优先级，解锁 bs=2
-5. **→ 启动 Matrix 5 (ES N=2)**: 与 M7 并行，探索性验证
-6. **→ 整合 arxiv_dl_code**: 更��� DataMix，重建 pretrain 数据
+4. **🔄 Matrix 9 (AttnRes 改造)**: 运行中 (5 实验 ~4h, AR0-AR5)
+5. **→ Matrix 7 (训练吞吐量)**: M9 后启动, gradient accum=2 + activation offload
+6. **→ Matrix 5 (ES N=2)**: 探索性验证
+7. **→ 整合 arxiv_dl_code**: 更新 DataMix，重建 pretrain 数据

@@ -43,6 +43,10 @@ wandb/
 minimind/.wheels/
 minimind_runtime_dynamics/.wheels/
 
+# large metrics jsonl (GitHub warns >50MB)
+minimind/artifacts/refactor/phase4_metrics.jsonl
+minimind/artifacts/refactor/phase6_metrics.jsonl
+
 # experiment artifacts (只保留 refactor/ 和 experiment_matrix 的轻量日志)
 minimind/artifacts/autoresearch*/
 minimind/artifacts/smoke_*/
