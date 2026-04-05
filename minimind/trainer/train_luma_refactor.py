@@ -160,6 +160,7 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         reason_mor_routing=bool(getattr(args, "reason_mor_routing", 0)),
         reason_mor_num_experts=getattr(args, "reason_mor_num_experts", 4),
         reason_mor_topk=getattr(args, "reason_mor_topk", 2),
+        mhc_alpha_init=getattr(args, "mhc_alpha_init", 0.01),
     )
 
 
@@ -789,6 +790,8 @@ if __name__ == "__main__":
     parser.add_argument("--eos_token_id", type=int, default=2)
     # ── aux params（只保留结构需要的，loss 全部归零）──────────────────────
     parser.add_argument("--self_rollout_steps", type=int, default=10)
+    parser.add_argument("--mhc_alpha_init", type=float, default=0.01,
+                        help="MHC 残差流的初始 alpha（默认 0.01，建议 0.05 避免梯度饥饿）")
     parser.add_argument("--world_jepa_mode", type=str, default="full")
     parser.add_argument("--world_jepa_weight", type=float, default=1.0,
                         help="Phase 6+: world JEPA loss 权重")

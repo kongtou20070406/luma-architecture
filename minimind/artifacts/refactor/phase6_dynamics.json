@@ -1,122 +1,66 @@
 {
   "phase": 6,
-  "total_steps": 5001,
+  "total_steps": 2101,
   "final_dod_rank": 2,
-  "final_energy_mode1_pct": 96.11,
-  "final_dmd_spectral_radius": 0.276787,
+  "final_energy_mode1_pct": 99.79,
+  "final_dmd_spectral_radius": 0.013322,
   "dod_rank_trajectory": [
     3,
     3,
-    2,
-    2,
     3,
-    2,
-    2,
     3,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
-    2,
+    3,
+    3,
+    1,
+    1,
     2,
     2,
     2,
     2
   ],
   "energy_mode1_pct_trajectory": [
-    80.4,
-    88.6,
-    90.3,
-    93.2,
-    96.1,
-    99.6,
-    98.0,
-    98.5,
-    98.4,
-    99.5,
+    95.6,
+    91.1,
     96.8,
-    99.7,
-    99.0,
-    98.4,
-    96.5,
-    97.2,
-    97.7,
-    93.8,
     95.2,
-    99.7,
-    97.2,
-    99.4,
-    99.9,
-    99.9,
-    96.1,
-    96.1
+    64.3,
+    90.7,
+    100.0,
+    100.0,
+    93.5,
+    99.8,
+    99.8,
+    99.8
   ],
   "dmd_spectral_radius_trajectory": [
-    0.8527,
-    0.0424,
-    0.3603,
-    0.1717,
-    0.1539,
-    0.065,
-    0.395,
-    0.1293,
-    0.2988,
-    0.1464,
-    0.4744,
-    0.0663,
-    0.0738,
-    0.3247,
-    0.2142,
-    0.0589,
-    0.1453,
-    0.0384,
-    0.0635,
-    0.0911,
-    0.1357,
-    0.2827,
-    0.0678,
-    0.1106,
-    0.2768,
-    0.2768
+    0.8862,
+    0.4605,
+    0.2165,
+    0.1418,
+    0.218,
+    0.0858,
+    0.2859,
+    0.1059,
+    0.2476,
+    0.0129,
+    0.0133,
+    0.0133
   ],
   "ct_dmd_spectral_radius_trajectory": [
-    0.9925,
-    0.9684,
-    0.9825,
-    0.9886,
-    0.9869,
-    0.9696,
-    0.9874,
-    0.9884,
-    0.9788,
-    0.9884,
-    0.9551,
-    0.9522,
-    0.9764,
-    0.9632,
-    0.9697,
-    0.9594,
-    0.9893,
-    0.9609,
-    0.9214,
-    0.9613,
-    0.9378,
-    0.9861,
-    0.9722,
-    0.9644,
-    0.9548,
-    0.9548
+    1.0343,
+    0.9955,
+    0.9938,
+    0.9809,
+    0.9659,
+    0.9524,
+    0.9811,
+    0.9752,
+    0.9622,
+    0.9559,
+    0.9766,
+    0.9766
   ],
-  "verdict": "FAIL: dod_rank=2 < target 5, mode1=96.1%",
+  "verdict": "FAIL: dod_rank=2 < target 5, mode1=99.8%",
   "full_snapshots": [
     {
       "window_steps": 200,
@@ -125,29 +69,29 @@
       "pod": {
         "effective_rank": 3,
         "energy_top5_pct": [
-          80.36,
-          13.03,
-          6.61
+          95.59,
+          3.53,
+          0.88
         ],
         "sv_top5": [
-          4.6943,
-          1.8903,
-          1.3467
+          10.0471,
+          1.9315,
+          0.9643
         ],
-        "energy_mode1_pct": 80.36,
-        "total_energy": 27.423545
+        "energy_mode1_pct": 95.59,
+        "total_energy": 105.605612
       },
       "dmd": {
-        "spectral_radius": 0.852711,
+        "spectral_radius": 0.886226,
         "stable": true,
         "eig_mags_top5": [
-          0.8527,
-          0.6236
+          0.8862,
+          0.3022
         ]
       },
       "dod_rank": 3,
-      "energy_mode1_pct": 80.36,
-      "dmd_spectral_radius": 0.852711
+      "energy_mode1_pct": 95.59,
+      "dmd_spectral_radius": 0.886226
     },
     {
       "window_steps": 200,
@@ -156,91 +100,91 @@
       "pod": {
         "effective_rank": 3,
         "energy_top5_pct": [
-          88.62,
-          10.6,
-          0.78
+          91.08,
+          8.42,
+          0.51
         ],
         "sv_top5": [
-          14.0871,
-          4.8724,
-          1.3225
+          2.8539,
+          0.8675,
+          0.2133
         ],
-        "energy_mode1_pct": 88.62,
-        "total_energy": 223.934737
+        "energy_mode1_pct": 91.08,
+        "total_energy": 8.942662
       },
       "dmd": {
-        "spectral_radius": 0.04242,
+        "spectral_radius": 0.460506,
         "stable": true,
         "eig_mags_top5": [
-          0.0424,
-          0.0254
+          0.4605,
+          0.0483
         ]
       },
       "dod_rank": 3,
-      "energy_mode1_pct": 88.62,
-      "dmd_spectral_radius": 0.04242
+      "energy_mode1_pct": 91.08,
+      "dmd_spectral_radius": 0.460506
     },
     {
       "window_steps": 200,
       "first_step": 401,
       "last_step": 600,
       "pod": {
-        "effective_rank": 2,
+        "effective_rank": 3,
         "energy_top5_pct": [
-          90.35,
-          9.64,
-          0.02
+          96.84,
+          2.81,
+          0.35
         ],
         "sv_top5": [
-          46.777,
-          15.2793,
-          0.6094
+          2.5558,
+          0.4351,
+          0.1537
         ],
-        "energy_mode1_pct": 90.35,
-        "total_energy": 2421.920486
+        "energy_mode1_pct": 96.84,
+        "total_energy": 6.745135
       },
       "dmd": {
-        "spectral_radius": 0.360261,
+        "spectral_radius": 0.216498,
         "stable": true,
         "eig_mags_top5": [
-          0.3603,
-          0.1006
+          0.2165,
+          0.0103
         ]
       },
-      "dod_rank": 2,
-      "energy_mode1_pct": 90.35,
-      "dmd_spectral_radius": 0.360261
+      "dod_rank": 3,
+      "energy_mode1_pct": 96.84,
+      "dmd_spectral_radius": 0.216498
     },
     {
       "window_steps": 200,
       "first_step": 601,
       "last_step": 800,
       "pod": {
-        "effective_rank": 2,
+        "effective_rank": 3,
         "energy_top5_pct": [
-          93.2,
-          6.71,
-          0.09
+          95.23,
+          4.24,
+          0.53
         ],
         "sv_top5": [
-          284.4335,
-          76.2931,
-          8.8863
+          1.5957,
+          0.3368,
+          0.1187
         ],
-        "energy_mode1_pct": 93.2,
-        "total_energy": 86802.024784
+        "energy_mode1_pct": 95.23,
+        "total_energy": 2.673648
       },
       "dmd": {
-        "spectral_radius": 0.171684,
+        "spectral_radius": 0.141794,
         "stable": true,
         "eig_mags_top5": [
-          0.1717,
-          0.0253
+          0.1418,
+          0.0218
         ]
       },
-      "dod_rank": 2,
-      "energy_mode1_pct": 93.2,
-      "dmd_spectral_radius": 0.171684
+      "dod_rank": 3,
+      "energy_mode1_pct": 95.23,
+      "dmd_spectral_radius": 0.141794
     },
     {
       "window_steps": 200,
@@ -249,122 +193,122 @@
       "pod": {
         "effective_rank": 3,
         "energy_top5_pct": [
-          96.13,
-          3.7,
-          0.17
+          64.28,
+          35.37,
+          0.36
         ],
         "sv_top5": [
-          101.648,
-          19.9536,
-          4.2405
+          1.7623,
+          1.3072,
+          0.1312
         ],
-        "energy_mode1_pct": 96.13,
-        "total_energy": 10748.449617
+        "energy_mode1_pct": 64.28,
+        "total_energy": 4.831624
       },
       "dmd": {
-        "spectral_radius": 0.153883,
+        "spectral_radius": 0.217976,
         "stable": true,
         "eig_mags_top5": [
-          0.1539,
-          0.0238
+          0.218,
+          0.0609
         ]
       },
       "dod_rank": 3,
-      "energy_mode1_pct": 96.13,
-      "dmd_spectral_radius": 0.153883
+      "energy_mode1_pct": 64.28,
+      "dmd_spectral_radius": 0.217976
     },
     {
       "window_steps": 200,
       "first_step": 1001,
       "last_step": 1200,
       "pod": {
-        "effective_rank": 2,
+        "effective_rank": 3,
         "energy_top5_pct": [
-          99.57,
-          0.39,
-          0.04
+          90.71,
+          8.85,
+          0.44
         ],
         "sv_top5": [
-          13.1955,
-          0.8304,
-          0.2552
+          1.3126,
+          0.4101,
+          0.0912
         ],
-        "energy_mode1_pct": 99.57,
-        "total_energy": 174.876352
+        "energy_mode1_pct": 90.71,
+        "total_energy": 1.899359
       },
       "dmd": {
-        "spectral_radius": 0.065044,
+        "spectral_radius": 0.085827,
         "stable": true,
         "eig_mags_top5": [
-          0.065,
-          0.065
+          0.0858,
+          0.0062
         ]
       },
-      "dod_rank": 2,
-      "energy_mode1_pct": 99.57,
-      "dmd_spectral_radius": 0.065044
+      "dod_rank": 3,
+      "energy_mode1_pct": 90.71,
+      "dmd_spectral_radius": 0.085827
     },
     {
       "window_steps": 200,
       "first_step": 1201,
       "last_step": 1400,
       "pod": {
-        "effective_rank": 2,
+        "effective_rank": 1,
         "energy_top5_pct": [
-          97.99,
-          1.97,
-          0.04
+          99.97,
+          0.03,
+          0.0
         ],
         "sv_top5": [
-          19.6403,
-          2.7851,
-          0.4034
+          103.0711,
+          1.7161,
+          0.6822
         ],
-        "energy_mode1_pct": 97.99,
-        "total_energy": 393.662056
+        "energy_mode1_pct": 99.97,
+        "total_energy": 10627.069411
       },
       "dmd": {
-        "spectral_radius": 0.394977,
+        "spectral_radius": 0.285882,
         "stable": true,
         "eig_mags_top5": [
-          0.395,
-          0.0424
+          0.2859,
+          0.0731
         ]
       },
-      "dod_rank": 2,
-      "energy_mode1_pct": 97.99,
-      "dmd_spectral_radius": 0.394977
+      "dod_rank": 1,
+      "energy_mode1_pct": 99.97,
+      "dmd_spectral_radius": 0.285882
     },
     {
       "window_steps": 200,
       "first_step": 1401,
       "last_step": 1600,
       "pod": {
-        "effective_rank": 3,
+        "effective_rank": 1,
         "energy_top5_pct": [
-          98.52,
-          1.16,
-          0.32
+          99.99,
+          0.01,
+          0.01
         ],
         "sv_top5": [
-          9.1129,
-          0.9903,
-          0.5175
+          97.5351,
+          0.9379,
+          0.7025
         ],
-        "energy_mode1_pct": 98.52,
-        "total_energy": 84.293961
+        "energy_mode1_pct": 99.99,
+        "total_energy": 9514.463642
       },
       "dmd": {
-        "spectral_radius": 0.129322,
+        "spectral_radius": 0.105908,
         "stable": true,
         "eig_mags_top5": [
-          0.1293,
-          0.0028
+          0.1059,
+          0.0505
         ]
       },
-      "dod_rank": 3,
-      "energy_mode1_pct": 98.52,
-      "dmd_spectral_radius": 0.129322
+      "dod_rank": 1,
+      "energy_mode1_pct": 99.99,
+      "dmd_spectral_radius": 0.105908
     },
     {
       "window_steps": 200,
@@ -373,29 +317,29 @@
       "pod": {
         "effective_rank": 2,
         "energy_top5_pct": [
-          98.43,
-          1.57,
-          0.0
+          93.48,
+          6.46,
+          0.06
         ],
         "sv_top5": [
-          122.1182,
-          15.401,
-          0.1652
+          3.2983,
+          0.8669,
+          0.0825
         ],
-        "energy_mode1_pct": 98.43,
-        "total_energy": 15150.071735
+        "energy_mode1_pct": 93.48,
+        "total_energy": 11.637056
       },
       "dmd": {
-        "spectral_radius": 0.298808,
+        "spectral_radius": 0.247587,
         "stable": true,
         "eig_mags_top5": [
-          0.2988,
-          0.0054
+          0.2476,
+          0.0602
         ]
       },
       "dod_rank": 2,
-      "energy_mode1_pct": 98.43,
-      "dmd_spectral_radius": 0.298808
+      "energy_mode1_pct": 93.48,
+      "dmd_spectral_radius": 0.247587
     },
     {
       "window_steps": 200,
@@ -404,525 +348,130 @@
       "pod": {
         "effective_rank": 2,
         "energy_top5_pct": [
-          99.54,
-          0.46,
-          0.0
-        ],
-        "sv_top5": [
-          541.3886,
-          36.9154,
-          0.3117
-        ],
-        "energy_mode1_pct": 99.54,
-        "total_energy": 294464.492893
-      },
-      "dmd": {
-        "spectral_radius": 0.146392,
-        "stable": true,
-        "eig_mags_top5": [
-          0.1464,
-          0.0101
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 99.54,
-      "dmd_spectral_radius": 0.146392
-    },
-    {
-      "window_steps": 200,
-      "first_step": 2001,
-      "last_step": 2200,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          96.81,
-          3.18,
-          0.0
-        ],
-        "sv_top5": [
-          68.3042,
-          12.3874,
-          0.2864
-        ],
-        "energy_mode1_pct": 96.81,
-        "total_energy": 4818.987445
-      },
-      "dmd": {
-        "spectral_radius": 0.474437,
-        "stable": true,
-        "eig_mags_top5": [
-          0.4744,
-          0.0476
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 96.81,
-      "dmd_spectral_radius": 0.474437
-    },
-    {
-      "window_steps": 200,
-      "first_step": 2201,
-      "last_step": 2400,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          99.69,
-          0.3,
+          99.8,
+          0.19,
           0.01
         ],
         "sv_top5": [
-          36.8272,
-          2.03,
-          0.4022
+          70.4264,
+          3.0328,
+          0.7335
         ],
-        "energy_mode1_pct": 99.69,
-        "total_energy": 1360.526771
+        "energy_mode1_pct": 99.8,
+        "total_energy": 4969.613512
       },
       "dmd": {
-        "spectral_radius": 0.06633,
+        "spectral_radius": 0.012873,
         "stable": true,
         "eig_mags_top5": [
-          0.0663,
-          0.0161
+          0.0129,
+          0.0129
         ]
       },
       "dod_rank": 2,
-      "energy_mode1_pct": 99.69,
-      "dmd_spectral_radius": 0.06633
+      "energy_mode1_pct": 99.8,
+      "dmd_spectral_radius": 0.012873
     },
     {
       "window_steps": 200,
-      "first_step": 2401,
-      "last_step": 2600,
+      "first_step": 1901,
+      "last_step": 2100,
       "pod": {
         "effective_rank": 2,
         "energy_top5_pct": [
-          99.05,
-          0.94,
-          0.0
-        ],
-        "sv_top5": [
-          34.7452,
-          3.3887,
-          0.202
-        ],
-        "energy_mode1_pct": 99.05,
-        "total_energy": 1218.75029
-      },
-      "dmd": {
-        "spectral_radius": 0.073831,
-        "stable": true,
-        "eig_mags_top5": [
-          0.0738,
-          0.0738
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 99.05,
-      "dmd_spectral_radius": 0.073831
-    },
-    {
-      "window_steps": 200,
-      "first_step": 2601,
-      "last_step": 2800,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          98.43,
-          1.56,
-          0.01
-        ],
-        "sv_top5": [
-          43.9743,
-          5.5372,
-          0.4675
-        ],
-        "energy_mode1_pct": 98.43,
-        "total_energy": 1964.622775
-      },
-      "dmd": {
-        "spectral_radius": 0.324678,
-        "stable": true,
-        "eig_mags_top5": [
-          0.3247,
-          0.0995
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 98.43,
-      "dmd_spectral_radius": 0.324678
-    },
-    {
-      "window_steps": 200,
-      "first_step": 2801,
-      "last_step": 3000,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          96.51,
-          3.48,
-          0.0
-        ],
-        "sv_top5": [
-          46.062,
-          8.7496,
-          0.277
-        ],
-        "energy_mode1_pct": 96.51,
-        "total_energy": 2198.341882
-      },
-      "dmd": {
-        "spectral_radius": 0.214172,
-        "stable": true,
-        "eig_mags_top5": [
-          0.2142,
-          0.0012
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 96.51,
-      "dmd_spectral_radius": 0.214172
-    },
-    {
-      "window_steps": 200,
-      "first_step": 3001,
-      "last_step": 3200,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          97.25,
-          2.75,
-          0.0
-        ],
-        "sv_top5": [
-          203.91,
-          34.2973,
-          0.4029
-        ],
-        "energy_mode1_pct": 97.25,
-        "total_energy": 42755.735697
-      },
-      "dmd": {
-        "spectral_radius": 0.058852,
-        "stable": true,
-        "eig_mags_top5": [
-          0.0589,
-          0.0227
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 97.25,
-      "dmd_spectral_radius": 0.058852
-    },
-    {
-      "window_steps": 200,
-      "first_step": 3201,
-      "last_step": 3400,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          97.65,
-          2.35,
-          0.0
-        ],
-        "sv_top5": [
-          183.9611,
-          28.5422,
-          0.4409
-        ],
-        "energy_mode1_pct": 97.65,
-        "total_energy": 34656.523621
-      },
-      "dmd": {
-        "spectral_radius": 0.145266,
-        "stable": true,
-        "eig_mags_top5": [
-          0.1453,
-          0.0554
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 97.65,
-      "dmd_spectral_radius": 0.145266
-    },
-    {
-      "window_steps": 200,
-      "first_step": 3401,
-      "last_step": 3600,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          93.79,
-          6.21,
-          0.0
-        ],
-        "sv_top5": [
-          174.8884,
-          45.0006,
-          0.4602
-        ],
-        "energy_mode1_pct": 93.79,
-        "total_energy": 32611.213386
-      },
-      "dmd": {
-        "spectral_radius": 0.038351,
-        "stable": true,
-        "eig_mags_top5": [
-          0.0384,
-          0.027
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 93.79,
-      "dmd_spectral_radius": 0.038351
-    },
-    {
-      "window_steps": 200,
-      "first_step": 3601,
-      "last_step": 3800,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          95.22,
-          4.78,
-          0.0
-        ],
-        "sv_top5": [
-          244.0822,
-          54.6758,
-          0.3908
-        ],
-        "energy_mode1_pct": 95.22,
-        "total_energy": 62565.697312
-      },
-      "dmd": {
-        "spectral_radius": 0.063535,
-        "stable": true,
-        "eig_mags_top5": [
-          0.0635,
-          0.0635
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 95.22,
-      "dmd_spectral_radius": 0.063535
-    },
-    {
-      "window_steps": 200,
-      "first_step": 3801,
-      "last_step": 4000,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          99.66,
-          0.34,
-          0.0
-        ],
-        "sv_top5": [
-          110.1696,
-          6.3965,
-          0.3751
-        ],
-        "energy_mode1_pct": 99.66,
-        "total_energy": 12178.407733
-      },
-      "dmd": {
-        "spectral_radius": 0.091138,
-        "stable": true,
-        "eig_mags_top5": [
-          0.0911,
-          0.0204
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 99.66,
-      "dmd_spectral_radius": 0.091138
-    },
-    {
-      "window_steps": 200,
-      "first_step": 4001,
-      "last_step": 4200,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          97.24,
-          2.75,
-          0.0
-        ],
-        "sv_top5": [
-          44.7598,
-          7.5336,
-          0.2563
-        ],
-        "energy_mode1_pct": 97.24,
-        "total_energy": 2060.256488
-      },
-      "dmd": {
-        "spectral_radius": 0.135733,
-        "stable": true,
-        "eig_mags_top5": [
-          0.1357,
-          0.0067
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 97.24,
-      "dmd_spectral_radius": 0.135733
-    },
-    {
-      "window_steps": 200,
-      "first_step": 4201,
-      "last_step": 4400,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          99.44,
-          0.56,
-          0.0
-        ],
-        "sv_top5": [
-          329.6831,
-          24.6615,
-          0.3307
-        ],
-        "energy_mode1_pct": 99.44,
-        "total_energy": 109299.25634
-      },
-      "dmd": {
-        "spectral_radius": 0.282693,
-        "stable": true,
-        "eig_mags_top5": [
-          0.2827,
-          0.0025
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 99.44,
-      "dmd_spectral_radius": 0.282693
-    },
-    {
-      "window_steps": 200,
-      "first_step": 4401,
-      "last_step": 4600,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          99.89,
-          0.11,
-          0.0
-        ],
-        "sv_top5": [
-          87.8148,
-          2.8594,
-          0.3623
-        ],
-        "energy_mode1_pct": 99.89,
-        "total_energy": 7719.754373
-      },
-      "dmd": {
-        "spectral_radius": 0.067833,
-        "stable": true,
-        "eig_mags_top5": [
-          0.0678,
-          0.0678
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 99.89,
-      "dmd_spectral_radius": 0.067833
-    },
-    {
-      "window_steps": 200,
-      "first_step": 4601,
-      "last_step": 4800,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          99.86,
-          0.14,
-          0.0
-        ],
-        "sv_top5": [
-          99.3594,
-          3.6809,
-          0.2879
-        ],
-        "energy_mode1_pct": 99.86,
-        "total_energy": 9885.919709
-      },
-      "dmd": {
-        "spectral_radius": 0.110601,
-        "stable": true,
-        "eig_mags_top5": [
-          0.1106,
-          0.0343
-        ]
-      },
-      "dod_rank": 2,
-      "energy_mode1_pct": 99.86,
-      "dmd_spectral_radius": 0.110601
-    },
-    {
-      "window_steps": 200,
-      "first_step": 4801,
-      "last_step": 5000,
-      "pod": {
-        "effective_rank": 2,
-        "energy_top5_pct": [
-          96.11,
-          3.87,
+          99.79,
+          0.19,
           0.02
         ],
         "sv_top5": [
-          24.8872,
-          4.9924,
-          0.392
+          70.4199,
+          3.1087,
+          0.8869
         ],
-        "energy_mode1_pct": 96.11,
-        "total_energy": 644.451277
+        "energy_mode1_pct": 99.79,
+        "total_energy": 4969.407931
       },
       "dmd": {
-        "spectral_radius": 0.276787,
+        "spectral_radius": 0.013322,
         "stable": true,
         "eig_mags_top5": [
-          0.2768,
-          0.0159
+          0.0133,
+          0.0133
         ]
       },
       "dod_rank": 2,
-      "energy_mode1_pct": 96.11,
-      "dmd_spectral_radius": 0.276787
+      "energy_mode1_pct": 99.79,
+      "dmd_spectral_radius": 0.013322
     },
     {
       "window_steps": 200,
-      "first_step": 4801,
-      "last_step": 5000,
+      "first_step": 1901,
+      "last_step": 2100,
       "pod": {
         "effective_rank": 2,
         "energy_top5_pct": [
-          96.11,
-          3.87,
+          99.79,
+          0.19,
           0.02
         ],
         "sv_top5": [
-          24.8872,
-          4.9924,
-          0.392
+          70.4199,
+          3.1087,
+          0.8869
         ],
-        "energy_mode1_pct": 96.11,
-        "total_energy": 644.451277
+        "energy_mode1_pct": 99.79,
+        "total_energy": 4969.407931
       },
       "dmd": {
-        "spectral_radius": 0.276787,
+        "spectral_radius": 0.013322,
         "stable": true,
         "eig_mags_top5": [
-          0.2768,
-          0.0159
+          0.0133,
+          0.0133
         ]
       },
       "dod_rank": 2,
-      "energy_mode1_pct": 96.11,
-      "dmd_spectral_radius": 0.276787
+      "energy_mode1_pct": 99.79,
+      "dmd_spectral_radius": 0.013322
     }
-  ]
+  ],
+  "v2_layer_dod_rank": 1,
+  "v2_layer_energy_mode1_pct": 99.88,
+  "v2_layer_n_dims": 52,
+  "v2_layer_dead_layers": [
+    "exit_ctrl",
+    "mhc"
+  ],
+  "v2_layer_dod_rank_trajectory": [
+    5,
+    5,
+    6,
+    8,
+    8,
+    9,
+    1,
+    1,
+    8,
+    1,
+    1,
+    1
+  ],
+  "v2_layer_energy_mode1_trajectory": [
+    92.4,
+    95.1,
+    95.4,
+    91.8,
+    59.5,
+    85.3,
+    99.9,
+    100.0,
+    75.1,
+    99.9,
+    99.9,
+    99.9
+  ],
+  "v2_verdict": "RANK_LOW: 1/52 (2%) | mode1=99.9% 集中 | DEAD_LAYERS: ['exit_ctrl', 'mhc']",
+  "ct_batch_var_mean": 0.0,
+  "ct_batch_var_trend": 0.0,
+  "ct_norm_spread": 0.0
 }

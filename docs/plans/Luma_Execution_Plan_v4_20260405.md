@@ -92,7 +92,7 @@ mamba_chunk_size = 32  # MIMO rank=2, chunk*rank=64
 
 Matrix 0 (架构定型) ──── 完成 ✅, A1 (482M)
     ↓
-Matrix 1 (B' World-JEPA, ~4h) ──── 进行中 🔄
+Matrix 1 (B' World-JEPA, ~4h) ──── 完成 ✅, B2' (sig=0.10) 胜出
     ↓
 ┌───────────────────────────────────────────────┐
 │  M1 完成后立即并行:                            │
@@ -154,6 +154,18 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 2. DOD v2_rank 收敛到 ≥5
 3. World-JEPA 不在 dead list（表明 JEPA 有梯度流）
 4. c_t batch 方差正增长
+
+**结果 (2026-04-05 18:48)**:
+
+| 实验 | loss_lm (均值) | v2_rank | dead modules | 状态 |
+|---|---|---|---|---|
+| B0' baseline | 3.74 | 13/52 | exit_ctrl, world_jepa | 基线 |
+| B1' sig=0.05 | 3.94 | 14/52 | exit_ctrl, mhc | MHC 死亡 |
+| **B2' sig=0.10** | **3.91** | **6/52** | **exit_ctrl** | **胜出 ✅** |
+| B3' EMA | 4.09 | 17/52 | exit_ctrl, mhc | 收敛慢，弃用 |
+| B4' mask=0.50 | 3.89 | 1/52 ⚠️ | exit_ctrl, mhc | 表征坍缩，弃用 |
+
+**关键发现**: B2'（sig=0.10）是唯一 MHC 存活、动力学健康的配置。详见 [Matrix1 报告](../reports/Matrix1_WorldJEPA_Report_20260405.md)。
 
 ### Matrix 2: Stage E — Exit Policy (自适应退出)
 
@@ -366,7 +378,7 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 | 优先级 | 阶段 | 预计耗时 | 状态 | 说明 |
 |--------|------|---------|------|------|
 | — | Matrix 0 (架构定型) | ~1h | **完成 ✅** | A1 (482M) 胜出 |
-| — | Matrix 1 (B' World-JEPA) | ~4h | **进行中 🔄** | 确认架构可训练 |
+| — | Matrix 1 (B' World-JEPA) | ~4h | **完成 ✅** | B2' (sig=0.10) 胜出 |
 | **P0** | **Matrix 7 (GaLore)** | **~2 天** | **M1 后立即开始** | **解锁 bs=2 → 速度翻倍** |
 | **P0** | **Matrix 5 (ES 验证)** | **~3 天** | **与 M7 并行** | **N=2 快速验证能否收敛** |
 | P1 | Matrix 6 (数据效率) | 3-5 天 | 与 M5/M7 并行 | EntiGraph 合成 + PPL 修剪 |
@@ -410,8 +422,9 @@ M7 (GaLore bs=2?)          M5 (ES N=2 收敛?)
 
 ## 6. 立即行动清单
 
-1. ✅ Matrix 0 完成，A1 定型
+1. ✅ Matrix 0 完成，A1 (482M) ���型
 2. ✅ arxiv_dl_code 20K 条拉取完成
-3. **→ 启动 Matrix 1**: B0'-B4' World-JEPA 实验矩阵
-4. **→ 整合 arxiv_dl_code**: 更新 DataMix，重建 pretrain 数据
-5. **→ 准备 Matrix 2 脚本**: Exit Policy 实验
+3. ✅ Matrix 1 完成，B2' (sig=0.10, mask=0.25) 胜出
+4. **→ 启动 Matrix 7 (GaLore)**: 最高优先级，解锁 bs=2
+5. **→ 启动 Matrix 5 (ES N=2)**: 与 M7 并行，探索性验证
+6. **→ 整合 arxiv_dl_code**: 更��� DataMix，重建 pretrain 数据
