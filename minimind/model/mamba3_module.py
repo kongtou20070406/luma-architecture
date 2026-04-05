@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from dataclasses import dataclass
 import warnings
 from pathlib import Path
@@ -39,14 +40,17 @@ class Mamba3Config:
     A_floor: float = 1e-4
     is_outproj_norm: bool = False
     is_mimo: bool = False
-    mimo_rank: int = 4
-    chunk_size: int = 64
+    mimo_rank: int = 2  # 4→2: smem = (chunk_size*rank)² must fit RTX 5090's 101KB limit
+    chunk_size: int = 32  # rank=2 × chunk=32 = 64 (at design limit)
     dropout: float = 0.0
     # Workaround for current tilelang backward smem limit on RTX 5090.
-    # If True: training uses SISO path, eval/inference keeps MIMO path.
-    train_use_siso_fallback: bool = True
+    # With rank=2 chunk=16, MIMO should fit. Keep fallback as safety net.
+    train_use_siso_fallback: bool = False  # MIMO should work with rank=2 chunk=32; keep SISO fallback via auto_fallback
     # If True: when MIMO path hits runtime kernel limits, auto fallback to SISO.
     auto_fallback_on_mimo_error: bool = True
+    # Gradient checkpointing for Mamba3: recompute forward during backward to save VRAM.
+    # Critical for seq>=2048 where backward buffers accumulate to >3GB.
+    use_gradient_checkpointing: bool = False
 
 
 class Mamba3Block(nn.Module):
@@ -78,7 +82,7 @@ class Mamba3Block(nn.Module):
             dropout=cfg.dropout,
         )
         self.mamba_siso = None
-        if cfg.is_mimo and cfg.train_use_siso_fallback:
+        if cfg.is_mimo and (cfg.train_use_siso_fallback or cfg.auto_fallback_on_mimo_error):
             self.mamba_siso = Mamba3(
                 d_model=cfg.d_model,
                 d_state=cfg.d_state,
@@ -100,18 +104,15 @@ class Mamba3Block(nn.Module):
         self.dropout = nn.Dropout(cfg.dropout)
         self._mimo_disabled_runtime = False
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        residual = x
-        x = self.pre_norm(x)
-        # Current tilelang MIMO kernels can exceed dynamic shared-memory limit on 5090.
-        # Keep train path stable with SISO and auto-fallback when runtime kernel limits are hit.
+    def _run_mamba(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the appropriate Mamba path (SISO or MIMO with fallback)."""
         if self.training and self.mamba_siso is not None:
-            x = self.mamba_siso(x)
+            return self.mamba_siso(x)
         elif self._mimo_disabled_runtime and self.mamba_siso is not None:
-            x = self.mamba_siso(x)
+            return self.mamba_siso(x)
         else:
             try:
-                x = self.mamba(x)
+                return self.mamba(x)
             except Exception as err:
                 is_mimo_error = (
                     self.cfg.auto_fallback_on_mimo_error
@@ -125,11 +126,28 @@ class Mamba3Block(nn.Module):
                 if not is_mimo_error:
                     raise
                 self._mimo_disabled_runtime = True
-                warnings.warn(
-                    "MIMO kernel failed at runtime; falling back to SISO path for stability.",
-                    RuntimeWarning,
+                msg = (
+                    f"[CRITICAL] MIMO→SISO FALLBACK TRIGGERED! "
+                    f"Error: {err}. "
+                    f"Config: rank={self.cfg.mimo_rank}, chunk={self.cfg.chunk_size}, "
+                    f"product={self.cfg.mimo_rank * self.cfg.chunk_size}. "
+                    f"All subsequent forward passes will use SISO. "
+                    f"Fix: reduce mimo_rank or chunk_size so rank*chunk<=64."
                 )
-                x = self.mamba_siso(x)
+                warnings.warn(msg, RuntimeWarning)
+                print(f"\n{'='*60}\n{msg}\n{'='*60}\n", flush=True)
+                return self.mamba_siso(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.pre_norm(x)
+        # Gradient checkpointing: recompute Mamba forward during backward to save VRAM.
+        # Without this, SISO backward buffers accumulate to >3GB at seq>=2048.
+        # Must use use_reentrant=True because Mamba3 backward unpacks saved_tensors multiple times.
+        if self.cfg.use_gradient_checkpointing and self.training:
+            x = torch_checkpoint(self._run_mamba, x, use_reentrant=True)
+        else:
+            x = self._run_mamba(x)
         x = self.post_norm(x)
         x = self.dropout(x)
         return residual + x

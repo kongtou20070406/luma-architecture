@@ -186,13 +186,14 @@ class Attention(nn.Module):
             xv = torch.cat([past_key_value[1], xv], dim=1)
         past_kv = (xk, xv) if use_cache else None
         xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(xv, self.n_rep).transpose(1, 2))
-        if self.flash and (seq_len > 1) and (past_key_value is None) and (attention_mask is None or torch.all(attention_mask == 1)):
-            output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
+        if attention_mask is not None and not torch.all(attention_mask == 1):
+            # Build additive mask: 0 where allowed, -inf where blocked
+            causal = torch.full((seq_len, xk.shape[2]), float("-inf"), device=xq.device, dtype=xq.dtype).triu(1 + xk.shape[2] - seq_len)
+            pad_mask = (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)).to(xq.dtype) * -1e9
+            sdpa_mask = causal.unsqueeze(0).unsqueeze(0) + pad_mask
+            output = F.scaled_dot_product_attention(xq, xk, xv, attn_mask=sdpa_mask, dropout_p=self.dropout if self.training else 0.0)
         else:
-            scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1)
-            if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9
-            output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv
+            output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
         output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
         output = self.resid_dropout(self.o_proj(output))
         return output, past_kv
@@ -405,7 +406,7 @@ class LumaConfig(PretrainedConfig):
         self.mamba_d_state = kwargs.get("mamba_d_state", 192)
         self.mamba_expand = kwargs.get("mamba_expand", 2)
         self.mamba_headdim = kwargs.get("mamba_headdim", 64)
-        self.mamba_chunk_size = kwargs.get("mamba_chunk_size", 4)
+        self.mamba_chunk_size = kwargs.get("mamba_chunk_size", 32)  # MIMO: chunk*rank<=64, rank=2 → chunk<=32
         self.world_dim = kwargs.get("world_dim", self.hidden_size // 2)
         self.world_mask_ratio = kwargs.get("world_mask_ratio", 0.25)
         self.world_mask_strategy = kwargs.get("world_mask_strategy", "default")
@@ -459,6 +460,7 @@ class LumaConfig(PretrainedConfig):
         self.exit_progress_gain_weight = kwargs.get("exit_progress_gain_weight", 0.15)
         self.exit_progress_trend_weight = kwargs.get("exit_progress_trend_weight", 0.10)
         self.exit_progress_plateau_weight = kwargs.get("exit_progress_plateau_weight", 0.10)
+        self.exit_second_order_delta_weight = kwargs.get("exit_second_order_delta_weight", 0.0)
         self.self_plateau_margin = kwargs.get("self_plateau_margin", 0.02)
         self.self_local_delta_consistency_weight = kwargs.get("self_local_delta_consistency_weight", 0.0)
         self.self_local_curvature_weight = kwargs.get("self_local_curvature_weight", 0.0)
@@ -554,11 +556,18 @@ class LumaConfig(PretrainedConfig):
         self.r_t_dim = kwargs.get("r_t_dim", max(16, self.c_t_dim // 2))
         self.r_t_mode = kwargs.get("r_t_mode", "blend")
         self.use_gradient_checkpointing = kwargs.get("use_gradient_checkpointing", False)
+        self.activation_offload_compress = kwargs.get("activation_offload_compress", False)
         self.r_t_router_window = kwargs.get("r_t_router_window", 16)
         self.compression_active_layers = kwargs.get("compression_active_layers", self.compression_layers)
         self.reason_active_loops = kwargs.get("reason_active_loops", self.reason_loops)
         self.bos_token_id = kwargs.get("bos_token_id", 1)
         self.eos_token_id = kwargs.get("eos_token_id", 2)
+        # Reasoning partitioning: each loop can "think differently"
+        self.reason_num_phases = kwargs.get("reason_num_phases", 0)  # 0 = disabled
+        self.reason_head_partition = kwargs.get("reason_head_partition", False)
+        self.reason_mor_routing = kwargs.get("reason_mor_routing", False)
+        self.reason_mor_num_experts = kwargs.get("reason_mor_num_experts", 4)
+        self.reason_mor_topk = kwargs.get("reason_mor_topk", 2)
 
 
 class LumaZCRMSNorm(nn.Module):
@@ -625,11 +634,15 @@ class LumaSwiGLUFFN(nn.Module):
         return residual + x
 
 
-def _make_local_causal_mask(seq_len: int, window: int, device: torch.device) -> torch.Tensor:
+def _build_local_causal_forget_mask(
+    seq_len: int, window: int, device: torch.device, dtype: torch.dtype,
+) -> torch.Tensor:
+    """Build additive attention mask for SDPA: causal + local window. Returns [1, 1, seq, seq]."""
     positions = torch.arange(seq_len, device=device)
-    distance = positions[:, None] - positions[None, :]
-    allowed = (distance >= 0) & (distance < window)
-    return allowed
+    dist = positions[:, None] - positions[None, :]
+    allowed = (dist >= 0) & (dist < window)
+    mask = torch.where(allowed, torch.tensor(0.0, device=device), torch.tensor(float("-inf"), device=device))
+    return mask.unsqueeze(0).unsqueeze(0).to(dtype)
 
 
 def _run_mamba_with_padding(block: nn.Module, x: torch.Tensor, chunk_size: int) -> torch.Tensor:
@@ -666,9 +679,10 @@ class CompressionMambaLayer(nn.Module):
                 expand=config.mamba_expand,
                 headdim=config.mamba_headdim,
                 is_mimo=True,
-                mimo_rank=4,
+                mimo_rank=2,
                 chunk_size=self.chunk_size,
                 dropout=config.dropout,
+                use_gradient_checkpointing=config.use_gradient_checkpointing,
             )
         )
 
@@ -751,13 +765,12 @@ class CompressionRetrievalLayerSWA(nn.Module):
         q = self.q_proj(x).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        local_mask = _make_local_causal_mask(seq_len, min(self.window, seq_len), x.device)
-        scores = scores.masked_fill(~local_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
-        forget = torch.sigmoid(self.forget_proj(x)).transpose(1, 2).unsqueeze(-1)
-        scores = scores + torch.log(forget.clamp_min(1e-6))
-        attn = torch.softmax(scores.float(), dim=-1).to(q.dtype)
-        out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
+        # Build additive mask: local causal window + forget gate
+        mask = _build_local_causal_forget_mask(seq_len, min(self.window, seq_len), x.device, q.dtype)
+        forget_logprob = torch.log(torch.sigmoid(self.forget_proj(x)).clamp_min(1e-6))  # [bsz, seq, 1]
+        mask = mask + forget_logprob.transpose(1, 2).unsqueeze(2)  # broadcast [bsz, 1, 1, seq] over [1, 1, seq, seq]
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        out = out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
         x = residual + self.out_proj(out)
         return self.ffn(x)
 
@@ -812,6 +825,29 @@ class CompressionBlockAttentionResiduals(nn.Module):
         return current + self.scale * (mixed - current)
 
 
+def _activation_offload_ctx():
+    """将 autograd 保存的张量搬到 CPU pinned memory，backward 时搬回 GPU。
+
+    用于 compress zone：Mamba3 Triton kernel 不兼容 gradient checkpointing，
+    但 saved_tensors_hooks 只拦截存/取，不影响计算图结构。
+    """
+    def pack(tensor: torch.Tensor) -> tuple:
+        if tensor.is_cuda:
+            cpu_t = torch.empty(tensor.shape, dtype=tensor.dtype,
+                                layout=tensor.layout, pin_memory=True)
+            cpu_t.copy_(tensor, non_blocking=True)
+            return (tensor.device, cpu_t)
+        return (None, tensor)
+
+    def unpack(packed: tuple) -> torch.Tensor:
+        device, tensor = packed
+        if device is not None:
+            return tensor.to(device, non_blocking=False)
+        return tensor
+
+    return torch.autograd.graph.saved_tensors_hooks(pack, unpack)
+
+
 class CompressionZone(nn.Module):
     """Luma compresses once so her loop can think many times without rereading the whole world.
     Luma 先压缩一次，再进入循环推理，这样她不必每轮都重读整个世界。
@@ -854,6 +890,10 @@ class CompressionZone(nn.Module):
         x = torch.cat([self.local_memory_tokens(batch_size), self.global_memory_tokens(batch_size), x], dim=1)
         block_history: List[torch.Tensor] = []
         block_reprs: List[torch.Tensor] = []
+        # Activation offload: 将 compress zone 保存的反向传播张量搬到 CPU pinned memory
+        offload_ctx = _activation_offload_ctx() if (self.config.activation_offload_compress and self.training) else None
+        if offload_ctx is not None:
+            offload_ctx.__enter__()
         for idx, layer in enumerate(self.layers, start=1):
             x = layer(x)
             if idx % self.config.block_repr_every == 0:
@@ -869,6 +909,8 @@ class CompressionZone(nn.Module):
                 if self.compression_mhc is not None:
                     mhc_streams = self.compression_mhc.init_streams(x)
                     _, x = self.compression_mhc(mhc_streams, self.compression_identity_block)
+        if offload_ctx is not None:
+            offload_ctx.__exit__(None, None, None)
         compression_block_drift_mean = x.new_zeros(())
         compression_block_var_mean = x.new_zeros(())
         if block_history:
@@ -959,9 +1001,10 @@ class ReasonMambaLayer(nn.Module):
                 expand=config.mamba_expand,
                 headdim=config.mamba_headdim,
                 is_mimo=True,
-                mimo_rank=4,
+                mimo_rank=2,
                 chunk_size=self.chunk_size,
                 dropout=config.dropout,
+                use_gradient_checkpointing=config.use_gradient_checkpointing,
             )
         )
 
@@ -1006,24 +1049,22 @@ class GatedDiffAttnFoXSWA(nn.Module):
         q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        local_mask = _make_local_causal_mask(seq_len, min(self.window, seq_len), q.device)
-        scores = scores.masked_fill(~local_mask.unsqueeze(0).unsqueeze(0), float("-inf"))
-        scores = scores + torch.log(forget.transpose(1, 2).unsqueeze(-1).clamp_min(1e-6))
+        # Build additive mask: local causal window + forget gate + optional attn_bias
+        mask = _build_local_causal_forget_mask(seq_len, min(self.window, seq_len), q.device, q.dtype)
+        forget_logprob = torch.log(forget.transpose(1, 2).clamp_min(1e-6))  # [bsz, seq, 1] -> [bsz, 1, seq] after transpose
+        mask = mask + forget_logprob.unsqueeze(2)  # [bsz, 1, 1, seq]
         if attn_bias is not None:
             if attn_bias.dim() == 4:
                 bias = attn_bias
             elif attn_bias.dim() == 3:
-                token_bias = attn_bias.mean(dim=-1)
-                bias = token_bias[:, None, None, :]
+                bias = attn_bias.mean(dim=-1)[:, None, None, :]
             elif attn_bias.dim() == 2:
                 bias = attn_bias[:, None, None, :]
             else:
                 bias = None
             if bias is not None:
-                scores = scores + bias.to(dtype=scores.dtype)
-        attn = torch.softmax(scores.float(), dim=-1).to(q.dtype)
-        out = torch.matmul(attn, v)
+                mask = mask + bias.to(dtype=q.dtype)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         return out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
 
     def forward(self, x: torch.Tensor, attn_bias: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -1116,6 +1157,7 @@ class IntrospectionStateStream(nn.Module):
             mimo_rank=1,
             chunk_size=self.chunk_size,
             dropout=config.dropout,
+            use_gradient_checkpointing=config.use_gradient_checkpointing,
         )
         self.layer1 = Mamba3Block(meta_cfg)
         self.layer2 = Mamba3Block(meta_cfg)
@@ -1898,6 +1940,7 @@ class ExitController(nn.Module):
         progress_gain_weight: float = 0.15,
         progress_trend_weight: float = 0.10,
         progress_plateau_weight: float = 0.10,
+        second_order_delta_weight: float = 0.0,
     ):
         super().__init__()
         self.delta_threshold = delta_threshold
@@ -1939,6 +1982,7 @@ class ExitController(nn.Module):
         self.crystal_weight = nn.Parameter(torch.tensor(crystal_feature_weight))
         self.gain_weight = nn.Parameter(torch.tensor(gain_weight))
         self.bias = nn.Parameter(torch.tensor(0.0))
+        self.second_order_weight = nn.Parameter(torch.tensor(second_order_delta_weight))
 
     def forward(
         self,
@@ -1949,6 +1993,7 @@ class ExitController(nn.Module):
         rollout_error: torch.Tensor,
         world_error: torch.Tensor,
         self_check_score: Optional[torch.Tensor] = None,
+        prev_delta_h: Optional[torch.Tensor] = None,
         loop_progress: Optional[torch.Tensor] = None,
         remaining_budget_ratio: Optional[torch.Tensor] = None,
         recent_gain_1: Optional[torch.Tensor] = None,
@@ -1966,6 +2011,12 @@ class ExitController(nn.Module):
         else:
             delta_h = (h - prev_h).norm(dim=-1).mean() / (prev_h.norm(dim=-1).mean() + 1e-8)
         delta_signal = 1.0 - delta_h.clamp(0.0, 1.0)
+        # Second-order: when |delta_h - prev_delta_h| is small, delta is stable → converged
+        if prev_delta_h is not None:
+            second_order_delta = (delta_h - prev_delta_h).abs()
+            second_order_signal = 1.0 - second_order_delta.clamp(0.0, 1.0)
+        else:
+            second_order_signal = h.new_zeros(())
         self_signal = 1.0 - self_error.clamp(0.0, 1.0)
         rollout_signal = 1.0 - rollout_error.clamp(0.0, 1.0)
         world_signal = 1.0 - world_error.clamp(0.0, 1.0)
@@ -2034,6 +2085,7 @@ class ExitController(nn.Module):
             + self.self_check_weight * self_check_signal
             + self.crystal_weight * jepa_crystal_signal
             + self.uncertainty_feature_weight * centered_uncertainty
+            + self.second_order_weight * second_order_signal
             - self.gain_weight * predicted_gain
         )
         if self.enable_progress_exit_readout:
@@ -2062,6 +2114,7 @@ class ExitController(nn.Module):
             should_exit = bool(exit_score.item() > self.score_threshold)
         return {
             "delta_h": delta_h,
+            "second_order_delta": second_order_signal,
             "exit_logit": safe_exit_logit,
             "exit_score": exit_score,
             "sampled_exit_score": sampled_exit_score,
@@ -2121,6 +2174,8 @@ class LumaReasonSharedLayer(nn.Module):
         c_t: Optional[torch.Tensor] = None,
         attn_bias: Optional[torch.Tensor] = None,
         use_gradient_checkpointing: bool = False,
+        loop_idx: int = 0,
+        head_partition: bool = False,
     ) -> torch.Tensor:
         from torch.utils.checkpoint import checkpoint as _ckpt
         if c_t is not None and self.ct_modulation_mode == "film" and self.mamba_film is not None:
@@ -2140,6 +2195,23 @@ class LumaReasonSharedLayer(nn.Module):
             attn_out = _ckpt(lambda x: self.diff_attn(x, attn_bias=_attn_bias), h, use_reentrant=False)
         else:
             attn_out = self.diff_attn(h, attn_bias=attn_bias)
+        # Phase A: head partition — only the active head group contributes residual
+        if head_partition:
+            num_heads = self.diff_attn.num_heads
+            head_dim = self.diff_attn.head_dim
+            num_groups = max(2, min(4, num_heads))  # 2-4 groups
+            group_size = num_heads // num_groups
+            active_group = loop_idx % num_groups
+            # Mask: zero out residual for inactive head groups
+            bsz, seq_len, _ = attn_out.shape
+            residual_delta = attn_out - h
+            delta_heads = residual_delta.view(bsz, seq_len, num_heads, head_dim)
+            mask = h.new_zeros(num_heads)
+            start_h = active_group * group_size
+            end_h = min(start_h + group_size, num_heads)
+            mask[start_h:end_h] = 1.0
+            delta_heads = delta_heads * mask.view(1, 1, num_heads, 1)
+            attn_out = h + delta_heads.view(bsz, seq_len, -1)
         if c_t is not None and self.ct_modulation_mode == "modulewise_gate" and self.attn_gate is not None:
             attn_gate = torch.sigmoid(self.attn_gate(c_t)).unsqueeze(1)
             h = h + attn_gate * (attn_out - h)
@@ -2224,6 +2296,33 @@ class LumaReasonCore(nn.Module):
         self.shared_layers = nn.ModuleList(
             [LumaReasonSharedLayer(config) for _ in range(config.reason_shared_depth)]
         )
+        # ── Reasoning Partitioning ──────────────────────────────
+        # Phase C: learned per-phase embedding injected before shared layers
+        self.num_phases = config.reason_num_phases
+        if self.num_phases > 0:
+            self.phase_embed = nn.Embedding(self.num_phases, config.hidden_size)
+            nn.init.normal_(self.phase_embed.weight, std=0.02)
+        # Phase A: head partition — each loop uses a rotating subset of attention heads
+        self.head_partition = config.reason_head_partition
+        # Phase B: MoR — loop-conditioned expert routing
+        self.mor_routing = config.reason_mor_routing
+        if self.mor_routing:
+            mor_experts = config.reason_mor_num_experts
+            self.mor_topk = config.reason_mor_topk
+            # Lightweight LoRA-style experts: down-project then up-project
+            expert_rank = max(32, config.hidden_size // 8)
+            self.mor_experts_down = nn.ModuleList([
+                nn.Linear(config.hidden_size, expert_rank, bias=False) for _ in range(mor_experts)
+            ])
+            self.mor_experts_up = nn.ModuleList([
+                nn.Linear(expert_rank, config.hidden_size, bias=False) for _ in range(mor_experts)
+            ])
+            # Router: loop_idx embedding → expert scores
+            self.mor_loop_embed = nn.Embedding(64, config.hidden_size)  # up to 64 loops
+            self.mor_router = nn.Linear(config.hidden_size, mor_experts, bias=False)
+            self.mor_gate_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            for expert_up in self.mor_experts_up:
+                nn.init.zeros_(expert_up.weight)
 
     def _chunk_spans(self, seq_len: int) -> List[Tuple[int, int]]:
         spans: List[Tuple[int, int]] = []
@@ -2632,6 +2731,7 @@ class LumaReasonCore(nn.Module):
         disable_ct_injection: bool = False,
         modulation_context: Optional[dict] = None,
         use_gradient_checkpointing: bool = False,
+        loop_idx: int = 0,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], dict]:
         if self.ct_grad_scale != 1.0:
             c_t = grad_scale(c_t, self.ct_grad_scale)
@@ -2660,9 +2760,8 @@ class LumaReasonCore(nn.Module):
                 q = self.route_query(torch.cat([c_t, r_t], dim=-1)).unsqueeze(1)
                 k = self.route_key(local_window)
                 v = self.route_value(local_window)
-                route_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(h.shape[-1])
-                route_attn = torch.softmax(route_scores.float(), dim=-1).to(h.dtype)
-                route_summary = torch.matmul(route_attn, v).squeeze(1)
+                route_out = F.scaled_dot_product_attention(q, k, v)
+                route_summary = route_out.squeeze(1)
                 gate_in = torch.cat([route_summary, c_t, r_t, trust.squeeze(1)], dim=-1)
                 switch_value = torch.sigmoid(self.reason_switch_gate(gate_in))
             else:
@@ -2675,8 +2774,26 @@ class LumaReasonCore(nn.Module):
                     h = h + effective_switch * (r_bias - c_bias)
             elif r_t_mode == "parallel":
                 h = h + effective_switch * r_bias
+        # Phase C: inject per-phase embedding before shared layers
+        if self.num_phases > 0:
+            phase_idx = loop_idx % self.num_phases
+            h = h + self.phase_embed.weight[phase_idx].unsqueeze(0).unsqueeze(0)
         for layer in self.shared_layers:
-            h = layer(h, c_t=c_t, attn_bias=attn_bias, use_gradient_checkpointing=use_gradient_checkpointing)
+            h = layer(h, c_t=c_t, attn_bias=attn_bias, use_gradient_checkpointing=use_gradient_checkpointing,
+                      loop_idx=loop_idx, head_partition=self.head_partition)
+        # Phase B: MoR loop-conditioned expert routing (applied after shared layers)
+        if self.mor_routing:
+            loop_emb = self.mor_loop_embed.weight[loop_idx % self.mor_loop_embed.num_embeddings]
+            router_logits = self.mor_router(loop_emb)  # [num_experts]
+            topk_vals, topk_idx = router_logits.topk(self.mor_topk)
+            topk_weights = torch.softmax(topk_vals, dim=-1)
+            expert_out = h.new_zeros(h.shape)
+            for i in range(self.mor_topk):
+                eidx = topk_idx[i].item()
+                expert_out = expert_out + topk_weights[i] * self.mor_experts_up[eidx](
+                    F.silu(self.mor_experts_down[eidx](self.mor_gate_norm(h)))
+                )
+            h = h + expert_out
         return h, switch_value, modulation_stats
 
 
@@ -2740,6 +2857,7 @@ class LumaBackbone(nn.Module):
             progress_gain_weight=config.exit_progress_gain_weight,
             progress_trend_weight=config.exit_progress_trend_weight,
             progress_plateau_weight=config.exit_progress_plateau_weight,
+            second_order_delta_weight=getattr(config, "exit_second_order_delta_weight", 0.0),
         )
         self.enable_sigreg_rollout = bool(config.enable_sigreg_rollout)
         self.enable_sigreg_delta = bool(config.enable_sigreg_delta)
@@ -2934,6 +3052,7 @@ class LumaBackbone(nn.Module):
                         disable_ct_injection=disable_ct_injection,
                         modulation_context=modulation_context,
                         use_gradient_checkpointing=self.config.use_gradient_checkpointing,
+                        loop_idx=loop_idx,
                     )
                 ),
             )
@@ -3232,6 +3351,7 @@ class LumaBackbone(nn.Module):
                 current_rollout_error,
                 current_world_error,
                 self_check_score=self_check_score.mean(),
+                prev_delta_h=delta_h_history[-1] if delta_h_history else None,
                 loop_progress=h.new_full((), float(loop_idx + 1) / float(max(1, self.config.reason_active_loops))),
                 remaining_budget_ratio=h.new_full(
                     (),

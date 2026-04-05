@@ -42,7 +42,7 @@ from transformers import AutoTokenizer
 from dataset.lm_dataset import PretrainDataset
 from dataset.packed_dataset import PackedPretrainDataset
 from luma_stage0.dynamics_analysis import (
-    CtStateTracker, GradTrajectoryTracker,
+    CtStateTracker, GradTrajectoryTracker, LayerGradTracker, ExitDepthTracker,
     render_dynamics_report, render_markdown, save_report,
 )
 from luma_stage0.optimizers import LumaCosineScheduler, LumaMuonAdamWOptimizer, LumaOptimizerConfig
@@ -52,6 +52,64 @@ from trainer.trainer_utils import Logger, setup_seed
 warnings.filterwarnings("ignore")
 
 ARTIFACTS_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "refactor"
+CKPT_DIR = Path(__file__).resolve().parents[1] / "artifacts" / "checkpoints"
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint save / load
+# ---------------------------------------------------------------------------
+
+def save_checkpoint(
+    path: Path,
+    step: int,
+    model: torch.nn.Module,
+    optimizer,
+    scheduler,
+    args: argparse.Namespace,
+    compress_probe: torch.nn.Module | None = None,
+) -> None:
+    """Save training checkpoint. Handles torch.compile wrapped models."""
+    raw_model = getattr(model, "_orig_mod", model)
+    ckpt = {
+        "step": step,
+        "model": raw_model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "args": vars(args),
+    }
+    if compress_probe is not None:
+        ckpt["compress_probe"] = compress_probe.state_dict()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(ckpt, path)
+    print(f"Checkpoint saved: {path} (step {step})", file=sys.stderr)
+
+
+def load_checkpoint(
+    path: Path,
+    model: torch.nn.Module,
+    optimizer,
+    scheduler,
+    compress_probe: torch.nn.Module | None = None,
+) -> int:
+    """Load checkpoint, return the step to resume from."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    raw_model = getattr(model, "_orig_mod", model)
+    raw_model.load_state_dict(ckpt["model"])
+    optimizer.load_state_dict(ckpt["optimizer"])
+    scheduler.load_state_dict(ckpt["scheduler"])
+    if compress_probe is not None and "compress_probe" in ckpt:
+        compress_probe.load_state_dict(ckpt["compress_probe"])
+    step = ckpt["step"]
+    print(f"Checkpoint loaded: {path} (resuming from step {step})", file=sys.stderr)
+    return step
+
+
+def cleanup_checkpoints(ckpt_dir: Path, keep: int = 2, phase: int | None = None) -> None:
+    """Keep only the most recent `keep` checkpoints (filtered by phase if given)."""
+    pattern = f"phase{phase}_*.pt" if phase is not None else "*.pt"
+    ckpts = sorted(ckpt_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+    for old in ckpts[:-keep]:
+        old.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +152,14 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         exit_train_use_sampling=bool(args.exit_train_use_sampling),
         exit_eval_use_sampling=bool(args.exit_eval_use_sampling),
         exit_sampling_temperature=args.exit_sampling_temperature,
+        exit_second_order_delta_weight=getattr(args, "exit_second_order_delta_weight", 0.0),
         use_gradient_checkpointing=bool(args.use_gradient_checkpointing),
+        activation_offload_compress=bool(getattr(args, "activation_offload_compress", 0)),
+        reason_num_phases=getattr(args, "reason_num_phases", 0),
+        reason_head_partition=bool(getattr(args, "reason_head_partition", 0)),
+        reason_mor_routing=bool(getattr(args, "reason_mor_routing", 0)),
+        reason_mor_num_experts=getattr(args, "reason_mor_num_experts", 4),
+        reason_mor_topk=getattr(args, "reason_mor_topk", 2),
     )
 
 
@@ -274,36 +339,29 @@ def build_phase5_config(args: argparse.Namespace) -> LumaConfig:
 
 
 def build_phase6_config(args: argparse.Namespace) -> LumaConfig:
-    """Phase 6: Phase 4 基础上启用 World JEPA (full/LeWM-style)。
-    World JEPA 在 h 上做 masked latent prediction，用 SIGreg 防坍缩（无 EMA）。
-    这是走向正式预训练的关键步骤——让模型同时建模世界态和自省态。
+    """Phase 6: Phase 4 + World-JEPA (LeWM or EMA)。
+    世界模型预测：通过 masked latent prediction 学习时序结构。
+    LeWM 模式（world_jepa_mode='full'）: 单编码器 + SIGreg 防坍缩，省 VRAM。
+    EMA 模式（world_jepa_mode='scaffold'）: 双编码器 + EMA target，更稳定。
     """
     return LumaConfig(
         **_base_arch_kwargs(args),
-        # World JEPA 启用
-        enable_world_jepa=not getattr(args, "enable_ct_world_jepa", 0),
+        # ── World-JEPA 启用 ──────────────────────────────────────────────────
+        enable_world_jepa=True,
         world_jepa_weight=args.world_jepa_weight,
-        world_jepa_reason_only=getattr(args, "world_jepa_reason_only", True),
-        enable_sigreg_world=not getattr(args, "enable_ct_world_jepa", 0),
         world_sigreg_weight=args.world_sigreg_weight,
-        # c_t World JEPA（替代 h-space World JEPA）
-        enable_ct_world_jepa=bool(getattr(args, "enable_ct_world_jepa", 0)),
-        ct_world_jepa_weight=getattr(args, "ct_world_jepa_weight", 0.3),
-        # Self JEPA（继承 Phase 4）
+        world_jepa_reason_only=bool(args.world_jepa_reason_only),
+        enable_ct_world_jepa=bool(args.enable_ct_world_jepa),
+        ct_world_jepa_weight=args.ct_world_jepa_weight,
+        # ── self-JEPA（继承 Phase 4）──────────────────────────────────────────
         disable_self_jepa=False,
         self_jepa_weight=args.self_jepa_weight,
-        self_rollout_weight=0.0,
-        self_jepa_residual_reg=0.0,
-        exit_aux_weight=0.0,
-        rollout_zone_weight=0.0,
-        routing_tier_entropy_weight=0.0,
-        routing_min_local_share_weight=0.0,
-        trajectory_vitality_weight=0.0,
-        compression_dynamics_weight=0.0,
-        # self_check_ring（继承 Phase 4）
+        self_rollout_weight=args.self_rollout_weight,
+        self_progress_shape_weight=getattr(args, "self_progress_shape_weight", 0.0),
+        # ── self_check_ring（继承 Phase 4）────────────────────────────────────
         enable_self_check_ring=True,
         self_check_loss_weight=args.self_check_loss_weight,
-        # SIGreg delta（继承 Phase 3.5）
+        # ── SIGreg delta（继承 Phase 3.5）─────────────────────────────────────
         enable_sigreg_delta=True,
         enable_sigreg_rollout=False,
         enable_sigreg_ct=False,
@@ -314,6 +372,14 @@ def build_phase6_config(args: argparse.Namespace) -> LumaConfig:
         sigreg_num_points=17,
         sigreg_lambda=1.0,
         sigreg_eps=1e-6,
+        # ── 其他辅助 loss 关闭 ────────────────────────────────────────────────
+        self_jepa_residual_reg=0.0,
+        exit_aux_weight=0.0,
+        rollout_zone_weight=0.0,
+        routing_tier_entropy_weight=0.0,
+        routing_min_local_share_weight=0.0,
+        trajectory_vitality_weight=0.0,
+        compression_dynamics_weight=0.0,
     )
 
 
@@ -332,15 +398,14 @@ def _module_grad_norm(params) -> float:
 
 def compute_grad_metrics(model: LumaForCausalLM) -> dict:
     """
-    三组参数的梯度范数：
-      compress  = embedding + compression zone
-      shared    = reason_core (shared reasoning block)
-      reasoning = 其余推理侧参数（mhc, introspection, c_t, exit_controller 等）
+    三组参数的梯度范数 + v2 逐层范数。
 
-    grad_ratio = max / min，越接近 1 越好，> 10 说明严重失衡。
+    v1 zone-level: compress / shared / reasoning（向后兼容）
+    v2 per-layer: 每层一个范数，用于高维 POD 分析
     """
     backbone = model.model  # LumaBackbone
 
+    # ── v1: zone-level ──
     compress_params = list(backbone.embedding.parameters()) + list(backbone.compression.parameters())
     shared_params = list(backbone.reason_core.parameters())
     reasoning_params = (
@@ -362,11 +427,25 @@ def compute_grad_metrics(model: LumaForCausalLM) -> dict:
     norms = [v for v in [n_compress, n_shared, n_reasoning] if v > 0]
     ratio = max(norms) / min(norms) if len(norms) >= 2 else float("inf")
 
+    # ── v2: per-layer ──
+    layer_norms: dict[str, float] = {}
+    layer_norms["embedding"] = _module_grad_norm(list(backbone.embedding.parameters()))
+    for i, layer in enumerate(backbone.compression.layers):
+        layer_norms[f"compress_{i:02d}"] = _module_grad_norm(list(layer.parameters()))
+    for i, layer in enumerate(backbone.reason_core.shared_layers):
+        layer_norms[f"reason_shared_{i}"] = _module_grad_norm(list(layer.parameters()))
+    layer_norms["mhc"] = _module_grad_norm(list(backbone.mhc.parameters()))
+    layer_norms["introspection"] = _module_grad_norm(list(backbone.introspection_state_stream.parameters()))
+    layer_norms["self_jepa"] = _module_grad_norm(list(backbone.self_jepa_residual_predictor.parameters()))
+    layer_norms["world_jepa"] = _module_grad_norm(list(backbone.world_latent_jepa.parameters()))
+    layer_norms["exit_ctrl"] = _module_grad_norm(list(backbone.exit_controller.parameters()))
+
     return {
         "grad_norm_compress": n_compress,
         "grad_norm_shared": n_shared,
         "grad_norm_reasoning": n_reasoning,
         "grad_ratio": ratio,
+        "layer_grad_norms": layer_norms,
     }
 
 
@@ -394,19 +473,31 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
           loader: DataLoader, optimizer, scheduler, scaler,
           autocast_ctx, metrics_path: Path,
           compress_probe: torch.nn.Module = None,
-          compress_weight: float = 0.0):
+          compress_weight: float = 0.0,
+          start_step: int = 0):
 
     model.train()
     start_time = time.time()
-    step = 0
+    step = start_step
+    ckpt_dir = Path(args.ckpt_dir) if args.ckpt_dir else CKPT_DIR
+    save_interval = getattr(args, "save_interval", 0)
+    ckpt_keep = getattr(args, "ckpt_keep", 3)
 
     # ── 动力学分析器 ─────────────────────────────────────────────────────
     grad_tracker = GradTrajectoryTracker(window=min(args.dod_interval, 200))
+    layer_grad_tracker = LayerGradTracker(window=min(args.dod_interval, 200))
     ct_tracker = CtStateTracker(window=100, proj_dim=64)
+    exit_depth_tracker = ExitDepthTracker(window=min(args.dod_interval, 200),
+                                          max_loops=getattr(args, "reason_loops", 15))
     grad_snapshots = []   # 每 dod_interval 步存一份 analyze() 结果
     ct_snapshots = []
+    layer_grad_snapshots = []
+    exit_depth_snapshots = []
     dyn_report_path = metrics_path.parent / metrics_path.name.replace("_metrics.jsonl", "_dynamics.json")
     dyn_md_path = dyn_report_path.with_suffix(".md")
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     for input_ids, labels in _infinite_loader(loader):
         step += 1
@@ -457,9 +548,14 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             optimizer.step()
             scheduler.step()
             scaler.update()
+            # World-JEPA EMA target update (no-op for LeWM mode)
+            if hasattr(raw_model, "update_world_target"):
+                raw_model.update_world_target()
             optimizer.zero_grad(set_to_none=True)
             if compress_probe is not None:
                 compress_probe.zero_grad(set_to_none=True)
+            # Release fragmented CUDA cache to prevent OOM on long sequences
+            torch.cuda.empty_cache()
 
         # ── 日志 ────────────────────────────────────────────────────────────
         current_loss = loss.item() * args.accumulation_steps
@@ -506,38 +602,96 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                     "  -> 梯度无法传到压缩区，需执行预案 S1（跳连捷径）"
                 )
 
+        # ── Checkpoint 保存 ─────────────────────────────────────────────────
+        if save_interval > 0 and (step % save_interval == 0 or step == args.iters):
+            ckpt_path = ckpt_dir / f"phase{args.phase}_step{step}.pt"
+            save_checkpoint(ckpt_path, step, model, optimizer, scheduler, args,
+                            compress_probe=compress_probe)
+            cleanup_checkpoints(ckpt_dir, keep=ckpt_keep, phase=args.phase)
+
         # ── 动力学追踪（每步更新，每 dod_interval 步分析）──────────────────
         grad_tracker.update(step, grad_metrics)
+        layer_norms = grad_metrics.get("layer_grad_norms")
+        if layer_norms:
+            layer_grad_tracker.update(step, layer_norms)
         raw_m = getattr(model, "_orig_mod", model)
-        if hasattr(raw_m, "last_aux") and raw_m.last_aux and "c_t" in raw_m.last_aux:
-            ct_tensor = raw_m.last_aux["c_t"]
+        if hasattr(raw_m, "last_aux") and raw_m.last_aux:
+            ct_tensor = raw_m.last_aux.get("c_t")
             if ct_tensor is not None and ct_tensor.dim() >= 2:
                 ct_tracker.update(step, ct_tensor)
+            exit_loops = raw_m.last_aux.get("exit_loops")
+            if exit_loops is not None:
+                exit_depth_tracker.update(step, exit_loops)
 
         if step % args.dod_interval == 0 or step == args.iters:
             snap_grad = grad_tracker.analyze()
             snap_ct = ct_tracker.analyze()
+            snap_layer = layer_grad_tracker.analyze()
+            snap_exit = exit_depth_tracker.analyze()
             if snap_grad:
                 grad_snapshots.append(snap_grad)
                 ct_snapshots.append(snap_ct)
+                if snap_layer:
+                    layer_grad_snapshots.append(snap_layer)
+                if snap_exit:
+                    exit_depth_snapshots.append(snap_exit)
+                # v1 日志行（兼容）
                 dod_rank = snap_grad.get("dod_rank", -1)
                 e1 = snap_grad.get("energy_mode1_pct", 100.0)
                 radius = snap_grad.get("dmd_spectral_radius", float("nan"))
                 dmd_str = f"{radius:.4f}" if math.isfinite(radius) else "nan"
+                # v2 逐层信息
+                v2_rank = snap_layer.get("dod_rank", -1) if snap_layer else -1
+                v2_e1 = snap_layer.get("energy_mode1_pct", 100.0) if snap_layer else 100.0
+                v2_dims = snap_layer.get("n_layers", 0) if snap_layer else 0
+                dead = snap_layer.get("dead_layers", []) if snap_layer else []
+                # 退出深度
+                exit_info = ""
+                if snap_exit:
+                    exit_info = (f"  exit: mean={snap_exit['mean_depth']:.1f}"
+                                 f" std={snap_exit['std_depth']:.2f}"
+                                 f" entropy={snap_exit['depth_entropy']:.3f}")
                 Logger(
                     f"[DOD/DMD step {step}]  dod_rank={dod_rank}"
                     f"  mode1_energy={e1:.1f}%"
                     f"  grad_dmd_radius={dmd_str}"
+                    f"  v2_rank={v2_rank}/{v2_dims} v2_mode1={v2_e1:.1f}%"
+                    + (f"  dead={dead}" if dead else "")
+                    + exit_info
                 )
-                # 中间快照也写入 jsonl
-                log_jsonl(metrics_path, {"step": step, "dynamics_snapshot": snap_grad, "ct_snapshot": snap_ct})
+                # 快照写入 jsonl
+                snapshot_record = {"step": step, "dynamics_snapshot": snap_grad, "ct_snapshot": snap_ct}
+                if snap_layer:
+                    # 只存摘要，不存完整 layer_stats（避免 jsonl 膨胀）
+                    snapshot_record["v2_layer_snapshot"] = {
+                        k: v for k, v in snap_layer.items() if k != "layer_stats"
+                    }
+                if snap_exit:
+                    snapshot_record["exit_depth_snapshot"] = snap_exit
+                log_jsonl(metrics_path, snapshot_record)
+
+    # ── Peak VRAM 报告 ────────────────────────────────────────────────────
+    if torch.cuda.is_available():
+        peak_mb = torch.cuda.max_memory_allocated() / 1024**2
+        reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+        print(f"Peak VRAM: {peak_mb:.0f} MB ({peak_mb/1024:.2f} GB)  reserved: {reserved_mb:.0f} MB ({reserved_mb/1024:.2f} GB)", file=sys.stderr)
 
     # ── 训练结束：生成完整动力学报告 ────────────────────────────────────────
     final_snap = grad_tracker.analyze()
     if final_snap:
         grad_snapshots.append(final_snap)
         ct_snapshots.append(ct_tracker.analyze())
-    report = render_dynamics_report(grad_snapshots, ct_snapshots, args.phase, step)
+        final_layer = layer_grad_tracker.analyze()
+        if final_layer:
+            layer_grad_snapshots.append(final_layer)
+        final_exit = exit_depth_tracker.analyze()
+        if final_exit:
+            exit_depth_snapshots.append(final_exit)
+    report = render_dynamics_report(
+        grad_snapshots, ct_snapshots, args.phase, step,
+        layer_grad_history=layer_grad_snapshots or None,
+        exit_depth_history=exit_depth_snapshots or None,
+    )
     if report:
         save_report(report, dyn_report_path)
         md = render_markdown(report)
@@ -577,7 +731,14 @@ if __name__ == "__main__":
                         help="每隔多少步记录一次梯度范数")
     parser.add_argument("--dod_interval", type=int, default=200,
                         help="每隔多少步做一次 DOD/DMD 动力学分析快照")
-    parser.add_argument("--save_interval", type=int, default=500)
+    parser.add_argument("--save_interval", type=int, default=500,
+                        help="每隔多少步保存 checkpoint (0=不保存)")
+    parser.add_argument("--ckpt_dir", type=str, default="",
+                        help="Checkpoint 保存目录 (默认: artifacts/checkpoints)")
+    parser.add_argument("--resume", type=str, default="",
+                        help="从指定 checkpoint 恢复训练 (路径)")
+    parser.add_argument("--ckpt_keep", type=int, default=3,
+                        help="保留最近几个 checkpoint (默认 3)")
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--device", type=str,
                         default="cuda:0" if torch.cuda.is_available() else "cpu")
@@ -595,6 +756,12 @@ if __name__ == "__main__":
     parser.add_argument("--modular_norm_power", type=float, default=0.5)
     parser.add_argument("--use_8bit_muon", type=int, default=1, choices=[0, 1])
     parser.add_argument("--use_8bit_adamw", type=int, default=1, choices=[0, 1])
+    parser.add_argument("--cpu_offload_optimizer", type=int, default=0, choices=[0, 1],
+                        help="Offload optimizer states (momentum/m/v) to CPU pinned memory. Saves ~0.7GB (8bit) / ~1.3GB (fp32).")
+    parser.add_argument("--activation_offload_compress", type=int, default=0, choices=[0, 1],
+                        help="Offload compress zone activations to CPU during forward. Saves ~1-3GB, costs ~20-50ms/step.")
+    parser.add_argument("--fp8", type=int, default=0, choices=[0, 1],
+                        help="启用 FP8 forward (Linear 层用 FP8 tensor core, backward 仍 bf16)")
     # ── model arch ─────────────────────────────────────────────────────────
     parser.add_argument("--hidden_size", type=int, default=768)
     parser.add_argument("--intermediate_size", type=int, default=3072)
@@ -640,6 +807,17 @@ if __name__ == "__main__":
     parser.add_argument("--exit_train_use_sampling", type=int, default=1)
     parser.add_argument("--exit_eval_use_sampling", type=int, default=0)
     parser.add_argument("--exit_sampling_temperature", type=float, default=1.0)
+    parser.add_argument("--exit_second_order_delta_weight", type=float, default=0.0,
+                        help="Exit policy: weight on second-order delta_h convergence signal (0=disabled)")
+    # Reasoning partitioning
+    parser.add_argument("--reason_num_phases", type=int, default=0,
+                        help="Phase embedding: 0=disabled, >0=number of distinct phase embeddings for reasoning loops")
+    parser.add_argument("--reason_head_partition", type=int, default=0, choices=[0, 1],
+                        help="Head partition: each loop activates a rotating subset of diff_attn heads")
+    parser.add_argument("--reason_mor_routing", type=int, default=0, choices=[0, 1],
+                        help="MoR: loop-conditioned expert routing after shared layers")
+    parser.add_argument("--reason_mor_num_experts", type=int, default=4)
+    parser.add_argument("--reason_mor_topk", type=int, default=2)
     parser.add_argument("--use_compile", type=int, default=0, choices=[0, 1])
     parser.add_argument("--use_gradient_checkpointing", type=int, default=0, choices=[0, 1],
                         help="1=对 reason_core 每次循环做 gradient checkpointing，省~70%激活VRAM，速度约慢30%")
@@ -727,12 +905,20 @@ if __name__ == "__main__":
     # 部显式转 float() 处理，不受参数精度影响。
     param_dtype = torch.bfloat16 if args.model_dtype == "bfloat16" else torch.float32
     model = LumaForCausalLM(luma_config).to(args.device, dtype=param_dtype)
+    # ── FP8 混精度 (forward 用 FP8 tensor core, backward 用 bf16) ──────
+    if args.fp8:
+        from model.fp8_linear import convert_to_fp8
+        fp8_count = convert_to_fp8(model, min_size=4096)
+        Logger(f"FP8: converted {fp8_count} Linear layers to FP8 forward")
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
     vram_est_gb = total_params * (2 if param_dtype == torch.bfloat16 else 4) / 1024
-    Logger(f"Luma Refactor Params: {total_params:.3f}M  param_dtype={param_dtype}  ~{vram_est_gb:.2f}GB param VRAM")
+    fp8_tag = " [FP8]" if args.fp8 else ""
+    Logger(f"Luma Refactor Params: {total_params:.3f}M  param_dtype={param_dtype}  ~{vram_est_gb:.2f}GB param VRAM{fp8_tag}")
     if args.phase == 6:
-        reason_only_str = "reason_only" if getattr(args, "world_jepa_reason_only", 0) else "full_grad"
-        Logger(f"Phase 6: World JEPA (mode={args.world_jepa_mode}, weight={args.world_jepa_weight}, {reason_only_str}, sigreg={args.world_sigreg_weight}) + self-JEPA (weight={args.self_jepa_weight}) + SIGreg delta (weight={args.sigreg_delta_weight}) + self_check_ring (weight={args.self_check_loss_weight}), compress_probe weight={args.compress_weight}")
+        Logger(f"Phase 6: World-JEPA (mode={args.world_jepa_mode}, weight={args.world_jepa_weight}, "
+               f"sigreg={args.world_sigreg_weight}, mask={args.world_mask_ratio}) "
+               f"+ self-JEPA ({args.self_jepa_weight}) + SIGreg delta ({args.sigreg_delta_weight}) "
+               f"+ self_check_ring ({args.self_check_loss_weight}), compress_probe weight={args.compress_weight}")
     elif args.phase == 5:
         ct_str = f" + SIGreg c_t (weight={args.sigreg_ct_weight})" if args.enable_sigreg_ct else ""
         norm_str = f", ct_norm_penalty={args.ct_norm_penalty_weight}" if args.ct_norm_penalty_weight > 0 else ""
@@ -762,6 +948,9 @@ if __name__ == "__main__":
         use_8bit_adamw=bool(args.use_8bit_adamw),
     )
     optimizer = LumaMuonAdamWOptimizer(model, optimizer_config)
+    if getattr(args, "cpu_offload_optimizer", 0):
+        optimizer.enable_cpu_offload()
+        Logger("Optimizer CPU offload enabled — states will live on CPU pinned memory")
     # 固定 lr：把 total_steps 设成极大值，余弦因子始终 ≈ 1.0
     scheduler = LumaCosineScheduler(
         optimizer,
@@ -816,6 +1005,17 @@ if __name__ == "__main__":
         optimizer.param_groups.extend(compress_probe_optim.param_groups)
         Logger(f"Phase 2: compress_probe enabled, weight={compress_weight}")
 
+    # ── Resume from checkpoint ────────────────────────────────────────────
+    start_step = 0
+    if args.resume:
+        resume_path = Path(args.resume)
+        if resume_path.exists():
+            start_step = load_checkpoint(resume_path, model, optimizer, scheduler,
+                                         compress_probe=compress_probe)
+        else:
+            print(f"WARNING: checkpoint not found: {resume_path}, starting from scratch", file=sys.stderr)
+
     train(args, luma_config, model, loader, optimizer, scheduler, scaler,
           autocast_ctx, metrics_path,
-          compress_probe=compress_probe, compress_weight=compress_weight)
+          compress_probe=compress_probe, compress_weight=compress_weight,
+          start_step=start_step)

@@ -215,10 +215,62 @@ class LumaOptimizerBundle:
             if param.grad is None:
                 param.grad = torch.zeros_like(param)
         _apply_muon_clip_(matrix_params + scalar_params, self.config.muon_clip_factor)
+        if self._cpu_offload:
+            self._states_to_gpu()
         self.matrix_optimizer.step()
         self.scalar_optimizer.step()
+        if self._cpu_offload:
+            self._states_to_cpu()
+
+    # ── CPU Offload ──────────────────────────────────────────────────────
+    _cpu_offload: bool = False
+
+    def enable_cpu_offload(self) -> None:
+        """将优化器状态（momentum / exp_avg / exp_avg_sq）卸载到 CPU pinned memory。
+
+        首次 step() 后优化器才会初始化状态，所以 offload 延迟到第一次 step 完成后生效。
+        预计节省 ~2.4GB VRAM（660M 模型），代价 ~10-15ms/step（PCIe 5.0）。
+        """
+        self._cpu_offload = True
+
+    @torch.no_grad()
+    def _states_to_cpu(self) -> None:
+        for opt in (self.matrix_optimizer, self.scalar_optimizer):
+            for state in opt.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor) and v.is_cuda:
+                        state[k] = v.to("cpu", non_blocking=True).pin_memory()
+        torch.cuda.synchronize()
+
+    @torch.no_grad()
+    def _states_to_gpu(self) -> None:
+        device = None
+        for opt in (self.matrix_optimizer, self.scalar_optimizer):
+            for param_key, state in opt.state.items():
+                if device is None:
+                    # 从参数推断 GPU device
+                    if isinstance(param_key, torch.Tensor):
+                        device = param_key.device
+                    else:
+                        for g in opt.param_groups:
+                            for p in g["params"]:
+                                if p.is_cuda:
+                                    device = p.device
+                                    break
+                            if device is not None:
+                                break
+                if device is None:
+                    device = torch.device("cuda")
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor) and not v.is_cuda:
+                        state[k] = v.to(device, non_blocking=True)
+        torch.cuda.synchronize()
 
     def state_dict(self) -> dict:
+        # 保存前确保状态在 CPU（已经在 CPU 则是 no-op）
+        if self._cpu_offload:
+            # state 已在 CPU，直接保存
+            pass
         return {
             "config": asdict(self.config),
             "matrix_optimizer": self.matrix_optimizer.state_dict(),

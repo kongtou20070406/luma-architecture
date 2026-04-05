@@ -1,120 +1,139 @@
-# luma-architecture
+# Luma Architecture
 
-公开分享版的 **Luma architecture** 研究仓。
+**Luma** — 一个从零设计的小型语言模型架构，核心是 **CDR-Loop**（Compress-Decompress-Reason 循环）：用 Mamba3 SSM 做高效压缩，用权重共享的推理循环做深度思考，用自适应退出控制计算预算。
 
-## 主项目位置（唯一）
+## 架构概览
 
-- 本地主项目目录固定为：`/home/kt/ai/luma-architecture`
-- 从现在起以这个仓作为唯一主线，不再并行维护“内外两套同名仓”。
+```
+Input → FactorizedEmbedding → CompressionZone → ReasoningLoop → LM Head → Output
+                                    ↑                  ↓
+                                    └── c_t cognitive stream ──┘
+```
 
-这个仓主要用于和朋友分享当前进度，内容以：
+### 核心组件
 
-- 架构设计文档
-- 实验报告
-- 关键代码实现
-- 可复现实验脚本
+| 组件 | 实现 | 说明 |
+|------|------|------|
+| **压缩区** (Compression Zone) | Mamba3 MIMO + SWA/KDA Attention | 44 层混合架构，~90% SSM + ~10% Attention |
+| **推理区** (Reasoning Zone) | 权重共享 Mamba3 + DiffAttn | 2 层共享，循环 12 次 = 24 层等效深度 |
+| **认知流** (c_t stream) | 64-dim 持续状态 | 跨循环传递推理上下文 |
+| **Self-JEPA** | 残差预测器 | 自监督：预测下一循环的隐藏状态变化 |
+| **World-JEPA** | 潜空间世界模型 | 学习 token 序列的因果结构 |
+| **ExitController** | 二阶差分退出 | 推理循环提前退出，省计算 |
+| **Introspection Stream** | 元认知 Mamba3 | 监控推理健康度，调节循环深度 |
 
-为主。
+### 关键技术选择
 
-它**不包含**：
+- **Mamba3 MIMO**: rank=2, chunk=32, TileLang kernel (Blackwell GPU 优化)
+- **SDPA Flash Attention**: PyTorch 2.11 F.scaled_dot_product_attention，自动选择 flash backend
+- **FP8 混精度**: 162 Linear layers FP8 forward, BF16 backward
+- **8-bit Muon + AdamW**: CPU offload 优化器状态
 
-- 私有 `luma_dataset/persona_seed/` 语料
+## 当前状态 (2026-04-05)
+
+**定型架构 (A1)**:
+- 参数量: **482M**
+- hidden=768, layers=44, heads=12/3, shared_depth=2
+- Peak VRAM: 9.71 GB (seq=2048, bs=1, RTX 5090)
+
+**实验矩阵进度**:
+
+| Matrix | 内容 | 状态 |
+|--------|------|------|
+| M0 | 架构定型 (4 配置对比) | 完成 - A1 胜出 |
+| M1 | World-JEPA 变体 (5 实验) | 进行中 |
+| M7 | GaLore 优化器 (解锁 bs=2) | 下一个 |
+| M5 | ES 进化策略验证 (N=2) | 探索性 |
+| M6 | 数据效率 (EntiGraph + PPL 修剪) | 规划中 |
+| M2 | Exit Policy | 预训练后 |
+| M4 | MoR Per-Token Routing | 预训练后 |
+| M8 | 推理时 A* 搜索 | 部署阶段 |
+
+详见 [执行计划 v4](docs/plans/Luma_Execution_Plan_v4_20260405.md)
+
+## 项目结构
+
+```
+luma-architecture/
+├── docs/
+│   ├── plans/          # 执行计划（v4 为当前版本）
+│   ├── reports/        # 实验报告
+│   ├── research/       # 研究调研（小模型优化、无BP训练）
+│   └── reference/      # 参考文档、loss 说明
+├── minimind/
+│   ├── model/
+│   │   ├── model_minimind.py   # Luma 主模型 (~3800 LOC)
+│   │   ├── mamba3_module.py    # Mamba3 MIMO wrapper
+│   │   └── fp8_linear.py       # FP8 混精度 Linear
+│   ├── trainer/
+│   │   └── train_luma_refactor.py  # 训练脚本
+│   ├── scripts/        # 实验矩阵脚本
+│   ├── luma_stage0/    # 优化器、动力学分析
+│   └── artifacts/      # 训练产物（metrics, dynamics）
+├── luma_dataset/
+│   ├── synthetic/      # 公开数据集 (math, code, scifi, etc.)
+│   ├── fetch_*.py      # 数据拉取脚本
+│   └── rebuild_mixes.py # DataMix 重建
+├── third_party/
+│   └── mamba-official/ # Mamba3 TileLang/Triton kernels
+└── parameter-golf/     # 可选机制验证材料
+```
+
+## 快速开始
+
+```bash
+# 环境
+# Python 3.12, PyTorch 2.11+, CUDA 12.8+, RTX 5090 (32GB)
+
+# 训练 (必须从 trainer/ 目录运行)
+cd minimind/trainer
+python train_luma_refactor.py \
+  --hidden_size 768 --compression_layers 44 \
+  --num_attention_heads 12 --num_key_value_heads 3 \
+  --reason_shared_depth 2 --mamba_chunk_size 32 \
+  --max_seq_len 2048 --batch_size 1 --reason_loops 12 \
+  --fp8 1 --use_gradient_checkpointing 1 \
+  --cpu_offload_optimizer 1 \
+  --phase 4
+```
+
+## 研究方向
+
+1. **GaLore 优化器** — 梯度低秩投影，解锁 bs=2，预训练速度翻倍
+2. **ES 进化策略** — 无反向传播训练，为未来参数扩容和多卡场景储备
+3. **EntiGraph 数据合成** — 从小语料合成 10x 训练数据
+4. **推理时 A* 搜索** — 部署时 500M 逼近 2B 推理质量
+5. **循环深度扩展** — 更多推理循环，更少唯一参数
+
+详见 [研究报告](docs/research/Luma_Research_Report_SmallModel_NoBP.md)
+
+## 数据原则
+
+**先变聪明，再变像 Luma。**
+
+- smart 桶 (math + code + reason): >= 50%
+- persona + empathy: >= 25% (红线)
+- dialogue: 15-20%
+
+## 不包含的内容
+
+- `luma_dataset/persona_seed/` 私有语料
 - 训练权重 / checkpoint / `*.pth`
-- 本地虚拟环境
-- 运行缓存与日志残留
+- 本地虚拟环境和缓存
 
-## 基线前缀命名
+## 推���阅读顺序
 
-为了方便区分实验演进，这个仓现在采用“基线前缀 + 变体名”的记录方式。
+1. [Luma_Execution_Plan_v4](docs/plans/Luma_Execution_Plan_v4_20260405.md) — 当前全局路线图
+2. [Research Report](docs/research/Luma_Research_Report_SmallModel_NoBP.md) — 技术调研
+3. `minimind/model/model_minimind.py` — 核心模型实现
+4. `minimind/trainer/train_luma_refactor.py` — 训练流程
 
-- `A0`
-  - 早期纯 `one-step` continuation skeleton
-- `A1`
-  - `one-step main + light two-step auxiliary` 升级线
-- `A2`
-  - 当前正式长程基线
-  - 对应旧文档里常写的 `iter2`
+## 硬件环境
 
-命名示例：
-
-- `A2-core`
-- `A2-predictor_progress`
-- `A2-progress_shape_v1`
-- `A2-local_consistency_v2`
-
-这样可以一眼看出：
-
-- 它属于哪一代基线
-- 它是在那代基线下加了什么变体
-
-## 当前内容
-
-- `docs/plans/`
-  - Luma 总规划（历史主文档）与当前执行计划
-- `docs/reports/`
-  - 已合并的主报告（Stage12 / Dynamics）与当前矩阵工件
-- `docs/reference/`
-  - reference 入口、loss 说明、实现清单
-- `docs/agent/`
-  - agent 工作日志与记忆协议
-- `minimind/`
-  - 当前 Luma 主实现底座与实验脚本
-- `luma_dataset/`
-  - 公开可分享的数据工作区（manifests / scripts / bucket 文档）
-  - `persona_seed/` 私有语料默认不上传
-- `parameter-golf/`
-  - 可选机制验证材料（默认实验链不依赖）
-
-## 代码现状
-
-当前主线更接近：
-
-- `A2-core` 长程基线
-- `full world JEPA`
-- `depth2 shared reasoning block`
-- `self_check_k = 2`
-- `one-step main + light two-step auxiliary`
-
-但这仍然是**研究实现**，不是已经冻结的最终正式预训练版本。
-
-## 不包含的数据与权重
-
-这个公开仓默认不带：
-
-- `luma_dataset/persona_seed/`
-- `minimind/checkpoints/`
-- `minimind/out/`
-- 任何训练权重文件
-
-如果你要在本地完整复现，需要自行准备：
-
-1. 私有或公开训练数据
-2. WSL2 + CUDA 环境
-3. Python 依赖包（如 `bitsandbytes`、`muon-optimizer`），以及按需编译第三方内核
-
-详细见：
-- [Luma_Experiment_Implementation_Checklist.md](docs/reference/Luma_Experiment_Implementation_Checklist.md)
-
-## 推荐阅读顺序
-
-1. [Luma_v0.7.2_Agent_MasterPlan.md](docs/plans/Luma_v0.7.2_Agent_MasterPlan.md)
-2. [Luma_Execution_Plan_20260402.md](docs/plans/Luma_Execution_Plan_20260402.md)
-3. [docs/reference/README.md](docs/reference/README.md)
-4. [docs/reports/README.md](docs/reports/README.md)
-5. `minimind/model/model_minimind.py`
-
-## 说明
-
-- 这个仓以 **WSL2 + RTX 5090** 的实验环境为主。
-- 某些依赖路径当前仍偏研究仓风格，环境安装说明里已经写了需要注意的地方。
-- 如果你只是想理解设计，不需要把所有实验都复跑一遍；先看 `docs/plans` 和 `docs/reports` 就够了。
+- WSL2 + RTX 5090 (32GB VRAM)
+- seq=2048 bs=1: 9.71 GB peak, ~1.6s/step
+- Mamba3 TileLang kernel 需要 Blackwell 架构 GPU
 
 ## License
 
-Top-level repository license: `Apache-2.0`.
-
-Notes:
-
-- The main `minimind/` implementation and Luma integration are shared under `Apache-2.0`.
-- The included `parameter-golf/` slice retains its own `MIT` license in `parameter-golf/LICENSE`.
-- Third-party and inherited notices should be kept when redistributing this repository.
+Apache-2.0. `parameter-golf/` 保留其 MIT 许可。

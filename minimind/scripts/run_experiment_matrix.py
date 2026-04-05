@@ -18,7 +18,7 @@ RESULTS_DIR = Path(__file__).resolve().parent.parent / "artifacts" / "experiment
 
 # Phase 4 基线参数（所有实验共享）
 BASE_ARGS = [
-    "--phase", "6",  # 用 phase 6 框架但关掉 world jepa
+    "--phase", "4",
     "--iters", "1500",
     "--use_gradient_checkpointing", "1",
     "--log_interval", "50",
@@ -255,6 +255,31 @@ EXPERIMENTS = {
         "desc": "F2 + diag_math (persona+math, 旧配比对照)",
         "args": [
             "--data_path", "../dataset/pretrain_diag_math.jsonl",
+            "--self_progress_shape_weight", "0.05",
+            "--self_rollout_weight", "0.1",
+        ],
+    },
+    # H组：G5 基础 + 第三类数据 5%，验证 312M 3类数据上限
+    "H1": {
+        "desc": "G5 + scifi 5%",
+        "args": [
+            "--data_path", "../dataset/pretrain_h_scifi.jsonl",
+            "--self_progress_shape_weight", "0.05",
+            "--self_rollout_weight", "0.1",
+        ],
+    },
+    "H2": {
+        "desc": "G5 + python 5%",
+        "args": [
+            "--data_path", "../dataset/pretrain_h_python.jsonl",
+            "--self_progress_shape_weight", "0.05",
+            "--self_rollout_weight", "0.1",
+        ],
+    },
+    "H3": {
+        "desc": "G5 + ARC 5%",
+        "args": [
+            "--data_path", "../dataset/pretrain_h_arc.jsonl",
             "--self_progress_shape_weight", "0.05",
             "--self_rollout_weight", "0.1",
         ],

@@ -1,0 +1,97 @@
+{
+  "phase": 0,
+  "total_steps": 4,
+  "final_dod_rank": 1,
+  "final_energy_mode1_pct": 99.98,
+  "final_dmd_spectral_radius": NaN,
+  "dod_rank_trajectory": [
+    1,
+    1
+  ],
+  "energy_mode1_pct_trajectory": [
+    100.0,
+    100.0
+  ],
+  "dmd_spectral_radius_trajectory": [],
+  "ct_dmd_spectral_radius_trajectory": [],
+  "verdict": "WARN: dod_rank=1 ok但能量仍集中 mode1=100.0% (目标<80%)",
+  "full_snapshots": [
+    {
+      "window_steps": 3,
+      "first_step": 1,
+      "last_step": 3,
+      "pod": {
+        "effective_rank": 1,
+        "energy_top5_pct": [
+          99.98,
+          0.02,
+          0.0
+        ],
+        "sv_top5": [
+          79.7703,
+          1.0631,
+          0.0
+        ],
+        "energy_mode1_pct": 99.98,
+        "total_energy": 6364.430858
+      },
+      "dmd": {
+        "spectral_radius": NaN,
+        "stable": null,
+        "eig_mags_top5": []
+      },
+      "dod_rank": 1,
+      "energy_mode1_pct": 99.98,
+      "dmd_spectral_radius": NaN
+    },
+    {
+      "window_steps": 3,
+      "first_step": 1,
+      "last_step": 3,
+      "pod": {
+        "effective_rank": 1,
+        "energy_top5_pct": [
+          99.98,
+          0.02,
+          0.0
+        ],
+        "sv_top5": [
+          79.7703,
+          1.0631,
+          0.0
+        ],
+        "energy_mode1_pct": 99.98,
+        "total_energy": 6364.430858
+      },
+      "dmd": {
+        "spectral_radius": NaN,
+        "stable": null,
+        "eig_mags_top5": []
+      },
+      "dod_rank": 1,
+      "energy_mode1_pct": 99.98,
+      "dmd_spectral_radius": NaN
+    }
+  ],
+  "v2_layer_dod_rank": 1,
+  "v2_layer_energy_mode1_pct": 99.97,
+  "v2_layer_n_dims": 32,
+  "v2_layer_dead_layers": [
+    "exit_ctrl",
+    "mhc",
+    "self_jepa",
+    "world_jepa"
+  ],
+  "v2_layer_dod_rank_trajectory": [
+    1,
+    1
+  ],
+  "v2_layer_energy_mode1_trajectory": [
+    100.0,
+    100.0
+  ],
+  "v2_verdict": "RANK_LOW: 1/32 (3%) | mode1=100.0% 集中 | DEAD_LAYERS: ['exit_ctrl', 'mhc', 'self_jepa', 'world_jepa']",
+  "ct_batch_var_mean": 0.0,
+  "ct_batch_var_trend": 0.0,
+  "ct_norm_spread": 0.0
+}
