@@ -312,6 +312,21 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 
 **判胜标准**: 等效 bs=2 训练不 OOM + loss 不超过 baseline 5%
 
+**结果 (2026-04-06 04:20)**:
+
+| 实验 | loss_lm | Peak VRAM | Wall-clock | 状态 |
+|---|---|---|---|---|
+| GL0 baseline | 4.2273 | 10.26 GB | 23.7 min | ✅ |
+| **GL1 accum=2** | **3.9946 (-5.5%)** | **11.20 GB** | **18.6 min** | **✅ 胜出** |
+| GL2 offload+accum | — | — | — | ❌ crash (FP8+offload 冲突) |
+| GL3/GL4 | — | — | — | 未运行 |
+
+**关键发现**: accum=2 吞吐量 **2.55x** (3674 vs 1441 tok/s)，预训练 ~16天 → **~6天**。
+**胜出配置**: `--accumulation_steps 2 --batch_size 1`
+详见 [Matrix7 报告](../reports/Matrix7_Throughput_Report_20260406.md)。
+
+**状态**: ✅ 完成
+
 ### Matrix 9: AttnRes 改造 — Kimi Block Attention Residuals
 
 **目标**：将当前 lerp 残差注意力替换为论文 (arxiv 2603.15031) 的 Block Attention Residuals，验证对收敛和动力学的影响。
@@ -433,7 +448,7 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 | — | Matrix 0 (架构定型) | ~1h | **完成 ✅** | A1 (482M) 胜出 |
 | — | Matrix 1 (B' World-JEPA) | ~4h | **完成 ✅** | B2' (sig=0.10) 胜出 |
 | — | Matrix 9 (AttnRes 改造) | ~4h | **完成 ✅** | AR1 胜出 (compress paper + reason legacy) |
-| **P0** | **Matrix 7 (训练吞吐量)** | **~4h** | **M9 后启动** | **accum=2 等效 bs=2** |
+| — | Matrix 7 (训练吞吐量) | ~1h | **完成 ✅** | GL1 胜出 (accum=2, 2.55x 吞吐) |
 | P1 | Matrix 5 (ES 验证) | ~3 天 | 与 M7 并行 | N=2 快速验证能否收敛 |
 | P1 | Matrix 6 (数据效率) | 3-5 天 | 与 M5/M7 并行 | EntiGraph 合成 + PPL 修剪 |
 | P1 | Matrix 3 (数据扩量) | 并行准备 | 数据收集中 | 不阻塞训练 |
@@ -481,6 +496,6 @@ M5 (ES N=2 收敛?)
 2. ✅ arxiv_dl_code 20K 条拉取完成
 3. ✅ Matrix 1 完成，B2' (sig=0.10, mask=0.25) 胜出
 4. ✅ Matrix 9 完成，AR1 胜出 (compress paper + reason legacy, loss -16.1%)
-5. **🔄 Matrix 7 (训练吞吐量)**: 启动中, gradient accum=2 + activation offload
+5. ✅ Matrix 7 完成，GL1 胜出 (accum=2, loss -5.5%, 吞吐 2.55x)
 6. **→ Matrix 5 (ES N=2)**: 探索性验证
 7. **→ 整合 arxiv_dl_code**: 更新 DataMix，重建 pretrain 数据
