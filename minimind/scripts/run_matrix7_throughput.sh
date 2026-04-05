@@ -21,7 +21,7 @@ ARCH="--hidden_size 768 --intermediate_size 3072 \
   --reason_shared_depth 2 \
   --mamba_chunk_size 32"
 
-# Base training config (B2' winner)
+# Base training config (B2' + AR1 winner: compress paper + reason legacy)
 BASE="--iters 1000 --max_seq_len 2048 --reason_loops 12 \
   --fp8 1 --use_gradient_checkpointing 1 \
   --cpu_offload_optimizer 1 \
@@ -31,7 +31,8 @@ BASE="--iters 1000 --max_seq_len 2048 --reason_loops 12 \
   --phase 6 \
   --world_jepa_mode full --world_jepa_weight 1.0 \
   --world_sigreg_weight 0.10 --world_mask_ratio 0.25 \
-  --mhc_alpha_init 0.05"
+  --mhc_alpha_init 0.01 \
+  --attnres_compress_mode paper --attnres_reason_mode legacy"
 
 run_experiment() {
     local name=$1; shift

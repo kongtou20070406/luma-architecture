@@ -345,7 +345,21 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 3. MHC 不死亡
 4. VRAM 不显著增加 (< +1 GB)
 
-**状态**: 🔄 运行中 (2026-04-05 23:20 启动)
+**结果 (2026-04-06 03:28)**:
+
+| 实验 | loss_lm | vs AR0 | Peak VRAM | v2_rank | MHC | 结论 |
+|---|---|---|---|---|---|---|
+| AR0 baseline | 3.6804 | — | 9.95 GB | 11/52 | dead | 基线 |
+| **AR1 compress_paper** | **3.0867** | **-16.1%** | **10.46 GB** | **10/52** | **dead** | **胜出 ✅** |
+| AR2 reason_paper | 4.2593 | +15.7% | 10.22 GB | 8/52 | dead | 退步 |
+| AR3 full_paper | 3.5493 | -3.6% | 10.53 GB | 5/52 | dead | 表征坍缩风险 |
+| AR5 paper_global_q | 3.8328 | +4.1% | 10.53 GB | 11/52 | alive | MHC 活但 loss 差 |
+
+**关键发现**: 残差策略应因场景而异 — 压缩区(单次前馈)适合 paper AttnRes，推理循环(迭代)需要 lerp 平滑。
+**胜出配置**: `--attnres_compress_mode paper --attnres_reason_mode legacy`
+详见 [Matrix9 报告](../reports/Matrix9_AttnRes_Report_20260406.md)。
+
+**状态**: ✅ 完成
 
 ### Matrix 8: 推理时 A* 搜索 — 部署增强
 
@@ -418,7 +432,7 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 |--------|------|---------|------|------|
 | — | Matrix 0 (架构定型) | ~1h | **完成 ✅** | A1 (482M) 胜出 |
 | — | Matrix 1 (B' World-JEPA) | ~4h | **完成 ✅** | B2' (sig=0.10) 胜出 |
-| **P0** | **Matrix 9 (AttnRes 改造)** | **~4h** | **🔄 运行中** | **Kimi Block AttnRes vs lerp** |
+| — | Matrix 9 (AttnRes 改造) | ~4h | **完成 ✅** | AR1 胜出 (compress paper + reason legacy) |
 | **P0** | **Matrix 7 (训练吞吐量)** | **~4h** | **M9 后启动** | **accum=2 等效 bs=2** |
 | P1 | Matrix 5 (ES 验证) | ~3 天 | 与 M7 并行 | N=2 快速验证能否收敛 |
 | P1 | Matrix 6 (数据效率) | 3-5 天 | 与 M5/M7 并行 | EntiGraph 合成 + PPL 修剪 |
@@ -466,7 +480,7 @@ M5 (ES N=2 收敛?)
 1. ✅ Matrix 0 完成，A1 (482M) ���型
 2. ✅ arxiv_dl_code 20K 条拉取完成
 3. ✅ Matrix 1 完成，B2' (sig=0.10, mask=0.25) 胜出
-4. **🔄 Matrix 9 (AttnRes 改造)**: 运行中 (5 实验 ~4h, AR0-AR5)
-5. **→ Matrix 7 (训练吞吐量)**: M9 后启动, gradient accum=2 + activation offload
+4. ✅ Matrix 9 完成，AR1 胜出 (compress paper + reason legacy, loss -16.1%)
+5. **🔄 Matrix 7 (训练吞吐量)**: 启动中, gradient accum=2 + activation offload
 6. **→ Matrix 5 (ES N=2)**: 探索性验证
 7. **→ 整合 arxiv_dl_code**: 更新 DataMix，重建 pretrain 数据
