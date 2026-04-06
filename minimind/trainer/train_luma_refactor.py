@@ -567,6 +567,10 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
         scalar_lr = next(g["lr"] for g in optimizer.param_groups if g.get("optim_family") == "adamw")
         matrix_lr = next(g["lr"] for g in optimizer.param_groups if g.get("optim_family") == "muon")
 
+        # ── Exit depth tracking ──────────────────────────────────────────
+        _last_aux = getattr(getattr(model, "_orig_mod", model), "last_aux", {})
+        _exit_loops = _last_aux.get("executed_loops", 0)
+
         record = {
             "step": step,
             "loss_lm": loss_lm.item(),
@@ -575,6 +579,7 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             "loss_total": current_loss,
             "scalar_lr": scalar_lr,
             "matrix_lr": matrix_lr,
+            "exit_loops": _exit_loops,
             "elapsed_s": round(time.time() - start_time, 1),
             **grad_metrics,
         }
@@ -592,9 +597,10 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             )
             compress_line = f"  loss_c={loss_compress_val:.4f}" if compress_weight > 0 else ""
             jepa_line = f"  loss_j={loss_jepa_val:.4f}" if loss_jepa_val > 0 else ""
+            exit_line = f"  loops={_exit_loops}/{args.reason_loops}" if _exit_loops > 0 else ""
             Logger(
                 f"[{step}/{args.iters}] loss_lm={loss_lm.item():.4f}{compress_line}{jepa_line}"
-                f"  scalar_lr={scalar_lr:.2e}  eta={eta:.1f}min"
+                f"  scalar_lr={scalar_lr:.2e}  eta={eta:.1f}min{exit_line}"
                 + grad_line
             )
 

@@ -190,10 +190,18 @@ class LayerGradTracker:
                     "mean_norm": round(float(means[i]), 6),
                     "std_norm": round(float(stds[i]), 6),
                 }
-            # 检测死层：均值梯度 < 全局均值的 1%
+            # 检测死层：均值梯度 < 全局均值的阈值
+            # 小模块 (exit_ctrl, introspection 等) 参数量极少，梯度 norm 天然小
+            # 用更低的阈值避免误报
+            _SMALL_MODULE_PREFIXES = ("exit_ctrl", "introspection")
             global_mean = means.mean()
-            dead_layers = [n for i, n in enumerate(self._layer_names)
-                           if global_mean > 0 and means[i] < global_mean * 0.01]
+            dead_layers = []
+            for i, name in enumerate(self._layer_names):
+                if global_mean <= 0:
+                    continue
+                threshold = 0.001 if name.startswith(_SMALL_MODULE_PREFIXES) else 0.01
+                if means[i] < global_mean * threshold:
+                    dead_layers.append(name)
         else:
             dead_layers = []
 
