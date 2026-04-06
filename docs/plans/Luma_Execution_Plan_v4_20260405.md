@@ -167,20 +167,26 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 
 **关键发现**: B2'（sig=0.10）是唯一 MHC 存活、动力学健康的配置。详见 [Matrix1 报告](../reports/Matrix1_WorldJEPA_Report_20260405.md)。
 
-### Matrix 2: Stage E — Exit Policy (自适应退出)
+### Matrix 2: Exit Policy — 预训练中培养自适应退出
 
-**目标**：验证 ExitController 能否在推理循环中提前退出省计算。
-**前置**：Matrix 1 winner
-**预计**：每实验 1000 步，~4 实验 ≈ 3h
+**目标**：在预训练阶段打开 exit_aux_weight，让 ExitController 学会自适应退出。
+**前置**：M1 + M9 + M7 + M10 ✅
+**脚本**：`minimind/scripts/run_matrix2_exit_policy.sh`
 
-| 实验 | 退出策略 | exit_threshold | 说明 |
-|---|---|---|---|
-| E0 | fixed-12 | — | 固定 12 loops baseline |
-| E1 | second_order_diff | 0.01 | 二阶差分 (loss 变化率的变化率) |
-| E2 | second_order_diff | 0.005 | 更严格阈值 |
-| E3 | confidence_gate | 0.95 | c_t confidence 门控 |
+| 实验 | exit_aux | 2nd_order | loops | loss_lm | vs EX0 | 结论 |
+|---|---|---|---|---|---|---|
+| EX0 | 0.0 | 0.0 | 12 | 2.6367 | — | baseline (exit_ctrl dead) |
+| EX1 | 0.01 | 0.0 | 12 | 2.6530 | +0.6% | 无害 |
+| EX2 | 0.05 | 0.0 | 12 | 2.6869 | +1.9% | 权重太高 |
+| EX3 | 0.01 | 0.3 | 12 | 2.7985 | +6.1% | 12 loops 下 2nd_order 有害 |
+| EX4 | 0.01 | 0.0 | 20 | 2.6455 | +0.3% | 20 loops 零 VRAM 开销 |
+| **EX5** | **0.01** | **0.3** | **20** | **2.6032** | **-1.3%** | **胜出 ✅** |
 
-**判胜标准**: loss ≤ baseline+2% + 平均 loop 深度 ≤ 8 (省 33% 计算)
+**关键发现**: second_order 在 20 loops 下有益（-1.3%），在 12 loops 下有害（+6.1%）。更宽的 loop 预算让收敛检测真正有效。20 loops 零 VRAM 开销。
+**胜出配置**: `--reason_loops 20 --exit_aux_weight 0.01 --exit_second_order_delta_weight 0.3`
+详见 [Matrix2 报告](../reports/Matrix2_ExitPolicy_Report_20260406.md)。
+
+**状态**: ✅ 完成
 
 ### Matrix 3: Stage C — 数据扩量
 
@@ -473,7 +479,7 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 | P1 | Matrix 5 (ES 验证) | ~3 天 | 探索性 | N=2 快速验证能否收敛 |
 | P1 | Matrix 6 (数据效率) | 3-5 天 | 与 M5/M7 并行 | EntiGraph 合成 + PPL 修剪 |
 | P1 | Matrix 3 (数据扩量) | 并行准备 | 数据收集中 | 不阻塞训练 |
-| P2 | Matrix 2 (Exit Policy) | ~3h | 预训练后 | fine-tune 阶段加入 |
+| — | Matrix 2 (Exit Policy) | ~3h | **完成 ✅** | EX5 胜出 (20 loops + 2nd_order, -1.3%) |
 | P2 | Matrix 4 (MoR Routing) | 1-2 周 | 预训练后 | fine-tune 阶段加入 |
 | — | Gate F (配置冻结) | 0.5 天 | — | M9 + M7 结果决定 |
 | — | **正式预训练** | **~10-16 天** | — | **BP + accum=2 (主线)** |

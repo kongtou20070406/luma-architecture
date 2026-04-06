@@ -379,7 +379,7 @@ def build_phase6_config(args: argparse.Namespace) -> LumaConfig:
         sigreg_eps=1e-6,
         # ── 其他辅助 loss 关闭 ────────────────────────────────────────────────
         self_jepa_residual_reg=0.0,
-        exit_aux_weight=0.0,
+        exit_aux_weight=getattr(args, "exit_aux_weight", 0.0),
         rollout_zone_weight=0.0,
         routing_tier_entropy_weight=0.0,
         routing_min_local_share_weight=0.0,
@@ -825,6 +825,8 @@ if __name__ == "__main__":
     parser.add_argument("--exit_sampling_temperature", type=float, default=1.0)
     parser.add_argument("--exit_second_order_delta_weight", type=float, default=0.0,
                         help="Exit policy: weight on second-order delta_h convergence signal (0=disabled)")
+    parser.add_argument("--exit_aux_weight", type=float, default=0.0,
+                        help="Exit auxiliary loss weight (0=disabled, 推荐 0.01-0.05)")
     # Reasoning partitioning
     parser.add_argument("--reason_num_phases", type=int, default=0,
                         help="Phase embedding: 0=disabled, >0=number of distinct phase embeddings for reasoning loops")
