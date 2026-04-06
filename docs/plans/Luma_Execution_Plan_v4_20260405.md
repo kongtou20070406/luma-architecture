@@ -97,29 +97,28 @@ Matrix 1 (B' World-JEPA, ~4h) ──── 完成 ✅, B2' (sig=0.10) 胜出
 ┌───────────────────────────────────────────────┐
 │  M1 完成后立即并行:                            │
 │                                                │
-│  M9 (AttnRes 改造, ~4h) ←── 🔄 运行中          │
-│    └─ Kimi Block AttnRes vs 当前 lerp          │
+│  M9 (AttnRes 改造, ~4h) ──── 完成 ✅, AR1 胜出  │
+│    └─ compress paper + reason legacy (-16% loss)│
 │                                                │
-│  M7 (训练吞吐量, ~4h) ←── M9 后立即开始        │
-│    └─ gradient accum=2 + activation offload    │
+│  M7 (训练吞吐量, ~1h) ──── 完成 ✅, GL1 胜出    │
+│    └─ accum=2, 吞吐量 2.55x                    │
+│                                                │
+│  M10 (MHC 门控, ~3h) ──── 完成 ✅, MH4 胜出     │
+│    └─ streams=2, MHC 救活 (-8.4% loss)         │
 │                                                │
 │  M5 (ES 预训练验证, ~3天) ←── 探索性验证       │
-│    └─ N=2 antithetic 快速验证能否收敛          │
-│                                                │
 │  M6 (数据效率, ~3-5天) ←── 并行                │
-│    ├─ 6a: Perplexity 修剪                      │
-│    └─ 6b: EntiGraph 合成扩充                   │
 └───────────────────────────────────────────────┘
     ↓
-═══ 第二优先级：架构改进（不阻塞预训练）═══
+Gate F: 配置冻结 ←── M9+M7+M10 结果已确定
+    ↓
+正式预训练 (BP + accum=2)
+    ↓
+═══ 第二优先级：架构改进（预训练后）═══
 
-M3 (数据扩量) ←── 并行准备数据
-M2 (Exit Policy) ←── 预训练后 fine-tune 阶段
+M2 (Exit Policy) ←── fine-tune 阶段
 M4 (MoR Routing) ←── 同上
-    ↓
-Gate F: 配置冻结
-    ↓
-正式预训练 (BP + GaLore, 或 ES 如果多卡可用)
+M3 (数据扩量) ←── 并行准备数据
     ↓
 M8 (A* 推理搜索) ←── 部署阶段
 ```
@@ -376,6 +375,27 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 
 **状态**: ✅ 完成
 
+### Matrix 10: MHC 门控调优
+
+**目标**：调优 MHC 的 alpha 温度系数和 stream 数量，救活 MHC 梯度流。
+**前置**：Matrix 9 ✅ + Matrix 7 ✅
+**脚本**：`minimind/scripts/run_matrix10_mhc.sh`
+
+| 实验 | alpha | streams | loss_lm | vs MH0 | MHC 复活 | 结论 |
+|---|---|---|---|---|---|---|
+| MH0 | 0.01 | 4 | 2.9385 | — | step 600 | 基线 |
+| MH1 | 0.03 | 4 | 2.7041 | -8.0% | step 600 | alpha 提升有效 |
+| MH2 | 0.02 | 4 | 3.0322 | +3.2% | step 600 | 死谷区间 |
+| MH3 | 0.10 | 4 | 2.6963 | -8.2% | step 400 | 高温有效 |
+| **MH4** | **0.01** | **2** | **2.6914** | **-8.4%** | **step 400** | **胜出 ✅** |
+| MH5 | 0.01 | 8 | 3.2507 | +10.6% | 永久 dead | 路由太难 |
+
+**关键发现**: MHC 并非永久死亡，step 400-600 后自动复活。streams=2 是最佳选择 — 路由简单、VRAM 最低、v2_rank 最高。
+**胜出配置**: `--mhc_streams 2 --mhc_alpha_init 0.01`
+详见 [Matrix10 报告](../reports/Matrix10_MHC_Report_20260406.md)。
+
+**状态**: ✅ 完成
+
 ### Matrix 8: 推理时 A* 搜索 — 部署增强
 
 **目标**：验证 A* 树搜索能否让 482M Luma 在推理任务上逼近 2B 模型。
@@ -449,7 +469,8 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 | — | Matrix 1 (B' World-JEPA) | ~4h | **完成 ✅** | B2' (sig=0.10) 胜出 |
 | — | Matrix 9 (AttnRes 改造) | ~4h | **完成 ✅** | AR1 胜出 (compress paper + reason legacy) |
 | — | Matrix 7 (训练吞吐量) | ~1h | **完成 ✅** | GL1 胜出 (accum=2, 2.55x 吞吐) |
-| P1 | Matrix 5 (ES 验证) | ~3 天 | 与 M7 并行 | N=2 快速验证能否收敛 |
+| — | Matrix 10 (MHC 门控) | ~3h | **完成 ✅** | MH4 胜出 (streams=2, -8.4%) |
+| P1 | Matrix 5 (ES 验证) | ~3 天 | 探索性 | N=2 快速验证能否收敛 |
 | P1 | Matrix 6 (数据效率) | 3-5 天 | 与 M5/M7 并行 | EntiGraph 合成 + PPL 修剪 |
 | P1 | Matrix 3 (数据扩量) | 并行准备 | 数据收集中 | 不阻塞训练 |
 | P2 | Matrix 2 (Exit Policy) | ~3h | 预训练后 | fine-tune 阶段加入 |
@@ -497,5 +518,8 @@ M5 (ES N=2 收敛?)
 3. ✅ Matrix 1 完成，B2' (sig=0.10, mask=0.25) 胜出
 4. ✅ Matrix 9 完成，AR1 胜出 (compress paper + reason legacy, loss -16.1%)
 5. ✅ Matrix 7 完成，GL1 胜出 (accum=2, loss -5.5%, 吞吐 2.55x)
-6. **→ Matrix 5 (ES N=2)**: 探索性验证
-7. **→ 整合 arxiv_dl_code**: 更新 DataMix，重建 pretrain 数据
+6. ✅ Matrix 10 完成，MH4 胜出 (streams=2, loss -8.4%, MHC 救活)
+7. **→ Gate F: 配置冻结** — M1+M9+M7+M10 结果已确定正式预训练配置
+8. **→ 正式预训练启动** — 完整配置见 M10 报告
+9. → Matrix 5 (ES N=2): 探索性验证（不阻塞主线）
+10. → 整合 arxiv_dl_code: 更新 DataMix，重建 pretrain 数据

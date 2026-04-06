@@ -161,6 +161,7 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         reason_mor_num_experts=getattr(args, "reason_mor_num_experts", 4),
         reason_mor_topk=getattr(args, "reason_mor_topk", 2),
         mhc_alpha_init=getattr(args, "mhc_alpha_init", 0.01),
+        mhc_streams=getattr(args, "mhc_streams", 4),
         attnres_mode=getattr(args, "attnres_mode", "legacy"),
         attnres_compress_mode=getattr(args, "attnres_compress_mode", ""),
         attnres_reason_mode=getattr(args, "attnres_reason_mode", ""),
@@ -795,6 +796,8 @@ if __name__ == "__main__":
     parser.add_argument("--self_rollout_steps", type=int, default=10)
     parser.add_argument("--mhc_alpha_init", type=float, default=0.01,
                         help="MHC 残差流的初始 alpha（默认 0.01，建议 0.05 避免梯度饥饿）")
+    parser.add_argument("--mhc_streams", type=int, default=4,
+                        help="MHC 残差流数量（默认 4）")
     parser.add_argument("--attnres_mode", type=str, default="legacy",
                         choices=["legacy", "paper", "paper_global_q"],
                         help="AttnRes 模式: legacy=当前lerp, paper=Kimi Block AttnRes, paper_global_q=论文输出+全局query")
