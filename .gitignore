@@ -47,6 +47,15 @@ minimind_runtime_dynamics/.wheels/
 minimind/artifacts/refactor/phase4_metrics.jsonl
 minimind/artifacts/refactor/phase6_metrics.jsonl
 
+# large images
+minimind/images/minimind-3.gif
+
+# obsolete agent docs
+docs/agent/
+
+# dataset symlinks / generated mixes
+minimind/dataset/pretrain_*.jsonl
+
 # experiment artifacts — 只保留脚本和报告，不提交实验日志
 minimind/artifacts/autoresearch*/
 minimind/artifacts/smoke_*/
