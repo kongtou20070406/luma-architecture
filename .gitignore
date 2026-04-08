@@ -39,15 +39,15 @@ __pycache__/
 *.log
 wandb/
 
-# local artifacts not meant for sharing by default
+# local artifacts not meant for sharing
 minimind/.wheels/
 minimind_runtime_dynamics/.wheels/
 
-# large metrics jsonl (GitHub warns >50MB)
+# large metrics (GitHub 100MB limit)
 minimind/artifacts/refactor/phase4_metrics.jsonl
 minimind/artifacts/refactor/phase6_metrics.jsonl
 
-# experiment artifacts (只保留 refactor/ 和 experiment_matrix 的轻量日志)
+# experiment artifacts — 只保留脚本和报告，不提交实验日志
 minimind/artifacts/autoresearch*/
 minimind/artifacts/smoke_*/
 minimind/artifacts/luma_dynamics_*/
@@ -56,6 +56,7 @@ minimind/artifacts/arc_agi_local/
 minimind/artifacts/longrun_*/
 minimind/artifacts/*_2048/
 minimind/artifacts/rerun_*/
+minimind/artifacts/matrix*/
 
 # trainer symlinks to mixes
 minimind/dataset/pretrain_*.jsonl
@@ -67,4 +68,3 @@ research-results.tsv
 # local compiled binaries
 **/*.cpython-*.so
 third_party/mamba-official/*.so
-minimind/artifacts/refactor/phase6_metrics.jsonl
