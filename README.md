@@ -32,7 +32,143 @@ Input → FactorizedEmbedding → CompressionZone ──→ ReasoningLoop ──
 
 **关键：CompressionZone 只执行一次，不参与循环。循环只发生在 ReasoningLoop 内部。**
 
-### 核心组件
+### 模块详细拆解
+
+#### 1. Embedding 层
+
+```
+Token IDs → FactorizedEmbedding → [B, T, 768]
+```
+
+| 类 | 说明 |
+|---|---|
+| `FactorizedEmbedding` | vocab→256 dim→768 dim 两步映射，节省 80%+ embedding 参数 |
+| `FactorizedLMHead` | 768→256→vocab 反向映射，与 embedding 共享权重 |
+
+#### 2. 压缩区 (CompressionZone)
+
+```
+[B, T, 768] → 16 层混合 SSM+Attn → [B, T, 768] + block_reprs[16]
+```
+
+| 类 | 层数 | 说明 |
+|---|---|---|
+| `CompressionMambaLayer` | ~14 层 | Mamba3 MIMO SSM (d_state=192, expand=2) |
+| `CompressionRetrievalLayerSWA` | ~2 层 | 滑窗注意力 (window=512)，穿插在 SSM 间 |
+| `CompressionBlockAttentionResiduals` | 每层 | 跨 block 注意力残差 — 后层可以回看前层摘要 |
+| `LumaSwiGLUFFN` | 每层 | SwiGLU FFN (768→3072→768) |
+| `MathAdapterLane` | 可选 | 数学适配器旁路 |
+
+每层输出一个 `block_repr`（层摘要），供推理区的 UnifiedAttnRes 回看。
+
+#### 3. 推理区 (ReasoningLoop)
+
+```
+for loop_idx in range(max_loops):  # 最多 20 轮
+    h = LumaReasonSharedLayer × 4 (权重共享)
+    h = UnifiedAttnRes(h, block_reprs, loop_history)
+    h = PCErrorCorrector(h, c_t)           # 预测编码修正
+    if slow_update:                         # 每 2 轮
+        memory → MemoryTokenReader(h)      # 选择性读取主流
+        h → CMDAModulation(h, c_t)         # 双向通道调制
+        c_t = IntrospectionStateStream()   # 自省流更新
+        c_t += NeuromodulatedCTWriter()    # 赫布关联写入
+    if ExitController.should_exit: break
+```
+
+##### 3a. 共享推理层 (LumaReasonSharedLayer × 4)
+
+| 子模块 | 说明 |
+|--------|------|
+| `ReasonMambaLayer` | Mamba3 SSM (d_state=192) |
+| `GatedDiffAttnFoXSWA` | Gated Differential Attention + FoX + 滑窗 |
+| `LumaSwiGLUFFN` | SwiGLU FFN + FiLM conditioning (c_t 调制) |
+| `CTInjection` | c_t → Linear → broadcast add 注入主流 |
+| Loop LoRA | `Embedding(20, 768×32)` per-loop 低秩适配 |
+| Time Conditioning | `Linear(2→768)` 注入循环位置 [t, dt] |
+| Loop FFN Gate | 可选，per-loop sigmoid gate 控制 FFN 强度 |
+
+4 层共享权重但每轮通过 LoRA + Time Conditioning 差异化。
+
+##### 3b. 自省流 (IntrospectionStateStream)
+
+```
+h [B,T,768] → MemoryTokenReader (K=4 cross-attention) → [B,4,96]
+                         ↓
+            Mamba3 layer1 → Mamba3 layer2 → c_t_head → c_t [B,64]
+                         ↓
+            CMDA: c_t→sigmoid gate 调制主流 + spatial attention 回传
+```
+
+| 类 | 说明 |
+|---|---|
+| `MemoryTokenReader` | 4 个可学习 query 对主流做 cross-attention，残差累积 |
+| `IntrospectionStateStream` | 2 层 Mamba3 (meta_dim=96)，产出 c_t (64 dim) |
+| `CMDAModulation` | c_t→per-channel sigmoid gate 调制 h + spatial attention pooling 回传 |
+| `BiXTCrossAttention` | 可选，memory tokens 和主流双向 cross-attention |
+
+##### 3c. 赫布关联记忆 (NeuromodulatedCTWriter)
+
+```
+surprise = 1 - self_check_score  (或 JEPA prediction error)
+gain = 1 + σ(MLP(surprise))                    # 调制强度 [1, 2]
+hebb_term = hebb_out(hebb_proj_h(δh) ⊙ hebb_proj_c(prev_c_t))  # rank=32 低秩外积
+c_t = prev_c_t + gain × Δc_t + surprise × hebb_term
+```
+
+surprise 高时强写入新关联，surprise 低时保持记忆 → 防灾难性遗忘。
+
+##### 3d. 预测编码修正 (PCErrorCorrector)
+
+```
+pred_h = MLP(c_t) → [B, 1, 768]     # 自省流预测主流状态
+error = h - pred_h                    # 预测误差
+h = h - α × error                    # 抑制已知，保留新信息 (α=0.1)
+```
+
+PC 和赫布协同：PC 过滤掉 c_t 已知的信息 → δh 是纯新信号 → 赫布写入更精准。
+
+##### 3e. JEPA 系统
+
+| 类 | 输入 | 预测目标 | 说明 |
+|---|---|---|---|
+| `SelfJEPAResidualPredictor` | c_t, δh | Δc_t (下一轮 c_t 变化) | 自省流自我预测 |
+| `SelfJEPAProgressShapeHead` | c_t | 训练进展方向 | 渐进式学习曲线塑形 |
+| `LeWorldModelStyleJEPA` | h (masked) | h (unmasked) | token 级世界模型 |
+| `CtWorldJEPA` | c_t 序列 | 被 mask 的 c_t 步 | c_t 轨迹预测 |
+
+##### 3f. 退出控制 (ExitController)
+
+```
+exit_logit = bias + Σ(weight_i × signal_i) - gain_weight × predicted_gain
+                                              + jepa_surprise_weight × self_error
+```
+
+| 信号 | 含义 | 权重方向 |
+|------|------|----------|
+| delta_signal (1 - \|δh\|) | h 不再变化 | + (退出) |
+| self_signal (1 - JEPA err) | JEPA 预测准 | + (退出) |
+| world_signal (1 - world err) | 世界模型收敛 | + (退出) |
+| self_check_signal | 自检一致 | + (退出) |
+| predicted_gain | 预测还有收益 | - (继续) |
+| jepa_surprise | JEPA 预测不准 | - (继续) |
+| entropy_proxy | 输出不确定 | - (继续) |
+| confidence_gap | top-2 gap 小 | - (继续) |
+| ct_curvature | c_t 方向在变 | - (继续) |
+
+##### 3g. 其他推理区组件
+
+| 类 | 说明 |
+|---|---|
+| `UnifiedAttnRes` | 回看压缩区 block_reprs + 循环历史 loop_history |
+| `MHCResidualStreams` | 多头通道残差流 (Sinkhorn 路由) |
+| `TokenDepthRouter` (MoR) | per-token Gumbel-Sigmoid 路由，简单 token 早退出 |
+| `TinySlowSelfCheckRing` | 极简自检环 — 跟踪内部叙事一致性 |
+| `TinyReasoningStateRing` | 推理状态环 — 跟踪推理信任度 |
+| `TrajectoryHealthProbe` | 轨迹健康探针 |
+| `ExitQualityProbe` | 退出质量探针 (entropy/confidence/token sensitivity) |
+
+### 核心组件总览
 
 | 组件 | 实现 | 说明 |
 |------|------|------|
