@@ -508,6 +508,41 @@ class LumaConfig(PretrainedConfig):
         self.exit_train_use_sampling = kwargs.get("exit_train_use_sampling", True)
         self.exit_eval_use_sampling = kwargs.get("exit_eval_use_sampling", False)
         self.exit_sampling_temperature = kwargs.get("exit_sampling_temperature", 1.0)
+        self.exit_min_loops = kwargs.get("exit_min_loops", 2)
+        self.exit_bias_init = kwargs.get("exit_bias_init", 0.0)
+        self.exit_warmup_steps = kwargs.get("exit_warmup_steps", 0)
+        self.exit_ct_drift_weight = kwargs.get("exit_ct_drift_weight", 0.0)
+        self.exit_know_gap_weight = kwargs.get("exit_know_gap_weight", 0.0)
+        self.identity_recurrence_alpha = kwargs.get("identity_recurrence_alpha", 0.0)  # 0=off, 0.8=keep 20% old h
+        self.exit_entropy_weight = kwargs.get("exit_entropy_weight", 0.0)  # Ouro: maximize exit entropy to prevent collapse
+        self.loop_lm_loss_weight = kwargs.get("loop_lm_loss_weight", 0.0)  # RLTT: dense LM loss at each loop step
+        self.rltt_stride = kwargs.get("rltt_stride", 2)  # RLTT: save h every N loops (2 = every other loop, saves VRAM)
+        self.shortcut_consistency_weight = kwargs.get("shortcut_consistency_weight", 0.0)  # LoopFormer: align short path to full path
+        self.enable_time_conditioning = kwargs.get("enable_time_conditioning", False)  # LoopFormer: inject t/dt into loop
+        self.enable_coconut = kwargs.get("enable_coconut", False)  # Coconut: c_t → thought token → re-inject
+        self.coconut_rounds = kwargs.get("coconut_rounds", 1)  # number of continuous thought re-injection rounds
+        # RS: Loop LoRA — per-loop low-rank adaptation on FFN
+        self.loop_lora_rank = kwargs.get("loop_lora_rank", 0)  # 0=off, 16/32=rank
+        self.loop_lora_max_loops = kwargs.get("loop_lora_max_loops", 20)
+        # RS: Loop FFN Gating — loop-dependent gate on FFN output
+        self.enable_loop_ffn_gate = kwargs.get("enable_loop_ffn_gate", False)
+        # IS: Introspection Stream upgrades
+        self.introspection_input_mode = kwargs.get("introspection_input_mode", "mean")  # mean/memory/chunked/chunked_memory
+        self.introspection_memory_tokens = kwargs.get("introspection_memory_tokens", 4)  # K for memory token mode
+        self.introspection_inject_mode = kwargs.get("introspection_inject_mode", "broadcast")  # broadcast/token_aware/bixt/cmda/bixt_cmda
+        # NM: Neuromodulated c_t writer
+        self.enable_neuromod_ct = kwargs.get("enable_neuromod_ct", False)
+        self.neuromod_hebb_rank = kwargs.get("neuromod_hebb_rank", 8)
+        self.neuromod_use_delta_rule = kwargs.get("neuromod_use_delta_rule", False)
+        self.neuromod_mode = kwargs.get("neuromod_mode", "surprise")  # surprise/learned/ponder/multi/jepa_surprise
+        # PC: Predictive Coding in reasoning loop
+        self.enable_pc_correction = kwargs.get("enable_pc_correction", False)
+        self.pc_alpha = kwargs.get("pc_alpha", 0.1)  # error correction strength
+        # ES: Enhanced exit signals
+        self.enable_exit_entropy_signal = kwargs.get("enable_exit_entropy_signal", False)
+        self.enable_exit_token_sensitivity = kwargs.get("enable_exit_token_sensitivity", False)
+        self.enable_exit_ct_curvature = kwargs.get("enable_exit_ct_curvature", False)
+        self.enable_exit_confidence_gap = kwargs.get("enable_exit_confidence_gap", False)
         self.enable_math_adapter_lane = kwargs.get("enable_math_adapter_lane", False)
         self.math_adapter_dim = kwargs.get("math_adapter_dim", max(32, self.hidden_size // 4))
         self.enable_math_summary_gate = kwargs.get("enable_math_summary_gate", False)
@@ -574,6 +609,11 @@ class LumaConfig(PretrainedConfig):
         self.reason_mor_routing = kwargs.get("reason_mor_routing", False)
         self.reason_mor_num_experts = kwargs.get("reason_mor_num_experts", 4)
         self.reason_mor_topk = kwargs.get("reason_mor_topk", 2)
+        # True MoR: token-level depth routing (arxiv 2507.10524)
+        self.enable_token_depth_routing = kwargs.get("enable_token_depth_routing", False)
+        self.mor_target_continue_ratio = kwargs.get("mor_target_continue_ratio", 0.6)
+        self.mor_balance_weight = kwargs.get("mor_balance_weight", 0.01)
+        self.mor_grad_through_frozen = kwargs.get("mor_grad_through_frozen", False)
 
 
 class LumaZCRMSNorm(nn.Module):
@@ -1141,6 +1181,149 @@ class CTInjection(nn.Module):
         return h + self.proj(c_t).unsqueeze(1)
 
 
+class TokenAwareCTInjection(nn.Module):
+    """IS6: c_t generates per-token modulation via gating with h content.
+    c_t 根据每个 token 的内容产生不同的调制信号，而非所有 token 加相同偏移。
+    """
+
+    def __init__(self, c_t_dim: int, hidden_size: int):
+        super().__init__()
+        self.query_proj = nn.Linear(c_t_dim, hidden_size, bias=False)
+        self.gate_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        nn.init.zeros_(self.gate_proj.weight)
+
+    def forward(self, h: torch.Tensor, c_t: torch.Tensor) -> torch.Tensor:
+        # c_t → query [B, 1, D], interact with h to produce per-token gate
+        q = self.query_proj(c_t).unsqueeze(1)  # [B, 1, D]
+        gate = torch.sigmoid(self.gate_proj(h * q))  # [B, T, D] element-wise interaction → gate
+        return h + gate * q  # per-token modulated injection
+
+
+class MemoryTokenReader(nn.Module):
+    """IS1/IS2: Learnable memory tokens read from main stream via cross-attention.
+    可学习的 memory tokens 通过交叉注意力从主流中选择性读取信息。
+    Memory tokens 跨循环残差更新，累积历史。
+    """
+
+    def __init__(self, num_tokens: int, hidden_size: int, meta_dim: int, num_heads: int = 4):
+        super().__init__()
+        self.num_tokens = num_tokens
+        self.hidden_size = hidden_size
+        self.memory_init = nn.Parameter(torch.randn(1, num_tokens, hidden_size) * 0.02)
+        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.norm = LumaZCRMSNorm(hidden_size, eps=1e-6)
+        self.down_proj = nn.Linear(hidden_size, meta_dim, bias=False)
+
+    def init_memory(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+        return self.memory_init.expand(batch_size, -1, -1).to(device=device, dtype=dtype)
+
+    def forward(self, memory: torch.Tensor, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Returns (updated_memory [B, K, D], meta_input [B, K, meta_dim])"""
+        B, K, D = memory.shape
+        T = h.shape[1]
+        # cross-attention: memory attends to main stream
+        q = self.q_proj(self.norm(memory)).view(B, K, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(h).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(h).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        attn_out = F.scaled_dot_product_attention(q, k, v)  # [B, heads, K, head_dim]
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, K, D)
+        delta = self.out_proj(attn_out)
+        memory = memory + delta  # residual update — accumulates across loops
+        meta_input = self.down_proj(memory)  # [B, K, meta_dim]
+        return memory, meta_input
+
+
+class BiXTCrossAttention(nn.Module):
+    """IS7: Bidirectional cross-attention between memory tokens and main stream.
+    Memory tokens 和主流 tokens 同时互相 attend (BiXT style)。
+    Memory 从主流读取信息，同时主流从 memory 获取调制信号。
+    """
+
+    def __init__(self, hidden_size: int, meta_dim: int, num_heads: int = 4):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.meta_dim = meta_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        # memory side projections (meta_dim → hidden_size for compatibility)
+        self.mem_up = nn.Linear(meta_dim, hidden_size, bias=False)
+        self.mem_down = nn.Linear(hidden_size, meta_dim, bias=False)
+        # shared QKV projections
+        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.norm_mem = LumaZCRMSNorm(hidden_size, eps=1e-6)
+        self.norm_h = LumaZCRMSNorm(hidden_size, eps=1e-6)
+        nn.init.zeros_(self.out_proj.weight)  # start as identity
+
+    def forward(self, memory_meta: torch.Tensor, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        memory_meta: [B, K, meta_dim]
+        h: [B, T, hidden_size]
+        Returns: (updated_memory [B, K, meta_dim], modulated_h [B, T, hidden_size])
+        """
+        B, K, _ = memory_meta.shape
+        T = h.shape[1]
+        # lift memory to hidden_size
+        mem_h = self.mem_up(memory_meta)  # [B, K, D]
+        # concat for shared attention computation
+        combined = torch.cat([self.norm_mem(mem_h), self.norm_h(h)], dim=1)  # [B, K+T, D]
+        q = self.q_proj(combined).view(B, K + T, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(combined).view(B, K + T, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(combined).view(B, K + T, self.num_heads, self.head_dim).transpose(1, 2)
+        # full bidirectional attention (no causal mask)
+        attn_out = F.scaled_dot_product_attention(q, k, v)  # [B, heads, K+T, head_dim]
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, K + T, self.hidden_size)
+        attn_out = self.out_proj(attn_out)
+        # split back
+        mem_delta = attn_out[:, :K, :]  # [B, K, D]
+        h_delta = attn_out[:, K:, :]    # [B, T, D]
+        # residual updates
+        updated_memory = self.mem_down(mem_h + mem_delta)  # back to meta_dim
+        modulated_h = h + h_delta
+        return updated_memory, modulated_h
+
+
+class CMDAModulation(nn.Module):
+    """IS8: SlowFast CMDA-style bidirectional channel modulation.
+    自省流→主流: channel-wise scale (per-dim sigmoid gate)
+    主流→自省流: spatial attention weighted pooling
+    """
+
+    def __init__(self, c_t_dim: int, hidden_size: int, meta_dim: int):
+        super().__init__()
+        # slow → fast: c_t produces per-channel scale for main stream
+        self.channel_gate = nn.Sequential(
+            nn.Linear(c_t_dim, hidden_size, bias=False),
+            nn.Sigmoid(),
+        )
+        nn.init.zeros_(self.channel_gate[0].weight)  # start as 0.5 (neutral)
+        # fast → slow: spatial attention from main stream to meta
+        self.spatial_query = nn.Linear(c_t_dim, hidden_size, bias=False)
+        self.spatial_proj = nn.Linear(hidden_size, meta_dim, bias=False)
+
+    def forward(self, h: torch.Tensor, c_t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns: (modulated_h [B, T, D], meta_input [B, meta_dim])
+        """
+        # slow → fast: channel-wise modulation
+        gate = self.channel_gate(c_t).unsqueeze(1)  # [B, 1, D]
+        modulated_h = h * (0.5 + gate)  # center around 1.0 (gate=0.5 → no change)
+        # fast → slow: c_t-guided spatial attention pooling
+        query = self.spatial_query(c_t).unsqueeze(1)  # [B, 1, D]
+        attn_weights = (h * query).sum(dim=-1, keepdim=True)  # [B, T, 1]
+        attn_weights = F.softmax(attn_weights / (h.shape[-1] ** 0.5), dim=1)
+        pooled = (h * attn_weights).sum(dim=1)  # [B, D]
+        meta_input = self.spatial_proj(pooled)  # [B, meta_dim]
+        return modulated_h, meta_input
+
+
 class ReasonMambaLayer(nn.Module):
     """Inside the loop, Luma keeps one stateful backbone so each pass can inherit momentum from the last.
     在循环里，Luma 维持一条有状态的主干，让每一轮都能继承上一轮的动量。
@@ -1345,23 +1528,34 @@ class IntrospectionStateStream(nn.Module):
         slow_state: dict,
         loop_progress: Optional[torch.Tensor] = None,
         loop_index: Optional[int] = None,
+        meta_override: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, dict]:
-        h_pool = h.mean(dim=1)
-        if block_reprs:
-            last = torch.stack([r.mean(dim=1) for r in block_reprs[-2:]], dim=0).mean(dim=0)
+        if meta_override is not None:
+            # IS: external input mode (memory token / chunked pooling)
+            # meta_override: [B, K, meta_dim] — already projected to meta_dim
+            meta = meta_override.mean(dim=1) if meta_override.dim() == 3 else meta_override
+            math_summary_gate = None
         else:
-            last = torch.zeros_like(h_pool)
-        math_summary_gate = None
-        if self.math_summary_gate is not None:
-            math_summary_gate = torch.sigmoid(self.math_summary_gate(torch.cat([h_pool, last], dim=-1)))
-            last = last * math_summary_gate
-        meta = self.meta_input(torch.cat([h_pool, last], dim=-1))
+            h_pool = h.mean(dim=1)
+            if block_reprs:
+                last = torch.stack([r.mean(dim=1) for r in block_reprs[-2:]], dim=0).mean(dim=0)
+            else:
+                last = torch.zeros_like(h_pool)
+            math_summary_gate = None
+            if self.math_summary_gate is not None:
+                math_summary_gate = torch.sigmoid(self.math_summary_gate(torch.cat([h_pool, last], dim=-1)))
+                last = last * math_summary_gate
+            meta = self.meta_input(torch.cat([h_pool, last], dim=-1))
         if loop_progress is not None and self.loop_awareness_mode in {"ct_progress", "dual_phase"}:
             meta = meta + self.loop_progress_proj(loop_progress)
         if loop_index is not None and self.loop_awareness_mode == "dual_phase":
             loop_ids = torch.full((h.shape[0],), min(loop_index + 1, self.loop_phase_embed.num_embeddings - 1), device=h.device, dtype=torch.long)
             meta = meta + self.loop_phase_embed(loop_ids)
-        layer1_in = (meta + self.state1_in(slow_state["meta_state_1"])).unsqueeze(1)
+        # For memory/chunked mode with multi-token input: use full sequence for Mamba
+        if meta_override is not None and meta_override.dim() == 3:
+            layer1_in = meta_override + self.state1_in(slow_state["meta_state_1"]).unsqueeze(1)
+        else:
+            layer1_in = (meta + self.state1_in(slow_state["meta_state_1"])).unsqueeze(1)
         layer1_out = _run_mamba_with_padding(self.layer1, layer1_in, self.chunk_size)
         meta_last_1 = layer1_out[:, -1, :]
         next_state_1 = self.state1_norm(slow_state["meta_state_1"] + self.state1_out(meta_last_1))
@@ -1650,7 +1844,7 @@ class TinySlowSelfCheckRing(nn.Module):
     def __init__(self, config: LumaConfig):
         super().__init__()
         self.state_dim = config.self_check_dim
-        self.in_proj = nn.Linear(config.c_t_dim + config.hidden_size + 1 + self.state_dim, self.state_dim, bias=False)
+        self.in_proj = nn.Linear(config.c_t_dim + config.hidden_size + self.state_dim, self.state_dim, bias=False)
         self.norm = LumaZCRMSNorm(self.state_dim, eps=config.rms_norm_eps)
         self.state_proj = nn.Linear(self.state_dim, self.state_dim, bias=False)
         self.score_head = nn.Linear(self.state_dim, 1, bias=False)
@@ -1659,11 +1853,170 @@ class TinySlowSelfCheckRing(nn.Module):
         zeros = torch.zeros(batch_size, self.state_dim, device=device, dtype=dtype)
         return {"state": zeros, "score": torch.zeros(batch_size, 1, device=device, dtype=dtype)}
 
-    def forward(self, c_t: torch.Tensor, delta_h: torch.Tensor, know_gap: torch.Tensor, prev_state: dict) -> dict:
-        x = torch.cat([c_t, delta_h, know_gap, prev_state["state"]], dim=-1)
+    def forward(self, c_t: torch.Tensor, delta_h: torch.Tensor, prev_state: dict) -> dict:
+        x = torch.cat([c_t, delta_h, prev_state["state"]], dim=-1)
         next_state = torch.tanh(self.norm(self.in_proj(x)) + self.state_proj(prev_state["state"]))
         score = torch.sigmoid(self.score_head(next_state))
         return {"state": next_state, "score": score}
+
+
+class NeuromodulatedCTWriter(nn.Module):
+    """NM: Surprise-gated c_t writer with optional Hebbian associative memory.
+    当 self_check 检测到高 surprise (低 coherence) 时，加强 c_t 写入并注入赫布关联项。
+    Inspired by Backpropamine (Miconi 2019) + Hebbian Fast Weights (arXiv 2510.21908).
+    """
+
+    def __init__(self, c_t_dim: int, hidden_size: int, rank: int = 8,
+                 mode: str = "surprise", use_delta_rule: bool = False):
+        super().__init__()
+        self.mode = mode
+        self.use_delta_rule = use_delta_rule
+        # surprise → modulation gain
+        if mode == "learned":
+            # Backpropamine: network learns when to modulate from [c_t, delta_h, jepa_err]
+            self.mod_head = nn.Sequential(
+                nn.Linear(c_t_dim + hidden_size + 1, 16, bias=False),
+                nn.SiLU(),
+                nn.Linear(16, 1, bias=False),
+            )
+            nn.init.zeros_(self.mod_head[-1].weight)
+        else:
+            # surprise/ponder/multi: surprise → gain
+            self.surprise_to_gain = nn.Sequential(
+                nn.Linear(1, 16, bias=False),
+                nn.SiLU(),
+                nn.Linear(16, 1, bias=False),
+            )
+            nn.init.zeros_(self.surprise_to_gain[-1].weight)
+        # Hebbian outer product (low-rank approximation)
+        self._hebb_rank = rank
+        if rank > 0:
+            self.hebb_proj_h = nn.Linear(hidden_size, rank, bias=False)
+            self.hebb_proj_c = nn.Linear(c_t_dim, rank, bias=False)
+            self.hebb_out = nn.Linear(rank, c_t_dim, bias=False)
+            nn.init.zeros_(self.hebb_out.weight)  # 初始赫布项为零
+            # Delta rule: reconstruct to subtract interference
+            if use_delta_rule:
+                self.recon = nn.Linear(c_t_dim, c_t_dim, bias=False)
+                nn.init.zeros_(self.recon.weight)
+
+    def forward(self, next_c_t: torch.Tensor, prev_c_t: torch.Tensor,
+                delta_h: torch.Tensor, self_check_score: torch.Tensor,
+                jepa_error: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, dict]:
+        """Returns (modulated_c_t, aux_dict)"""
+        # Compute modulation signal
+        if self.mode == "learned":
+            _err = jepa_error if jepa_error is not None else prev_c_t.new_zeros(prev_c_t.shape[0], 1)
+            if _err.dim() == 0:
+                _err = _err.unsqueeze(0).expand(prev_c_t.shape[0], 1)
+            elif _err.dim() == 1:
+                _err = _err.unsqueeze(-1)
+            mod_input = torch.cat([prev_c_t, delta_h, _err], dim=-1)
+            gain = 1.0 + torch.sigmoid(self.mod_head(mod_input))  # [B, 1]
+        elif self.mode == "jepa_surprise":
+            # 用 JEPA 预测误差作为 surprise: 预测不准 → 高 surprise → 强写入
+            _err = jepa_error if jepa_error is not None else prev_c_t.new_zeros(())
+            if _err.dim() == 0:
+                surprise = _err.clamp(0.0, 1.0).unsqueeze(0).expand(prev_c_t.shape[0], 1)
+            elif _err.dim() == 1:
+                surprise = _err.clamp(0.0, 1.0).unsqueeze(-1)
+            else:
+                surprise = _err.clamp(0.0, 1.0)
+            gain = 1.0 + torch.sigmoid(self.surprise_to_gain(surprise))
+            surprise_scalar = surprise
+        else:
+            surprise = 1.0 - self_check_score  # [B, 1]
+            gain = 1.0 + torch.sigmoid(self.surprise_to_gain(surprise))  # [B, 1], range [1, 2]
+            surprise_scalar = surprise
+        # Modulate c_t update
+        delta_c = next_c_t - prev_c_t
+        modulated_c_t = prev_c_t + gain * delta_c
+        # Hebbian term
+        if self._hebb_rank > 0:
+            h_proj = self.hebb_proj_h(delta_h)   # [B, rank]
+            c_proj = self.hebb_proj_c(prev_c_t)  # [B, rank]
+            if self.use_delta_rule:
+                recon_c = self.recon(prev_c_t)
+                c_proj = self.hebb_proj_c(prev_c_t - recon_c)
+            hebb_term = self.hebb_out(h_proj * c_proj)  # [B, c_t_dim]
+            if self.mode == "learned":
+                hebb_gate = torch.sigmoid(gain)
+            else:
+                hebb_gate = surprise_scalar
+            modulated_c_t = modulated_c_t + hebb_gate * hebb_term
+            hebb_norm = hebb_term.detach().norm(dim=-1).mean()
+        else:
+            hebb_norm = gain.new_zeros(())
+        aux = {
+            "neuromod_gain": gain.detach().mean(),
+            "hebb_norm": hebb_norm,
+        }
+        return modulated_c_t, aux
+
+
+class PCErrorCorrector(nn.Module):
+    """PC: 自省流预测主流状态，预测误差修正主流。
+    c_t (自省) → 预测 h 的全局特征 → 误差 = h - pred → 修正 h。
+    轻量实现：c_t → Linear → [1, 1, D] broadcast 预测，误差 per-token 修正。
+    """
+
+    def __init__(self, c_t_dim: int, hidden_size: int):
+        super().__init__()
+        self.predictor = nn.Sequential(
+            nn.Linear(c_t_dim, hidden_size, bias=False),
+            nn.SiLU(),
+            nn.Linear(hidden_size, hidden_size, bias=False),
+        )
+        nn.init.zeros_(self.predictor[-1].weight)  # 初始预测为零 → 初始误差=h → 无修正
+
+    def forward(self, h: torch.Tensor, c_t: torch.Tensor, alpha: float = 0.1) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Returns (corrected_h, prediction_error_norm)"""
+        pred_h = self.predictor(c_t).unsqueeze(1)  # [B, 1, D] — c_t 对主流的预测
+        error = h - pred_h  # [B, T, D] — 预测误差
+        corrected_h = h + alpha * error  # 误差修正 (alpha 小 → 温和修正)
+        error_norm = error.detach().norm(dim=-1).mean()
+        return corrected_h, error_norm
+
+
+class ExitQualityProbe(nn.Module):
+    """ES: Lightweight probe for exit signal enhancement.
+    从 h 的统计量预测输出质量指标（entropy proxy, confidence gap proxy），
+    不需要跑完整 lm_head，开销 <1%。
+    """
+
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        # 输入: [h_mean, h_max_token_delta, h_var] = 3 * hidden_size → 1 entropy proxy + 1 confidence proxy
+        self.proj = nn.Linear(hidden_size * 2, 32, bias=False)
+        self.entropy_head = nn.Linear(32, 1, bias=False)
+        self.confidence_head = nn.Linear(32, 1, bias=False)
+        nn.init.zeros_(self.entropy_head.weight)
+        nn.init.zeros_(self.confidence_head.weight)
+
+    def forward(self, h: torch.Tensor, prev_h: Optional[torch.Tensor] = None) -> dict:
+        """h: [B, T, D]. Returns entropy_proxy, confidence_proxy, token_sensitivity."""
+        h_mean = h.mean(dim=1)  # [B, D]
+        # Per-token delta sensitivity
+        if prev_h is not None:
+            per_token_delta = (h - prev_h).norm(dim=-1)  # [B, T]
+            delta_mean = per_token_delta.mean(dim=-1, keepdim=True)  # [B, 1]
+            delta_max = per_token_delta.max(dim=-1, keepdim=True).values  # [B, 1]
+            token_sensitivity = delta_max / (delta_mean + 1e-8)  # [B, 1]
+            # Use variance of h change as feature
+            h_delta_var = (h - prev_h).var(dim=1).mean(dim=-1, keepdim=True)  # [B, 1]
+        else:
+            token_sensitivity = h.new_ones(h.shape[0], 1)
+            h_delta_var = h.new_zeros(h.shape[0], 1)
+        # Concat features for probe
+        features = torch.cat([h_mean, (h - h_mean.unsqueeze(1)).norm(dim=-1).mean(dim=-1, keepdim=True).expand_as(h_mean)], dim=-1)
+        feat = F.silu(self.proj(features))
+        entropy_proxy = torch.sigmoid(self.entropy_head(feat))  # [B, 1], high = uncertain
+        confidence_proxy = torch.sigmoid(self.confidence_head(feat))  # [B, 1], high = confident
+        return {
+            "entropy_proxy": entropy_proxy,
+            "confidence_proxy": confidence_proxy,
+            "token_sensitivity": token_sensitivity,
+        }
 
 
 class CtWorldJEPA(nn.Module):
@@ -2068,6 +2421,41 @@ class WorldLatentJEPA(nn.Module):
         }
 
 
+class TokenDepthRouter(nn.Module):
+    """True MoR (Mixture-of-Recursions): per-token depth routing.
+    At each loop iteration, decides which tokens continue processing and which freeze.
+    真正的 MoR：每轮循环对每个 token 独立决定是否继续，简单 token 提前退出。
+    """
+
+    def __init__(self, hidden_size: int, max_loops: int = 64, eps: float = 1e-6):
+        super().__init__()
+        self.norm = LumaZCRMSNorm(hidden_size, eps=eps)
+        self.loop_embed = nn.Embedding(max_loops, hidden_size)
+        nn.init.normal_(self.loop_embed.weight, std=0.02)
+        self.head = nn.Linear(hidden_size, 1, bias=False)
+        nn.init.zeros_(self.head.weight)  # zero-init: all tokens continue at birth
+
+    @staticmethod
+    def _gumbel_sigmoid(logits: torch.Tensor, tau: float = 1.0, hard: bool = True) -> torch.Tensor:
+        """Gumbel-Sigmoid with straight-through estimator for differentiable hard masks."""
+        gumbels = -torch.log(-torch.log(torch.rand_like(logits).clamp(1e-8, 1 - 1e-8)))
+        y_soft = torch.sigmoid((logits + gumbels) / tau)
+        if hard:
+            y_hard = (y_soft > 0.5).float()
+            return y_hard - y_soft.detach() + y_soft  # straight-through
+        return y_soft
+
+    def forward(self, h: torch.Tensor, loop_idx: int) -> torch.Tensor:
+        """Returns continue_mask [B, T] where 1=continue, 0=freeze."""
+        x = self.norm(h) + self.loop_embed.weight[loop_idx % self.loop_embed.num_embeddings]
+        x = x.to(self.head.weight.dtype)  # RMSNorm outputs float32, head may be bfloat16/fp8
+        logit = self.head(x).squeeze(-1)  # [B, T]
+        if self.training:
+            return self._gumbel_sigmoid(logit, tau=1.0, hard=True)
+        else:
+            return (torch.sigmoid(logit) > 0.5).float()
+
+
 class ExitController(nn.Module):
     """Luma should leave the loop because her state settled, not because a hard-coded confidence head sounded calm.
     Luma 退出循环的理由应当是状态真正收敛，而不是某个硬编码置信头看起来很平静。
@@ -2098,6 +2486,10 @@ class ExitController(nn.Module):
         progress_trend_weight: float = 0.10,
         progress_plateau_weight: float = 0.10,
         second_order_delta_weight: float = 0.0,
+        bias_init: float = 0.0,
+        warmup_steps: int = 0,
+        ct_drift_weight: float = 0.0,
+        know_gap_weight: float = 0.0,
     ):
         super().__init__()
         self.delta_threshold = delta_threshold
@@ -2138,8 +2530,18 @@ class ExitController(nn.Module):
         self.self_check_weight = nn.Parameter(torch.tensor(0.25))
         self.crystal_weight = nn.Parameter(torch.tensor(crystal_feature_weight))
         self.gain_weight = nn.Parameter(torch.tensor(gain_weight))
-        self.bias = nn.Parameter(torch.tensor(0.0))
+        self.bias = nn.Parameter(torch.tensor(bias_init))
+        self.warmup_steps = warmup_steps
+        self._global_step = 0
         self.second_order_weight = nn.Parameter(torch.tensor(second_order_delta_weight))
+        self.ct_drift_weight = nn.Parameter(torch.tensor(ct_drift_weight))
+        self.know_gap_weight = nn.Parameter(torch.tensor(know_gap_weight))
+        # ES: enhanced exit signals (negative = 高时不退出)
+        self.entropy_weight = nn.Parameter(torch.tensor(-0.3))   # 高 entropy → 不确定 → 不退出
+        self.confidence_weight = nn.Parameter(torch.tensor(0.2))  # 高 confidence → 退出
+        self.token_sensitivity_weight = nn.Parameter(torch.tensor(-0.2))  # 高 sensitivity → 有 token 在变 → 不退出
+        self.ct_curvature_weight = nn.Parameter(torch.tensor(-0.2))  # 高 curvature → c_t 还在转向 → 不退出
+        self.jepa_surprise_weight = nn.Parameter(torch.tensor(-0.5))  # JEPA 预测不准 → 高 surprise → 不退出
 
     def forward(
         self,
@@ -2162,6 +2564,12 @@ class ExitController(nn.Module):
         progress_next_improve: Optional[torch.Tensor] = None,
         progress_trend: Optional[torch.Tensor] = None,
         progress_plateau_logit: Optional[torch.Tensor] = None,
+        ct_drift: Optional[torch.Tensor] = None,
+        know_gap: Optional[torch.Tensor] = None,
+        entropy_proxy: Optional[torch.Tensor] = None,
+        confidence_proxy: Optional[torch.Tensor] = None,
+        token_sensitivity: Optional[torch.Tensor] = None,
+        ct_curvature: Optional[torch.Tensor] = None,
     ) -> dict:
         if prev_h is None:
             delta_h = h.new_tensor(1.0)
@@ -2245,6 +2653,22 @@ class ExitController(nn.Module):
             + self.second_order_weight * second_order_signal
             - self.gain_weight * predicted_gain
         )
+        # c_t drift: c_t 还在变 → 自省没收敛 → 不退出 (负贡献)
+        if ct_drift is not None:
+            exit_logit = exit_logit - self.ct_drift_weight * ct_drift.clamp(0.0, 2.0)
+        # know_gap: removed — 实验证明无效 (2026-04-08)
+        # ES: enhanced exit signals
+        if entropy_proxy is not None:
+            exit_logit = exit_logit + self.entropy_weight * entropy_proxy.clamp(0.0, 1.0)
+        if confidence_proxy is not None:
+            exit_logit = exit_logit + self.confidence_weight * confidence_proxy.clamp(0.0, 1.0)
+        if token_sensitivity is not None:
+            exit_logit = exit_logit + self.token_sensitivity_weight * token_sensitivity.clamp(0.0, 10.0)
+        if ct_curvature is not None:
+            exit_logit = exit_logit + self.ct_curvature_weight * ct_curvature.clamp(-1.0, 1.0)
+        # JEPA surprise: self_error 高 → JEPA 预测不准 → 直接抑制退出
+        # 这比通过 self_signal 间接影响更强，因为 self_signal 被其他信号稀释
+        exit_logit = exit_logit + self.jepa_surprise_weight * self_error.clamp(0.0, 1.0).float()
         if self.enable_progress_exit_readout:
             exit_logit = (
                 exit_logit
@@ -2264,6 +2688,8 @@ class ExitController(nn.Module):
         sampled_exit_score = torch.nan_to_num(sampled_exit_score, nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
         use_sampling = self.use_sampling if self.use_sampling is not None else (self.train_use_sampling if self.training else self.eval_use_sampling)
         if loop_idx + 1 < self.min_loops:
+            should_exit = False
+        elif self.training and self._global_step < self.warmup_steps:
             should_exit = False
         elif use_sampling:
             should_exit = bool(torch.bernoulli(sampled_exit_score).item() > 0.0)
@@ -2319,6 +2745,20 @@ class LumaReasonSharedLayer(nn.Module):
             self.mamba_film = None
             self.attn_film = None
             self.ffn_film = None
+        # RS: Loop LoRA — per-loop low-rank adaptation on FFN down_proj
+        self._loop_lora_rank = config.loop_lora_rank
+        if self._loop_lora_rank > 0:
+            max_loops = config.loop_lora_max_loops
+            self.lora_A = nn.Embedding(max_loops, config.hidden_size * self._loop_lora_rank)
+            self.lora_B = nn.Embedding(max_loops, self._loop_lora_rank * config.hidden_size)
+            nn.init.normal_(self.lora_A.weight, std=0.01)
+            nn.init.zeros_(self.lora_B.weight)  # zero-init B → LoRA starts as identity
+        # RS: Loop FFN Gating — loop-dependent gate on FFN residual
+        self._enable_loop_ffn_gate = config.enable_loop_ffn_gate
+        if self._enable_loop_ffn_gate:
+            max_loops = getattr(config, "loop_lora_max_loops", 20)
+            self.loop_ffn_gate_embed = nn.Embedding(max_loops, config.hidden_size)
+            nn.init.zeros_(self.loop_ffn_gate_embed.weight)  # zero-init → starts as pass-through
 
     def _apply_film(self, h: torch.Tensor, c_t: torch.Tensor, proj: nn.Linear) -> torch.Tensor:
         film = proj(c_t).unsqueeze(1)
@@ -2381,6 +2821,20 @@ class LumaReasonSharedLayer(nn.Module):
             ffn_out = _ckpt(self.ffn, h, use_reentrant=False)
         else:
             ffn_out = self.ffn(h)
+        # RS: Loop LoRA — add per-loop low-rank delta to FFN output
+        if self._loop_lora_rank > 0:
+            _li = min(loop_idx, self.lora_A.num_embeddings - 1)
+            _lidx = h.new_tensor([_li], dtype=torch.long)
+            _a = self.lora_A(_lidx).view(self._loop_lora_rank, self.hidden_size)  # [r, D]
+            _b = self.lora_B(_lidx).view(self.hidden_size, self._loop_lora_rank)  # [D, r]
+            # h @ _b → [B, T, r] → @ _a → [B, T, D]
+            ffn_out = ffn_out + ((ffn_out - h) @ _b) @ _a  # LoRA on FFN residual
+        # RS: Loop FFN Gating — loop-dependent sigmoid gate on FFN residual
+        if self._enable_loop_ffn_gate:
+            _li = min(loop_idx, self.loop_ffn_gate_embed.num_embeddings - 1)
+            _lidx = h.new_tensor([_li], dtype=torch.long)
+            _gate = torch.sigmoid(self.loop_ffn_gate_embed(_lidx))  # [1, D]
+            ffn_out = h + (ffn_out - h) * _gate.unsqueeze(0)  # gate the FFN residual per-dim
         if c_t is not None and self.ct_modulation_mode == "modulewise_gate" and self.ffn_gate is not None:
             ffn_gate = torch.sigmoid(self.ffn_gate(c_t)).unsqueeze(1)
             h = h + ffn_gate * (ffn_out - h)
@@ -2453,6 +2907,12 @@ class LumaReasonCore(nn.Module):
         self.shared_layers = nn.ModuleList(
             [LumaReasonSharedLayer(config) for _ in range(config.reason_shared_depth)]
         )
+        self._identity_alpha = float(config.identity_recurrence_alpha)
+        # LoopFormer-style time conditioning: inject normalized t and dt
+        self._enable_time_cond = bool(config.enable_time_conditioning)
+        if self._enable_time_cond:
+            self.time_proj = nn.Linear(2, config.hidden_size, bias=False)
+            nn.init.zeros_(self.time_proj.weight)
         # ── Reasoning Partitioning ──────────────────────────────
         # Phase C: learned per-phase embedding injected before shared layers
         self.num_phases = config.reason_num_phases
@@ -2935,9 +3395,19 @@ class LumaReasonCore(nn.Module):
         if self.num_phases > 0:
             phase_idx = loop_idx % self.num_phases
             h = h + self.phase_embed.weight[phase_idx].unsqueeze(0).unsqueeze(0)
+        # LoopFormer time conditioning: inject normalized time t and step-size dt
+        if self._enable_time_cond:
+            t_norm = float(loop_idx) / 20.0   # normalized position [0, 1)
+            dt_norm = 1.0 / 20.0              # step size
+            time_feat = h.new_tensor([[t_norm, dt_norm]])  # [1, 2]
+            h = h + self.time_proj(time_feat).unsqueeze(1)  # broadcast [B, T, D]
+        _h_pre_shared = h if self._identity_alpha > 0.0 else None
         for layer in self.shared_layers:
             h = layer(h, c_t=c_t, attn_bias=attn_bias, use_gradient_checkpointing=use_gradient_checkpointing,
                       loop_idx=loop_idx, head_partition=self.head_partition)
+        # Identity-biased recurrence: h = alpha * h_new + (1-alpha) * h_old
+        if _h_pre_shared is not None:
+            h = self._identity_alpha * h + (1.0 - self._identity_alpha) * _h_pre_shared
         # Phase B: MoR loop-conditioned expert routing (applied after shared layers)
         if self.mor_routing:
             loop_emb = self.mor_loop_embed.weight[loop_idx % self.mor_loop_embed.num_embeddings]
@@ -2980,9 +3450,37 @@ class LumaBackbone(nn.Module):
         else:
             self.unified_attnres = UnifiedAttnRes(config.hidden_size, eps=config.rms_norm_eps)
         self.introspection_state_stream = IntrospectionStateStream(config)
-        # The introspection stream produces `know_gap` and `c_t`.
+        # IS: introspection input/injection upgrades
+        self._is_input_mode = config.introspection_input_mode
+        self._is_inject_mode = config.introspection_inject_mode
+        if self._is_input_mode in ("memory", "chunked_memory"):
+            self.memory_token_reader = MemoryTokenReader(
+                num_tokens=config.introspection_memory_tokens,
+                hidden_size=config.hidden_size, meta_dim=config.meta_dim, num_heads=4,
+            )
+        else:
+            self.memory_token_reader = None
+        if self._is_inject_mode == "token_aware":
+            self.token_aware_inject = TokenAwareCTInjection(config.c_t_dim, config.hidden_size)
+        elif self._is_inject_mode == "bixt":
+            self.bixt_cross_attn = BiXTCrossAttention(config.hidden_size, config.meta_dim, num_heads=4)
+            # bixt needs memory tokens even if input_mode != "memory"
+            if self.memory_token_reader is None:
+                self.memory_token_reader = MemoryTokenReader(
+                    num_tokens=config.introspection_memory_tokens,
+                    hidden_size=config.hidden_size, meta_dim=config.meta_dim, num_heads=4,
+                )
+        elif self._is_inject_mode == "cmda":
+            self.cmda_modulation = CMDAModulation(config.c_t_dim, config.hidden_size, config.meta_dim)
+        elif self._is_inject_mode == "bixt_cmda":
+            self.bixt_cross_attn = BiXTCrossAttention(config.hidden_size, config.meta_dim, num_heads=4)
+            self.cmda_modulation = CMDAModulation(config.c_t_dim, config.hidden_size, config.meta_dim)
+            if self.memory_token_reader is None:
+                self.memory_token_reader = MemoryTokenReader(
+                    num_tokens=config.introspection_memory_tokens,
+                    hidden_size=config.hidden_size, meta_dim=config.meta_dim, num_heads=4,
+                )
         # SelfJEPAResidualPredictor is a separate prediction head on top of that stream.
-        # 自省流负责产出 `know_gap` 和 `c_t`。
         # SelfJEPAResidualPredictor 是叠在其上的独立 Self-JEPA 残差预测头。
         self.self_jepa_residual_predictor = SelfJEPAResidualPredictor(config)
         self.self_jepa_progress_shape_head = SelfJEPAProgressShapeHead(config)
@@ -3021,7 +3519,43 @@ class LumaBackbone(nn.Module):
             progress_trend_weight=config.exit_progress_trend_weight,
             progress_plateau_weight=config.exit_progress_plateau_weight,
             second_order_delta_weight=getattr(config, "exit_second_order_delta_weight", 0.0),
+            min_loops=config.exit_min_loops,
+            bias_init=config.exit_bias_init,
+            warmup_steps=config.exit_warmup_steps,
+            ct_drift_weight=config.exit_ct_drift_weight,
+            know_gap_weight=config.exit_know_gap_weight,
         )
+        # True MoR: token-level depth routing
+        self.token_depth_router: Optional[TokenDepthRouter] = None
+        if config.enable_token_depth_routing:
+            self.token_depth_router = TokenDepthRouter(
+                config.hidden_size, max_loops=64, eps=config.rms_norm_eps,
+            )
+        # NM: Neuromodulated c_t writer
+        if config.enable_neuromod_ct:
+            self.neuromod_ct_writer = NeuromodulatedCTWriter(
+                c_t_dim=config.c_t_dim, hidden_size=config.hidden_size,
+                rank=config.neuromod_hebb_rank, mode=config.neuromod_mode,
+                use_delta_rule=config.neuromod_use_delta_rule,
+            )
+        else:
+            self.neuromod_ct_writer = None
+        # ES: Exit quality probe
+        self._es_entropy = config.enable_exit_entropy_signal
+        self._es_token_sens = config.enable_exit_token_sensitivity
+        self._es_ct_curv = config.enable_exit_ct_curvature
+        self._es_confidence = config.enable_exit_confidence_gap
+        if self._es_entropy or self._es_confidence or self._es_token_sens:
+            self.exit_quality_probe = ExitQualityProbe(config.hidden_size)
+        else:
+            self.exit_quality_probe = None
+        # PC: Predictive Coding error correction
+        self._pc_enabled = config.enable_pc_correction
+        self._pc_alpha = config.pc_alpha
+        if self._pc_enabled:
+            self.pc_corrector = PCErrorCorrector(config.c_t_dim, config.hidden_size)
+        else:
+            self.pc_corrector = None
         self.enable_sigreg_rollout = bool(config.enable_sigreg_rollout)
         self.enable_sigreg_delta = bool(config.enable_sigreg_delta)
         self.enable_sigreg_ct = bool(config.enable_sigreg_ct)
@@ -3043,6 +3577,12 @@ class LumaBackbone(nn.Module):
         self.register_buffer("sigreg_t", sigreg_t, persistent=False)
         self.register_buffer("sigreg_phi0", sigreg_phi0, persistent=False)
         self.register_buffer("sigreg_weights", sigreg_trap * sigreg_weight, persistent=False)
+        # Coconut: project c_t into hidden_size thought token for re-injection
+        self._coconut = bool(config.enable_coconut)
+        self._coconut_rounds = int(config.coconut_rounds)
+        if self._coconut:
+            self.coconut_proj = nn.Linear(config.c_t_dim, config.hidden_size, bias=False)
+            nn.init.normal_(self.coconut_proj.weight, std=0.02)
         self.final_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def _hierarchical_rollout_horizons(self) -> set[int]:
@@ -3093,12 +3633,15 @@ class LumaBackbone(nn.Module):
         h = torch.cat([self.reason_memory(batch_size), h], dim=1)
         streams = self.mhc.init_streams(h)
         loop_history: List[torch.Tensor] = []
+        loop_h_grad: List[torch.Tensor] = []  # RLTT: intermediate h with gradient
         c_t_history: List[torch.Tensor] = []
         know_gap_history: List[torch.Tensor] = []
         uncertainty_history: List[torch.Tensor] = []
         slow_update_flags: List[bool] = []
         prev_h: Optional[torch.Tensor] = None
         slow_state = self.introspection_state_stream.init_slow_state(batch_size, h.device, h.dtype)
+        # IS: init memory tokens if using memory/bixt mode
+        _is_memory = self.memory_token_reader.init_memory(batch_size, h.device, h.dtype) if self.memory_token_reader is not None else None
         self_check_state = self.self_check_ring.init_state(batch_size, h.device, h.dtype) if self.self_check_ring is not None else None
         reasoning_state = self.reasoning_state_ring.init_state(batch_size, h.device, h.dtype) if self.reasoning_state_ring is not None else None
         c_t = slow_state["c_t"]
@@ -3174,7 +3717,18 @@ class LumaBackbone(nn.Module):
         hierarchical_horizons = self._hierarchical_rollout_horizons()
         h_pre_reason = h  # 保存 reasoning loop 之前的 h，用于 world_jepa_reason_only
 
+        _mor_balance_terms: list[torch.Tensor] = []  # True MoR balance loss accumulator
         for loop_idx in range(self.config.reason_active_loops):
+            # ── True MoR: token-level depth routing (loop_idx > 0) ──
+            _mor_h_frozen: Optional[torch.Tensor] = None
+            _mor_continue_mask: Optional[torch.Tensor] = None
+            if self.token_depth_router is not None and loop_idx > 0:
+                _mor_continue_mask = self.token_depth_router(h, loop_idx)  # [B, T]
+                _mor_h_frozen = h if self.config.mor_grad_through_frozen else h.detach()
+                _mor_balance_terms.append(_mor_continue_mask.mean())
+            # IS6: token-aware c_t injection (before reason_core)
+            if self._is_inject_mode == "token_aware" and hasattr(self, "token_aware_inject"):
+                h = self.token_aware_inject(h, c_t)
             current_r_t = reasoning_state["state"] if reasoning_state is not None else None
             current_r_trust = reasoning_state["trust"] if reasoning_state is not None else None
             recent_block_repr = block_reprs[-1].mean(dim=1) if block_reprs else h.new_zeros((batch_size, h.shape[-1]))
@@ -3235,6 +3789,9 @@ class LumaBackbone(nn.Module):
                     tensor = tensor.float().mean()
                     dynamics_modulation_traces.setdefault(key, []).append(tensor.detach())
             h = self.unified_attnres(h, loop_history, block_reprs, loop_idx=loop_idx)
+            # PC: predictive coding error correction
+            if self.pc_corrector is not None and loop_idx > 0:
+                h, _pc_err = self.pc_corrector(h, c_t, alpha=self._pc_alpha)
             did_slow_update = (loop_idx % self.config.slow_k == 0)
             if did_slow_update:
                 slow_step_idx += 1
@@ -3243,12 +3800,43 @@ class LumaBackbone(nn.Module):
                     (batch_size, 1),
                     float(loop_idx + 1) / float(max(1, self.config.reason_active_loops)),
                 )
+                # IS: prepare introspection input based on mode
+                _is_meta_override = None
+                if self._is_input_mode == "memory" and _is_memory is not None:
+                    _is_memory, _is_meta_override = self.memory_token_reader(_is_memory, h)
+                elif self._is_input_mode == "chunked_memory" and _is_memory is not None:
+                    # chunk h first, then memory tokens read from chunks (not raw h)
+                    _n_chunks = 8
+                    _chunk_sz = max(1, h.shape[1] // _n_chunks)
+                    _chunks = [h[:, i*_chunk_sz:(i+1)*_chunk_sz, :].mean(dim=1) for i in range(_n_chunks)]
+                    _chunked = torch.stack(_chunks, dim=1)  # [B, 8, D]
+                    _is_memory, _is_meta_override = self.memory_token_reader(_is_memory, _chunked)
+                elif self._is_input_mode == "chunked":
+                    _n_chunks = 8
+                    _chunk_sz = max(1, h.shape[1] // _n_chunks)
+                    _chunks = [h[:, i*_chunk_sz:(i+1)*_chunk_sz, :].mean(dim=1) for i in range(_n_chunks)]
+                    _chunked = torch.stack(_chunks, dim=1)  # [B, 8, D]
+                    _is_meta_override = self.introspection_state_stream.meta_input(
+                        torch.cat([_chunked, _chunked], dim=-1)  # fake [h_pool, last] by repeating
+                    )  # [B, 8, meta_dim]
+                # IS: BiXT mode — bidirectional cross-attention before introspection
+                if self._is_inject_mode in ("bixt", "bixt_cmda") and hasattr(self, "bixt_cross_attn") and _is_memory is not None:
+                    if _is_meta_override is None:
+                        # bixt needs memory in meta_dim space
+                        _, _is_meta_override = self.memory_token_reader(_is_memory, h)
+                    _is_meta_override, h = self.bixt_cross_attn(_is_meta_override, h)
+                # IS: CMDA mode — bidirectional channel modulation
+                if self._is_inject_mode in ("cmda", "bixt_cmda") and hasattr(self, "cmda_modulation"):
+                    h, _cmda_meta = self.cmda_modulation(h, c_t)
+                    if _is_meta_override is None:
+                        _is_meta_override = _cmda_meta.unsqueeze(1)  # [B, 1, meta_dim]
                 know_gap, next_c_t, slow_state = self.introspection_state_stream(
                     h,
                     block_reprs,
                     slow_state,
                     loop_progress=current_loop_progress,
                     loop_index=loop_idx,
+                    meta_override=_is_meta_override,
                 )
                 delta_h = h.mean(dim=1).detach() if prev_h is None else (h - prev_h).mean(dim=1).detach()
                 if not self.config.disable_self_jepa:
@@ -3374,7 +3962,14 @@ class LumaBackbone(nn.Module):
                     pred_delta_c = torch.zeros_like(c_t)
                     current_self_improve_scalar = h.new_zeros(())
                     pending_rollout_preds = []
-                c_t = next_c_t
+                # NM: neuromodulated c_t write
+                if self.neuromod_ct_writer is not None and loop_idx > 0:
+                    c_t, _nm_aux = self.neuromod_ct_writer(
+                        next_c_t, prev_c_t, delta_h, self_check_score,
+                        jepa_error=current_self_error if current_self_error.numel() > 0 else None,
+                    )
+                else:
+                    c_t = next_c_t
                 if self.config.ct_norm_penalty_weight > 0.0:
                     ct_norm_terms.append(c_t.norm(dim=-1).mean())
                 if self.enable_sigreg_ct:
@@ -3455,7 +4050,7 @@ class LumaBackbone(nn.Module):
                 if self.self_check_ring is not None and self_check_state is not None and did_self_check_update:
                     # Phase 4+: stop-gradient，self_check ring 不回传梯度到主干
                     self_check_state = self.self_check_ring(
-                        c_t.detach(), delta_h, know_gap.detach(), self_check_state
+                        c_t.detach(), delta_h, self_check_state
                     )
                     self_check_score = self_check_state["score"]
                     # self_check_loss：训练 ring score 预测推理改善方向
@@ -3483,6 +4078,13 @@ class LumaBackbone(nn.Module):
                     r_t_history.append(reasoning_state["state"].detach())
                     r_t_trust_history.append(reasoning_state["trust"].detach().mean())
             h = self.loop_norm(h)
+            # ── True MoR: blend frozen tokens back (with c_t injection) ──
+            if _mor_continue_mask is not None and _mor_h_frozen is not None:
+                _h_dtype = h.dtype
+                _mor_mask_3d = _mor_continue_mask.unsqueeze(-1).to(_h_dtype)  # [B, T, 1]
+                # frozen token 也接收 c_t 自省信号，只是不做 reasoning
+                _mor_h_frozen_ct = _mor_h_frozen + self.reason_core.ct_injection.proj(c_t).unsqueeze(1).to(_h_dtype)
+                h = (_mor_mask_3d * h + (1.0 - _mor_mask_3d) * _mor_h_frozen_ct).to(_h_dtype)
             if self.config.enable_world_jepa:
                 world_probe = self.world_latent_jepa.probe_stats(h)
                 current_world_error = world_probe["world_jepa_loss"].detach()
@@ -3499,6 +4101,10 @@ class LumaBackbone(nn.Module):
             prev_self_error_for_gain = current_self_error.detach()
             prev_world_error_for_gain = current_world_error.detach()
             loop_history.append(h.detach())
+            if self.config.loop_lm_loss_weight > 0.0 or self.config.shortcut_consistency_weight > 0.0:
+                # RLTT 方案 A: 中间轮全部 detach，只有最后退出轮保留梯度
+                # 中间轮的 detached h 仍提供 loss 监督信号（训练 lm_head），但不反传到 shared_layers
+                loop_h_grad.append(h.detach())
             c_t_history.append(c_t.detach())
             if self.ct_world_jepa is not None:
                 ct_grad_history.append(c_t)
@@ -3506,6 +4112,25 @@ class LumaBackbone(nn.Module):
             uncertainty_history.append(uncertainty.detach())
             slow_update_flags.append(did_slow_update)
             executed_loops = loop_idx + 1
+            # ES: compute enhanced exit signals
+            _es_entropy_proxy = None
+            _es_confidence_proxy = None
+            _es_token_sensitivity = None
+            _es_ct_curvature = None
+            if self.exit_quality_probe is not None:
+                with torch.no_grad():
+                    _eq = self.exit_quality_probe(h, prev_h)
+                    if self._es_entropy:
+                        _es_entropy_proxy = _eq["entropy_proxy"].mean()
+                    if self._es_confidence:
+                        _es_confidence_proxy = _eq["confidence_proxy"].mean()
+                    if self._es_token_sens:
+                        _es_token_sensitivity = _eq["token_sensitivity"].mean()
+            if self._es_ct_curv and len(c_t_history) >= 2:
+                with torch.no_grad():
+                    _dc1 = c_t - c_t_history[-1]
+                    _dc2 = c_t_history[-1] - c_t_history[-2] if len(c_t_history) >= 2 else _dc1
+                    _es_ct_curvature = F.cosine_similarity(_dc1, _dc2, dim=-1).mean()
             exit_stats = self.exit_controller(
                 prev_h,
                 h,
@@ -3529,6 +4154,11 @@ class LumaBackbone(nn.Module):
                 progress_next_improve=latest_progress_next,
                 progress_trend=latest_progress_trend,
                 progress_plateau_logit=torch.logit(latest_progress_plateau.clamp(1e-4, 1 - 1e-4)),
+                ct_drift=(c_t - c_t_history[-1]).norm(dim=-1).mean() if c_t_history else None,
+                entropy_proxy=_es_entropy_proxy,
+                confidence_proxy=_es_confidence_proxy,
+                token_sensitivity=_es_token_sensitivity,
+                ct_curvature=_es_ct_curvature,
             )
             delta_h_history.append(exit_stats["delta_h"].detach())
             self_error_history.append(current_self_error.detach())
@@ -3556,6 +4186,23 @@ class LumaBackbone(nn.Module):
             prev_h = h
             if exit_stats["should_exit"]:
                 break
+
+        # RLTT 方案 A: 循环结束后，把最后一份 h 替换为带梯度版本
+        if loop_h_grad:
+            loop_h_grad[-1] = h  # 只有最终退出轮的 h 保留完整梯度
+
+        # ── Coconut: continuous thought re-injection ──
+        # After reasoning loop exits, project c_t into a thought token,
+        # prepend it to h, and run shared_layers one more time per round.
+        if self._coconut and self.training:
+            for _coco_round in range(self._coconut_rounds):
+                thought_tok = self.coconut_proj(c_t).unsqueeze(1)  # [B, 1, D]
+                h_with_thought = torch.cat([thought_tok, h], dim=1)  # [B, T+1, D]
+                for layer in self.reason_core.shared_layers:
+                    h_with_thought = layer(h_with_thought, c_t=c_t, attn_bias=None,
+                        use_gradient_checkpointing=self.config.use_gradient_checkpointing,
+                        loop_idx=executed_loops + _coco_round)
+                h = h_with_thought[:, 1:, :]  # strip thought token, keep original seq len
 
         if self.config.enable_world_jepa and self.config.world_jepa_reason_only:
             # stop-grad compress 贡献，让 World JEPA 梯度只走 reasoning 区
@@ -3687,7 +4334,22 @@ class LumaBackbone(nn.Module):
             "exit_target_history": [],
             "joint_benefit_history": [],
             "loop_lm_loss_history": [],
+            "loop_h_grad": loop_h_grad,
             "exit_aux_loss": h.new_zeros(()),
+            "exit_entropy_loss": (
+                -(lambda p: (p * torch.log(p + 1e-8) + (1 - p) * torch.log(1 - p + 1e-8)).mean())(
+                    torch.stack(exit_score_history).clamp(0.01, 0.99)
+                ) if exit_score_history else h.new_zeros(())
+            ),
+            "mor_balance_loss": (
+                torch.stack([
+                    (t - self.config.mor_target_continue_ratio) ** 2
+                    for t in _mor_balance_terms
+                ]).mean() if _mor_balance_terms else h.new_zeros(())
+            ),
+            "mor_mean_continue_ratio": (
+                torch.stack(_mor_balance_terms).mean().detach() if _mor_balance_terms else h.new_tensor(-1.0)
+            ),
             "slow_state": {
                 "meta_state_1": slow_state["meta_state_1"].detach(),
                 "meta_state_2": slow_state["meta_state_2"].detach(),
@@ -3991,7 +4653,45 @@ class LumaForCausalLM(PreTrainedModel):
             aux["self_rollout_loss_effective"] = self_rollout_term.detach()
             aux["exit_aux_loss_effective"] = exit_aux_term.detach()
             aux["self_check_loss_effective"] = self_check_term.detach()
-            loss = lm_loss + world_term + self_jepa_term + self_rollout_term + exit_aux_term + self_check_term + rollout_zone_loss + routing_entropy_loss + trajectory_vitality_loss + compression_dynamics_loss
+            mor_balance_term = self.config.mor_balance_weight * aux["mor_balance_loss"]
+            aux["mor_balance_loss_effective"] = mor_balance_term.detach()
+            # RLTT: dense LM loss at intermediate loop steps
+            # 只对最近 max_rltt_slots 个中间 h 算 loss，避免深循环时 OOM
+            # 每份 logits = [B, T, V] ≈ 590MB，累加的计算图引用全部 logits 直到 backward
+            _max_rltt_slots = 3  # 最多同时 3 份 logits 计算图 ≈ 1.8GB
+            loop_lm_term = logits.new_zeros(())
+            if self.config.loop_lm_loss_weight > 0.0 and aux.get("loop_h_grad"):
+                _all_h = aux["loop_h_grad"][:-1]  # skip last (= final output)
+                if len(_all_h) > _max_rltt_slots:
+                    # 均匀采样：取首、中、尾
+                    _indices = [0, len(_all_h) // 2, len(_all_h) - 1]
+                    _all_h = [_all_h[i] for i in _indices]
+                if _all_h:
+                    _rltt_acc = logits.new_zeros(())
+                    for _li, _h_i in enumerate(_all_h):
+                        _logits_i = self.lm_head(self.pre_lm_norm(_h_i))
+                        _logits_i = _logits_i[:, -labels.shape[1]:, :]
+                        _x_i = _logits_i[..., :-1, :].contiguous()
+                        _rltt_acc = _rltt_acc + F.cross_entropy(
+                            _x_i.view(-1, _x_i.size(-1)), y.view(-1), ignore_index=-100
+                        )
+                    loop_lm_term = self.config.loop_lm_loss_weight * _rltt_acc / len(_all_h)
+            aux["loop_lm_term"] = loop_lm_term.detach()
+            # Ouro: exit entropy regularization (maximize entropy to prevent exit collapse)
+            exit_entropy_term = self.config.exit_entropy_weight * aux["exit_entropy_loss"] if self.config.exit_entropy_weight > 0.0 else logits.new_zeros(())
+            aux["exit_entropy_term"] = exit_entropy_term.detach()
+            # LoopFormer: shortcut-consistency — align early loop logits to final logits
+            shortcut_term = logits.new_zeros(())
+            if self.config.shortcut_consistency_weight > 0.0 and aux.get("loop_h_grad") and len(aux["loop_h_grad"]) >= 2:
+                import random as _rng
+                _sc_idx = _rng.randint(0, len(aux["loop_h_grad"]) - 2)  # random early step
+                _sc_logits = self.lm_head(self.pre_lm_norm(aux["loop_h_grad"][_sc_idx]))
+                _sc_logits = _sc_logits[:, -labels.shape[1]:, :]  # trim to match labels length
+                _sc_p = F.log_softmax(_sc_logits[..., :-1, :].contiguous().view(-1, _sc_logits.size(-1)), dim=-1)
+                _full_p = F.softmax(token_logits[..., :-1, :].contiguous().view(-1, token_logits.size(-1)).detach(), dim=-1)  # stop-grad on target
+                shortcut_term = self.config.shortcut_consistency_weight * F.kl_div(_sc_p, _full_p, reduction="batchmean")
+            aux["shortcut_consistency_term"] = shortcut_term.detach()
+            loss = lm_loss + world_term + self_jepa_term + self_rollout_term + exit_aux_term + self_check_term + rollout_zone_loss + routing_entropy_loss + trajectory_vitality_loss + compression_dynamics_loss + mor_balance_term + loop_lm_term + exit_entropy_term + shortcut_term
         return MoeCausalLMOutputWithPast(
             loss=loss,
             aux_loss=(
@@ -4004,6 +4704,7 @@ class LumaForCausalLM(PreTrainedModel):
                 + aux.get("routing_entropy_loss", logits.new_zeros(()))
                 + aux.get("trajectory_vitality_loss", logits.new_zeros(()))
                 + aux.get("compression_dynamics_loss", logits.new_zeros(()))
+                + self.config.mor_balance_weight * aux["mor_balance_loss"]
             ),
             logits=logits,
             past_key_values=None,

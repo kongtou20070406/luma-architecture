@@ -303,6 +303,146 @@ def main():
     write_jsonl(MIXES_DIR / "pretrain_v1.jsonl", v1_mix)
     ensure_symlink("pretrain_v1.jsonl", MIXES_DIR / "pretrain_v1.jsonl")
 
+    # ── DataMix v2: 实验用 mix (M4+ 实验) ─────────────────
+
+    print(f"\n生成 DataMix v2 实验数据集 ...")
+
+    # persona + wechat 内容复制 2x（1 epoch = 2 epoch 人格曝光）
+    persona_2x = (persona + wechat_sft) * 2  # ~176K 条
+
+    # 加载 oasst1 和 ultrafeedback（v2 恢复使用）
+    oasst = load_jsonl(SYNTHETIC_DIR / "oasst1.jsonl")
+    ultrafeedback = load_jsonl(SYNTHETIC_DIR / "ultrafeedback.jsonl")
+
+    # v2 配比：persona+wechat ≥25%, smart ≥40%, 叙事+对话 ≤35%
+    # 总量以 persona_2x 为锚点，倒推其他桶的采样量
+    n_persona = len(persona_2x)                            # ~176K (25%)
+    total_target = int(n_persona / 0.25)                   # ~704K
+    n_math = int(total_target * 0.15)                      # 15% math+arc
+    n_code = int(total_target * 0.10)                      # 10% code
+    n_reason = int(total_target * 0.15)                    # 15% oasst+ultrafeedback
+    n_zhihu = int(total_target * 0.15)                     # 15% zhihu
+    n_scifi = int(total_target * 0.05)                     # 5% scifi
+    n_arc = int(total_target * 0.05)                       # 5% arc
+    # 剩余 ~10% 由 persona_2x 多出部分自然填充
+
+    v2_mix = []
+    v2_mix.extend(persona_2x)
+    v2_mix.extend(sample_or_oversample(math, n_math))
+    v2_mix.extend(sample_or_oversample(python_code + stack_python, n_code))
+    v2_mix.extend(sample_or_oversample(oasst + ultrafeedback, n_reason))
+    v2_mix.extend(sample_or_oversample(zhihu, n_zhihu))
+    v2_mix.extend(sample_or_oversample(scifi, n_scifi))
+    v2_mix.extend(sample_or_oversample(arc, n_arc))
+
+    random.shuffle(v2_mix)
+
+    # 统计实际配比
+    total_v2 = len(v2_mix)
+    persona_pct = len(persona_2x) / total_v2 * 100
+    print(f"\n  DataMix v2 总量: {total_v2} 条")
+    print(f"  persona+wechat (2x): {len(persona_2x)} ({persona_pct:.1f}%)")
+    print(f"  math:                {n_math}")
+    print(f"  code:                {n_code}")
+    print(f"  reason (oasst+uf):   {n_reason}")
+    print(f"  zhihu:               {n_zhihu}")
+    print(f"  scifi:               {n_scifi}")
+    print(f"  arc:                 {n_arc}")
+
+    write_jsonl(MIXES_DIR / "pretrain_v2.jsonl", v2_mix)
+    ensure_symlink("pretrain_v2.jsonl", MIXES_DIR / "pretrain_v2.jsonl")
+
+    # ── DataMix v3: 正式预训练 (50% 聪明 + 25% 性格 + 25% 叙事) ──
+
+    print(f"\n生成 DataMix v3 正式预训练数据集 ...")
+
+    # 加载新增数据源
+    oasst = load_jsonl(SYNTHETIC_DIR / "oasst1.jsonl")
+    ultrafeedback = load_jsonl(SYNTHETIC_DIR / "ultrafeedback.jsonl")
+    novel_game = load_jsonl(SYNTHETIC_DIR / "novel_game_real.jsonl")
+    novel_dawn = load_jsonl(SYNTHETIC_DIR / "novel_dawn_sword.jsonl")
+    textbook_la = load_jsonl(SYNTHETIC_DIR / "textbook_linear_algebra.jsonl")
+
+    # 性格桶: persona + wechat 3x 复制（短文本高频曝光 → 烙印风格）
+    persona_bucket = (persona + wechat_sft) * 3
+
+    # 聪明桶 (50%): 以性格桶样本数为锚点反推
+    n_persona = len(persona_bucket)
+    total_target = int(n_persona / 0.25)  # persona=25% → total
+    n_smart = int(total_target * 0.50)
+    n_narrative = int(total_target * 0.25)
+
+    # 聪明桶内部配比: math 20% + code 15% + oasst+uf 10% + arc 3% + textbook 2%
+    smart_pool = math + python_code + arc + oasst + ultrafeedback + textbook_la
+    smart_bucket = sample_or_oversample(smart_pool, n_smart)
+
+    # 叙事桶: 网文 + 科幻 + 知乎（下采样知乎，突出网文风格）
+    n_novels = len(novel_game) + len(novel_dawn) + len(scifi)  # ~5.3K
+    n_zhihu_v3 = max(n_narrative - n_novels, 0)
+    narrative_bucket = novel_game + novel_dawn + scifi + sample_no_oversample(zhihu, n_zhihu_v3)
+    # 如果叙事桶不够，上采样网文
+    if len(narrative_bucket) < n_narrative:
+        narrative_bucket = sample_or_oversample(narrative_bucket, n_narrative)
+
+    v3_mix = persona_bucket + smart_bucket + narrative_bucket
+    random.shuffle(v3_mix)
+
+    # 统计
+    total_v3 = len(v3_mix)
+    v3_tokens = estimate_tokens(v3_mix)
+    print(f"\n  DataMix v3 总量: {total_v3} 条, ~{v3_tokens/1e6:.0f}M tokens")
+    print(f"  性格桶 (persona+wechat 3x): {n_persona} ({n_persona/total_v3*100:.1f}%)")
+    print(f"  聪明桶 (math+code+arc+oasst+uf+教材): {len(smart_bucket)} ({len(smart_bucket)/total_v3*100:.1f}%)")
+    print(f"  叙事桶 (网文+科幻+知乎): {len(narrative_bucket)} ({len(narrative_bucket)/total_v3*100:.1f}%)")
+
+    write_jsonl(MIXES_DIR / "pretrain_v3.jsonl", v3_mix)
+    ensure_symlink("pretrain_v3.jsonl", MIXES_DIR / "pretrain_v3.jsonl")
+
+    # ── DataMix v4: v3 + smart 桶补充 (arxiv_dl_code + numina + platypus + gsm8k) ──
+
+    print(f"\n生成 DataMix v4 (v3 基础 + smart 补充) ...")
+
+    # 加载 v4 新增数据源
+    arxiv_dl = load_jsonl(SYNTHETIC_DIR / "arxiv_dl_code.jsonl")
+    numina_cot = load_jsonl(SYNTHETIC_DIR / "numina_math_cot.jsonl")
+    platypus = load_jsonl(SYNTHETIC_DIR / "open_platypus.jsonl")
+    gsm8k = load_jsonl(SYNTHETIC_DIR / "gsm8k.jsonl")
+
+    # 性格桶: 同 v3 (persona + wechat 3x)
+    v4_persona_bucket = (persona + wechat_sft) * 3
+    n_v4_persona = len(v4_persona_bucket)
+
+    # 以性格桶为锚点，保持 50/25/25
+    v4_total_target = int(n_v4_persona / 0.25)
+    n_v4_smart = int(v4_total_target * 0.50)
+    n_v4_narrative = int(v4_total_target * 0.25)
+
+    # 聪明桶: v3 原有 + 新增 4 个数据源（不上采样，池子够大直接采样）
+    v4_smart_pool = (math + python_code + arc + oasst + ultrafeedback
+                     + textbook_la + arxiv_dl + numina_cot + platypus + gsm8k)
+    v4_smart_bucket = sample_or_oversample(v4_smart_pool, n_v4_smart)
+
+    # 叙事桶: 同 v3
+    n_v4_novels = len(novel_game) + len(novel_dawn) + len(scifi)
+    n_v4_zhihu = max(n_v4_narrative - n_v4_novels, 0)
+    v4_narrative_bucket = novel_game + novel_dawn + scifi + sample_no_oversample(zhihu, n_v4_zhihu)
+    if len(v4_narrative_bucket) < n_v4_narrative:
+        v4_narrative_bucket = sample_or_oversample(v4_narrative_bucket, n_v4_narrative)
+
+    v4_mix = v4_persona_bucket + v4_smart_bucket + v4_narrative_bucket
+    random.shuffle(v4_mix)
+
+    total_v4 = len(v4_mix)
+    v4_tokens = estimate_tokens(v4_mix)
+    print(f"\n  DataMix v4 总量: {total_v4} 条, ~{v4_tokens/1e6:.0f}M tokens")
+    print(f"  性格桶 (persona+wechat 3x): {n_v4_persona} ({n_v4_persona/total_v4*100:.1f}%)")
+    print(f"  聪明桶 (+arxiv_dl+numina+platypus+gsm8k): {len(v4_smart_bucket)} ({len(v4_smart_bucket)/total_v4*100:.1f}%)")
+    print(f"  叙事桶 (网文+科幻+知乎): {len(v4_narrative_bucket)} ({len(v4_narrative_bucket)/total_v4*100:.1f}%)")
+    print(f"  聪明桶池子大小: {len(v4_smart_pool)} (新增 arxiv_dl={len(arxiv_dl)} numina={len(numina_cot)} platypus={len(platypus)} gsm8k={len(gsm8k)})")
+
+    write_jsonl(MIXES_DIR / "pretrain_v4.jsonl", v4_mix)
+    ensure_symlink("pretrain_v4.jsonl", MIXES_DIR / "pretrain_v4.jsonl")
+
     # ── 保留旧 mix（向后兼容 + 回归测试）──────────────────
 
     print(f"\n保留旧混合数据集 ...")

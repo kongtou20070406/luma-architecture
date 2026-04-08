@@ -114,11 +114,15 @@ Gate F: 配置冻结 ←── M9+M7+M10 结果已确定
     ↓
 正式预训练 (BP + accum=2)
     ↓
-═══ 第二优先级：架构改进（预训练后）═══
+═══ 第二优先级：架构改进 ═══
 
-M2 (Exit Policy) ←── fine-tune 阶段
-M4 (MoR Routing) ←── 同上
-M3 (数据扩量) ←── 并行准备数据
+M2 (Exit Policy) ──── 完成 ✅, EX5 (20 loops + 2nd_order, -1.3%)
+    ↓
+M4 (MoR Routing) ←── 就绪，待实验
+    ↓
+M3 (数据扩量) ←── DataMix v2 已生成 (549K 条, persona 2x)
+    ↓
+正式预训练 (全配置 + DataMix v2 + Rho-1 selective loss)
     ↓
 M8 (A* 推理搜索) ←── 部署阶段
 ```
@@ -205,16 +209,26 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 
 **判胜标准**: perplexity 持续下降 + persona/empathy eval 不崩
 
-### Matrix 4: Stage D — MoR Per-Token Routing
+### Matrix 4: Stage D — MoR Loop-Conditioned Routing
 
-**目标**：Mixture-of-Reasoning 让不同 token 走不同深度的推理循环。
+**目标**：Mixture-of-Reasoning 让不同 reasoning loop 走不同的 expert 子网络。  
+**前置**：M2 ✅ (ExitController 已激活)  
+**预计**：5 实验 × 1500 步 ≈ 3h  
+**脚本**：`minimind/scripts/run_matrix4_mor_routing.sh`
 
-| 实验 | routing 方式 | 说明 |
-|---|---|---|
-| D0 | fixed-depth | Baseline (所有 token 同深度) |
-| D1 | token-level router | 每个 token 独立决策 exit |
-| D2 | chunk-level router | 每 chunk (32 tokens) 决策 |
-| D3 | budget-constrained | 总 loop budget 约束下的分配 |
+**实现**：LoRA-style lightweight experts (down 768→96 + SiLU + up 96→768)  
+每 loop 选 top-k experts，zero-init up → residual safe。  
+每个 expert ~147K params, 4 experts 共 ~589K (0.12% of 482M)。
+
+| 实验 | experts | topk | selective_loss | 说明 |
+|---|---|---|---|---|
+| D0 | — | — | 1.0 | Baseline (MoR 关闭) |
+| D1 | 4 | 2 | 1.0 | 默认 MoR |
+| D2 | 8 | 2 | 1.0 | 更多专家，更细粒度 |
+| D3 | 4 | 1 | 1.0 | 稀疏路由（每 loop 1 expert） |
+| D4 | 4 | 2 | 0.6 | MoR + Rho-1 联合 |
+
+**判胜标准**：loss_lm 下降 + MoR experts 不 dead + VRAM 可控
 
 ### Matrix 5: ES 进化策略验证 (探索性)
 
@@ -480,8 +494,10 @@ fp8=1, gradient_checkpointing=1, cpu_offload_optimizer=1
 | P1 | Matrix 6 (数据效率) | 3-5 天 | 与 M5/M7 并行 | EntiGraph 合成 + PPL 修剪 |
 | P1 | Matrix 3 (数据扩量) | 并行准备 | 数据收集中 | 不阻塞训练 |
 | — | Matrix 2 (Exit Policy) | ~3h | **完成 ✅** | EX5 胜出 (20 loops + 2nd_order, -1.3%) |
-| P2 | Matrix 4 (MoR Routing) | 1-2 周 | 预训练后 | fine-tune 阶段加入 |
-| — | Gate F (配置冻结) | 0.5 天 | — | M9 + M7 结果决定 |
+| P1 | Matrix 4 (MoR Routing) | ~3h | **就绪** | 5 实验: experts/topk/selective_loss |
+| — | Rho-1 Selective Loss | — | **已实现** | --selective_loss_ratio (默认 1.0) |
+| — | DataMix v2 | — | **已生成** | 549K 条, persona 2x 曝光, 170M tokens |
+| — | Gate F (配置冻结) | 0.5 天 | — | M4 后冻结 |
 | — | **正式预训练** | **~10-16 天** | — | **BP + accum=2 (主线)** |
 | P3 | Matrix 8 (A* 推理搜索) | ~3 天 | 部署阶段 | 推理时免费提升质量 |
 

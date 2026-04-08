@@ -152,7 +152,35 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         exit_train_use_sampling=bool(args.exit_train_use_sampling),
         exit_eval_use_sampling=bool(args.exit_eval_use_sampling),
         exit_sampling_temperature=args.exit_sampling_temperature,
+        exit_score_threshold=getattr(args, "exit_score_threshold", 0.85),
         exit_second_order_delta_weight=getattr(args, "exit_second_order_delta_weight", 0.0),
+        exit_min_loops=getattr(args, "exit_min_loops", 2),
+        exit_bias_init=getattr(args, "exit_bias_init", 0.0),
+        exit_warmup_steps=getattr(args, "exit_warmup_steps", 0),
+        exit_ct_drift_weight=getattr(args, "exit_ct_drift_weight", 0.0),
+        identity_recurrence_alpha=getattr(args, "identity_recurrence_alpha", 0.0),
+        exit_entropy_weight=getattr(args, "exit_entropy_weight", 0.0),
+        loop_lm_loss_weight=getattr(args, "loop_lm_loss_weight", 0.0),
+        rltt_stride=getattr(args, "rltt_stride", 2),
+        shortcut_consistency_weight=getattr(args, "shortcut_consistency_weight", 0.0),
+        enable_time_conditioning=bool(getattr(args, "enable_time_conditioning", 0)),
+        enable_coconut=bool(getattr(args, "enable_coconut", 0)),
+        coconut_rounds=getattr(args, "coconut_rounds", 1),
+        loop_lora_rank=getattr(args, "loop_lora_rank", 0),
+        enable_loop_ffn_gate=bool(getattr(args, "enable_loop_ffn_gate", 0)),
+        introspection_input_mode=getattr(args, "introspection_input_mode", "mean"),
+        introspection_memory_tokens=getattr(args, "introspection_memory_tokens", 4),
+        introspection_inject_mode=getattr(args, "introspection_inject_mode", "broadcast"),
+        enable_neuromod_ct=bool(getattr(args, "enable_neuromod_ct", 0)),
+        neuromod_hebb_rank=getattr(args, "neuromod_hebb_rank", 8),
+        neuromod_use_delta_rule=bool(getattr(args, "neuromod_use_delta_rule", 0)),
+        neuromod_mode=getattr(args, "neuromod_mode", "surprise"),
+        enable_pc_correction=bool(getattr(args, "enable_pc_correction", 0)),
+        pc_alpha=getattr(args, "pc_alpha", 0.1),
+        enable_exit_entropy_signal=bool(getattr(args, "enable_exit_entropy_signal", 0)),
+        enable_exit_token_sensitivity=bool(getattr(args, "enable_exit_token_sensitivity", 0)),
+        enable_exit_ct_curvature=bool(getattr(args, "enable_exit_ct_curvature", 0)),
+        enable_exit_confidence_gap=bool(getattr(args, "enable_exit_confidence_gap", 0)),
         use_gradient_checkpointing=bool(args.use_gradient_checkpointing),
         activation_offload_compress=bool(getattr(args, "activation_offload_compress", 0)),
         reason_num_phases=getattr(args, "reason_num_phases", 0),
@@ -160,6 +188,9 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         reason_mor_routing=bool(getattr(args, "reason_mor_routing", 0)),
         reason_mor_num_experts=getattr(args, "reason_mor_num_experts", 4),
         reason_mor_topk=getattr(args, "reason_mor_topk", 2),
+        enable_token_depth_routing=bool(getattr(args, "enable_token_depth_routing", 0)),
+        mor_target_continue_ratio=getattr(args, "mor_target_continue_ratio", 0.6),
+        mor_balance_weight=getattr(args, "mor_balance_weight", 0.01),
         mhc_alpha_init=getattr(args, "mhc_alpha_init", 0.01),
         mhc_streams=getattr(args, "mhc_streams", 4),
         attnres_mode=getattr(args, "attnres_mode", "legacy"),
@@ -366,11 +397,13 @@ def build_phase6_config(args: argparse.Namespace) -> LumaConfig:
         # ── self_check_ring（继承 Phase 4）────────────────────────────────────
         enable_self_check_ring=True,
         self_check_loss_weight=args.self_check_loss_weight,
-        # ── SIGreg delta（继承 Phase 3.5）─────────────────────────────────────
+        # ── SIGreg（继承 Phase 3.5 + 新增 ct/rollout 可选）────────────────────
         enable_sigreg_delta=True,
-        enable_sigreg_rollout=False,
-        enable_sigreg_ct=False,
+        enable_sigreg_rollout=bool(getattr(args, "enable_sigreg_rollout", 0)),
+        enable_sigreg_ct=bool(getattr(args, "enable_sigreg_ct", 0)),
         sigreg_delta_weight=args.sigreg_delta_weight,
+        sigreg_ct_weight=getattr(args, "sigreg_ct_weight", 0.05),
+        sigreg_rollout_weight=getattr(args, "sigreg_rollout_weight", 0.05),
         sigreg_num_slices=128,
         sigreg_t_min=0.2,
         sigreg_t_max=4.0,
@@ -508,6 +541,7 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
         step += 1
         if step > args.iters:
             break
+        model.model.exit_controller._global_step = step
 
         input_ids = input_ids.to(args.device)
         labels = labels.to(args.device)
@@ -517,7 +551,34 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             # Phase 3+: res.loss 已包含 self_jepa_term（模型内部加权）
             # res.aux_loss = self_jepa_weight * self_jepa_loss（+ 其他目前为 0 的项）
             loss_jepa_val = res.aux_loss.item() if res.aux_loss is not None else 0.0
-            loss_lm = res.loss - (res.aux_loss if res.aux_loss is not None else res.loss.new_zeros(()))
+            aux_loss = res.aux_loss if res.aux_loss is not None else res.loss.new_zeros(())
+
+            # ── Rho-1 Selective Loss: 只对高信息量 token 计算 loss ──────────
+            _sel_ratio = getattr(args, "selective_loss_ratio", 1.0)
+            if _sel_ratio < 1.0:
+                # 从 logits 重算 per-token loss，取 top-k% 最高 loss token
+                # logits 可能比 labels 长（reason_memory token），截取对齐
+                _raw_logits = res.logits
+                _label_len = labels.size(-1)
+                if _raw_logits.size(-2) > _label_len:
+                    _raw_logits = _raw_logits[:, -_label_len:, :]
+                _logits = _raw_logits[..., :-1, :].contiguous()
+                _labels = labels[..., 1:].contiguous()
+                _per_tok = F.cross_entropy(
+                    _logits.view(-1, _logits.size(-1)),
+                    _labels.view(-1),
+                    ignore_index=-100, reduction="none",
+                )
+                _valid = (_labels.view(-1) != -100)
+                _valid_losses = _per_tok[_valid]
+                _k = max(1, int(_valid_losses.numel() * _sel_ratio))
+                _topk, _ = _valid_losses.topk(_k)
+                loss_lm = _topk.mean()
+                # 替换 total loss = selective_lm + aux
+                _total_lm = loss_lm + aux_loss
+            else:
+                loss_lm = res.loss - aux_loss
+                _total_lm = res.loss
 
             # ── Phase 2+: 压缩区辅助 loss ──────────────────────────────────
             loss_compress_val = 0.0
@@ -530,10 +591,10 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                 loss_compress = F.cross_entropy(
                     x_c.view(-1, x_c.size(-1)), y_c.view(-1), ignore_index=-100
                 )
-                loss = (res.loss + compress_weight * loss_compress) / args.accumulation_steps
+                loss = (_total_lm + compress_weight * loss_compress) / args.accumulation_steps
                 loss_compress_val = loss_compress.item()
             else:
-                loss = res.loss / args.accumulation_steps
+                loss = _total_lm / args.accumulation_steps
 
         scaler.scale(loss).backward()
 
@@ -580,6 +641,7 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             "scalar_lr": scalar_lr,
             "matrix_lr": matrix_lr,
             "exit_loops": _exit_loops,
+            "selective_ratio": _sel_ratio,
             "elapsed_s": round(time.time() - start_time, 1),
             **grad_metrics,
         }
@@ -634,7 +696,7 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             if exit_loops is not None:
                 exit_depth_tracker.update(step, exit_loops)
 
-        if step % args.dod_interval == 0 or step == args.iters:
+        if args.dod_interval > 0 and (step % args.dod_interval == 0 or step == args.iters):
             snap_grad = grad_tracker.analyze()
             snap_ct = ct_tracker.analyze()
             snap_layer = layer_grad_tracker.analyze()
@@ -732,8 +794,8 @@ if __name__ == "__main__":
     parser.add_argument("--phase", type=int, default=0, choices=[0, 1, 2, 3, 35, 4, 5, 6],
                         help="当前阶段。35=Phase 3.5, 4=+self_check, 5=+ct_grad_scale(废弃), 6=+world_jepa")
     # ── training ───────────────────────────────────────────────────────────
-    parser.add_argument("--iters", type=int, default=1500,
-                        help="总训练步数（非 epoch）")
+    parser.add_argument("--iters", type=int, default=642,
+                        help="总训练步数（非 epoch）— 默认 3 epoch (214 步/epoch × 3)")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--accumulation_steps", type=int, default=1)
     parser.add_argument("--grad_clip", type=float, default=1.0)
@@ -829,10 +891,73 @@ if __name__ == "__main__":
     parser.add_argument("--exit_train_use_sampling", type=int, default=1)
     parser.add_argument("--exit_eval_use_sampling", type=int, default=0)
     parser.add_argument("--exit_sampling_temperature", type=float, default=1.0)
+    parser.add_argument("--exit_score_threshold", type=float, default=0.85,
+                        help="Exit score threshold for non-sampling mode (higher=more conservative)")
     parser.add_argument("--exit_second_order_delta_weight", type=float, default=0.0,
                         help="Exit policy: weight on second-order delta_h convergence signal (0=disabled)")
     parser.add_argument("--exit_aux_weight", type=float, default=0.0,
                         help="Exit auxiliary loss weight (0=disabled, 推荐 0.01-0.05)")
+    parser.add_argument("--exit_min_loops", type=int, default=2,
+                        help="Minimum loops before exit is allowed")
+    parser.add_argument("--exit_bias_init", type=float, default=0.0,
+                        help="Initial bias for exit logit (negative = stay longer)")
+    parser.add_argument("--exit_warmup_steps", type=int, default=0,
+                        help="Training steps during which exit is disabled (force full loops)")
+    parser.add_argument("--exit_ct_drift_weight", type=float, default=0.0,
+                        help="Exit: weight on c_t drift signal (higher = stay longer when c_t changing)")
+    parser.add_argument("--identity_recurrence_alpha", type=float, default=0.0,
+                        help="Identity-biased recurrence: 0=off, 0.8=blend 80%% new + 20%% old h")
+    parser.add_argument("--exit_entropy_weight", type=float, default=0.0,
+                        help="Ouro: maximize exit score entropy to prevent exit collapse")
+    parser.add_argument("--loop_lm_loss_weight", type=float, default=0.0,
+                        help="RLTT: dense LM loss at each intermediate loop step")
+    parser.add_argument("--rltt_stride", type=int, default=2,
+                        help="RLTT: save h every N loops for dense loss (higher = less VRAM)")
+    parser.add_argument("--shortcut_consistency_weight", type=float, default=0.0,
+                        help="LoopFormer: KL-div consistency between short and full loop paths")
+    parser.add_argument("--enable_time_conditioning", type=int, default=0, choices=[0, 1],
+                        help="LoopFormer: inject normalized time t and step-size dt into reasoning loop")
+    parser.add_argument("--enable_coconut", type=int, default=0, choices=[0, 1],
+                        help="Coconut: c_t → thought token → re-inject into reasoning loop")
+    parser.add_argument("--coconut_rounds", type=int, default=1,
+                        help="Coconut: number of continuous thought re-injection rounds")
+    parser.add_argument("--loop_lora_rank", type=int, default=0,
+                        help="RS: per-loop LoRA rank on FFN (0=off)")
+    parser.add_argument("--enable_loop_ffn_gate", type=int, default=0, choices=[0, 1],
+                        help="RS: loop-dependent FFN gating")
+    parser.add_argument("--introspection_input_mode", type=str, default="mean",
+                        choices=["mean", "memory", "chunked", "chunked_memory"],
+                        help="IS: introspection input mode (mean/memory/chunked/chunked_memory)")
+    parser.add_argument("--introspection_memory_tokens", type=int, default=4,
+                        help="IS: number of memory tokens for memory input mode")
+    parser.add_argument("--introspection_inject_mode", type=str, default="broadcast",
+                        choices=["broadcast", "token_aware", "bixt", "cmda", "bixt_cmda"],
+                        help="IS: c_t injection mode (broadcast/token_aware/bixt/cmda/bixt_cmda)")
+    # NM: Neuromodulated c_t writer
+    parser.add_argument("--enable_neuromod_ct", type=int, default=0, choices=[0, 1],
+                        help="NM: enable neuromodulated c_t writer")
+    parser.add_argument("--neuromod_hebb_rank", type=int, default=8,
+                        help="NM: rank for Hebbian outer product approximation")
+    parser.add_argument("--neuromod_use_delta_rule", type=int, default=0, choices=[0, 1],
+                        help="NM: use Delta Rule to reduce Hebbian interference")
+    parser.add_argument("--neuromod_mode", type=str, default="surprise",
+                        choices=["surprise", "learned", "ponder", "multi", "jepa_surprise"],
+                        help="NM: modulation mode (surprise/learned/ponder/multi/jepa_surprise)")
+    # ES: Enhanced exit signals
+    parser.add_argument("--enable_pc_correction", type=int, default=0, choices=[0, 1],
+                        help="PC: predictive coding error correction in reasoning loop")
+    parser.add_argument("--pc_alpha", type=float, default=0.1,
+                        help="PC: error correction strength (0.1=gentle)")
+    parser.add_argument("--enable_exit_entropy_signal", type=int, default=0, choices=[0, 1],
+                        help="ES: entropy proxy for exit decision")
+    parser.add_argument("--enable_exit_token_sensitivity", type=int, default=0, choices=[0, 1],
+                        help="ES: per-token delta sensitivity for exit")
+    parser.add_argument("--enable_exit_ct_curvature", type=int, default=0, choices=[0, 1],
+                        help="ES: c_t trajectory curvature for exit")
+    parser.add_argument("--enable_exit_confidence_gap", type=int, default=0, choices=[0, 1],
+                        help="ES: confidence gap proxy for exit")
+    parser.add_argument("--enable_sigreg_rollout", type=int, default=0, choices=[0, 1],
+                        help="Enable SigReg on self-JEPA rollout predictions")
     # Reasoning partitioning
     parser.add_argument("--reason_num_phases", type=int, default=0,
                         help="Phase embedding: 0=disabled, >0=number of distinct phase embeddings for reasoning loops")
@@ -842,6 +967,15 @@ if __name__ == "__main__":
                         help="MoR: loop-conditioned expert routing after shared layers")
     parser.add_argument("--reason_mor_num_experts", type=int, default=4)
     parser.add_argument("--reason_mor_topk", type=int, default=2)
+    # True MoR: token-level depth routing (arxiv 2507.10524)
+    parser.add_argument("--enable_token_depth_routing", type=int, default=0, choices=[0, 1],
+                        help="True MoR: per-token depth routing, simple tokens exit early")
+    parser.add_argument("--mor_target_continue_ratio", type=float, default=0.6,
+                        help="Target fraction of tokens continuing per loop (balance loss target)")
+    parser.add_argument("--mor_balance_weight", type=float, default=0.01)
+    # Rho-1 Selective Loss
+    parser.add_argument("--selective_loss_ratio", type=float, default=1.0,
+                        help="Rho-1 风格：只对 top-k%% 高 loss token 训练 (1.0=全部, 0.6=top 60%%)")
     parser.add_argument("--use_compile", type=int, default=0, choices=[0, 1])
     parser.add_argument("--use_gradient_checkpointing", type=int, default=0, choices=[0, 1],
                         help="1=对 reason_core 每次循环做 gradient checkpointing，省~70%激活VRAM，速度约慢30%")

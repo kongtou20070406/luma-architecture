@@ -67,3 +67,4 @@ research-results.tsv
 # local compiled binaries
 **/*.cpython-*.so
 third_party/mamba-official/*.so
+minimind/artifacts/refactor/phase6_metrics.jsonl
