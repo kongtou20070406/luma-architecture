@@ -10,6 +10,8 @@ Input → FactorizedEmbedding → CompressionZone ──→ ReasoningLoop ──
                                    │              c_t (认知流)
                                    │              introspection (自省流)
                                    │              UnifiedAttnRes (回看)
+                                   │              Hebbian associative memory (赫布关联记忆)
+                                   │              PC error correction (预测编码修正)
                                    │                   ↑
                                    └── block_reprs ────┘
 ```
@@ -19,10 +21,13 @@ Input → FactorizedEmbedding → CompressionZone ──→ ReasoningLoop ──
 2. **CompressionZone** 单次前向，混合 SSM+Attention，输出压缩表征 + 各 block 的摘要 `block_reprs`
 3. **ReasoningLoop** 在压缩表征上循环推理（共享权重 × N 次），每轮：
    - 认知流 `c_t` 跨循环传递推理上下文
-   - 自省流监控推理健康度
+   - 自省流监控推理健康度，通过 Memory Token + CMDA 双向交互
+   - Hebbian associative memory: surprise-gated 赫布外积，防灾难性遗忘
+   - PC error correction: 自省流预测主流状态，误差修正主流
+   - Loop LoRA: per-loop 低秩适配，让每轮循环做不同计算
+   - Time Conditioning: 循环位置 [t, dt] 注入
    - MoR (Mixture-of-Recursions) per-token depth routing
    - UnifiedAttnRes 回看 `block_reprs`（压缩区记忆）和 `loop_history`（循环历史）
-   - Identity-biased recurrence 梯度高速公路
 4. **LM Head** 输出下一 token 概率
 
 **关键：CompressionZone 只执行一次，不参与循环。循环只发生在 ReasoningLoop 内部。**
@@ -34,50 +39,58 @@ Input → FactorizedEmbedding → CompressionZone ──→ ReasoningLoop ──
 | **压缩区** (Compression Zone) | Mamba3 MIMO + SWA/DiffAttn | 16 层混合架构，~90% SSM + ~10% Attention |
 | **推理区** (Reasoning Zone) | 权重共享 Mamba3 + DiffAttn | 4 层共享，循环最多 20 次 |
 | **认知流** (c_t stream) | 64-dim 持续状态 | 跨循环传递推理上下文 |
-| **自省流** (Introspection) | 元认知 Mamba3 | 监控推理健康度，产出 know_gap 和 c_t |
-| **UnifiedAttnRes** | 注意力残差 | 回看压缩区 block 摘要 + 循环历史 |
-| **Self-JEPA** | 残差预测器 + SigReg ct | 自监督：预测下一循环的隐藏状态变化 |
+| **自省流** (Introspection) | Memory Token K=4 + Mamba3 | 选择性读取主流 → Mamba 序列建模 → c_t |
+| **赫布关联记忆** (Hebbian) | rank=32 低秩双线性映射 | surprise × hebb(δh ⊗ prev_c_t) → Δc_t |
+| **预测编码** (PC) | c_t → pred_h → error correction | 抑制已知部分，保留新信息 |
+| **CMDA** | 双向通道调制 | c_t→sigmoid gate 调制主流 + spatial attention 回传自省流 |
+| **Loop LoRA** | rank=32 per-loop adaptation | Embedding(max_loops, D×rank) 让每轮循环差异化 |
+| **Self-JEPA** | 残差预测器 + SigReg ct | 自监督：预测 c_t 的变化量 |
 | **World-JEPA** | 潜空间世界模型 | 学习 token 序列的因果结构 |
-| **ExitController** | 二阶差分退出 | 推理循环自适应退出，省计算 |
+| **ExitController** | 多信号退出 + JEPA surprise | 推理循环自适应退出 |
 | **MoR** (Token Depth Routing) | Gumbel-Sigmoid per-token mask | 简单 token 早退出，难 token 继续循环 |
-| **MHC** | 多头通道残差流 | Sinkhorn 路由的多条并行残差流 |
 
 ### 关键技术选择
 
 - **Mamba3 MIMO**: rank=2, chunk=32, TileLang kernel (Blackwell GPU 优化)
-- **SDPA Flash Attention**: PyTorch 2.11 F.scaled_dot_product_attention，自动选择 flash backend
-- **FP8 混精度**: 187 Linear layers FP8 forward, BF16 backward
+- **SDPA Flash Attention**: PyTorch 2.11 F.scaled_dot_product_attention
+- **FP8 混精度**: ~130 Linear layers FP8 forward, BF16 backward
 - **8-bit Muon + AdamW**: CPU offload 优化器状态
 
-## 当前状态 (2026-04-07)
+## 当前状态 (2026-04-08)
 
-**推荐架构 (A2)**:
-- 参数量: **~286M**
+**推荐架构 (CR5 + NM8)**:
+- 参数量: **~293M**
 - hidden=768, compression_layers=16, heads=12/3, reason_shared_depth=4
-- 相比旧架构 A1 (482M, c44_d2): **loss 降低 21.6%，参数减少 41%**
+- Time Conditioning + Loop LoRA rank=32 + Memory K=4 + CMDA
+- **Hebbian rank=32: loss -23.9%** (500 步实验)
 
 **实验矩阵进度**:
 
-| Matrix | 内容 | 状态 |
-|--------|------|------|
-| M0 | 架构定型 (4 配置对比) | 完成 — A1 胜出 |
-| M1 | World-JEPA 变体 (5 实验) | 完成 — B2' 胜出 (LeWM sig=0.10, mask=0.25) |
-| M2 | Exit Policy (6 实验) | 完成 — EX5 胜出 (20 loops + 2nd_order=0.3) |
-| M5 | 超参优化 (E0-E11) | 完成 — E9 胜出 (MoR + MHC3 + threshold=0.8) |
-| M7 | 吞吐优化 (GaLore) | 完成 |
-| M9 | AttnRes 变体 | 完成 — AR1 胜出 |
-| M10 | MHC 变体 | 完成 — MH4 胜出 |
-| **SJ** | **Self-JEPA 激活 (6 实验)** | **完成 — SJ1 胜出 (SigReg ct, -5.9%)** |
-| **CR** | **压缩/推理比例 (8 实验)** | **完成 — CR5 胜出 (c16_d4, -21.6%)** |
-| IR | Identity-Biased Recurrence | 下一步 |
+| Matrix | 内容 | 状态 | 最优 |
+|--------|------|------|------|
+| M0 | 架构定型 (4 配置) | 完成 | A1 → A2 (CR5) |
+| M1 | World-JEPA 变体 | 完成 | B2' (LeWM sig=0.10, mask=0.25) |
+| M2 | Exit Policy | 完成 | EX5 (20 loops + 2nd_order=0.3) |
+| M5 | 超参优化 | 完成 | E9 (MoR + MHC3 + threshold=0.8) |
+| CR | 压缩/推理比例 | 完成 | CR5 (c16_d4, **-21.6%**) |
+| SJ | Self-JEPA 激活 | 完成 | SJ1 (SigReg ct, **-5.9%**) |
+| IS | 自省流优化 (10 实验) | 完成 | IS9 (Memory K=4 + CMDA, **-15.6%**) |
+| RS | 推理结构 (9 实验) | 完成 | RS5 (LoRA rank=32, **-20%**) |
+| DP | 循环深度推送 (10 实验) | 完成 | DP2 (Time Conditioning, **-8.7%**) |
+| LD | 循环深度 v2 (10 实验) | 完成 | LD1 (bias=-1, avg=2.4 安全推深) |
+| **NM+ES** | **赫布+退出信号 (28 实验)** | **完成** | **NM8 (hebb32, -23.9%)** |
+| **PC** | **预测编码 (8 实验)** | **完成** | **PC7 (PC+hebb32, -11.5%)** |
+| **Long** | **1000 步长训练验证** | **进行中** | 待定 |
 
-**核心发现**（2026-04-07）：
-- 原 44 层压缩区过重，是推理循环深度坍缩（avg_loops=2）的主要根因
-- 砍到 16 层压缩 + 4 层推理 depth → 286M 参数碾压 482M
-- SigReg ct 防坍缩为 Self-JEPA 带来 -5.9% loss 改善
-- c_t drift 参与退出决策全面失败，循环深度不受退出信号影响
+**核心发现**（2026-04-08）：
+- **Hebbian rank=32 是全场最强单项改进 (-23.9%)**，核心价值是防灾难性遗忘
+- Rank 消融呈双峰：rank=16 (-14.9%) 和 rank=32 (-23.9%) 是两个峰，中间 rank=20/24 塌陷
+- FUSE 组合全军覆没：hebb32 单独最强，叠加 ES 信号反而干扰 (+16~24%)
+- PC 符号修正后和 hebb 协同：PC(修正)+hebb32 = -11.5%（修正前 +3.5%）
+- 自省流瓶颈（mean pool + 1536→96 压缩）是循环坍缩的主因之一
+- warmup=200 可训出 avg=8.6 深循环，但需要配合赫布才有用
 
-详见 [循环深度坍缩分析报告](docs/reports/Loop_Depth_Collapse_Analysis_20260407.md)
+详见 [赫布可塑性分析报告](docs/reports/Hebbian_Neuromodulation_Analysis_20260408.md) | [循环深度坍缩分析](docs/reports/Loop_Depth_Collapse_Analysis_20260407.md)
 
 ## 项目结构
 
@@ -86,21 +99,18 @@ luma-architecture/
 ├── docs/
 │   ├── plans/          # 执行计划
 │   ├── reports/        # 实验报告
-│   ├── research/       # 研究调研
 │   └── reference/      # 参考文档
 ├── minimind/
 │   ├── model/
-│   │   ├── model_minimind.py   # Luma 主模型 (~3800 LOC)
+│   │   ├── model_minimind.py   # Luma 主模型 (~4500 LOC)
 │   │   ├── mamba3_module.py    # Mamba3 MIMO wrapper
 │   │   └── fp8_linear.py       # FP8 混精度 Linear
 │   ├── trainer/
 │   │   └── train_luma_refactor.py  # 训练脚本
 │   ├── scripts/        # 实验矩阵脚本
-│   ├── luma_stage0/    # 优化器、动力学分析
 │   └── artifacts/      # 训练产物（metrics, dynamics）
 ├── luma_dataset/
 │   ├── synthetic/      # 公开数据集 (math, code, scifi, etc.)
-│   ├── fetch_*.py      # 数据拉取脚本
 │   └── rebuild_mixes.py # DataMix 重建
 └── third_party/
     └── mamba-official/ # Mamba3 TileLang/Triton kernels
@@ -109,10 +119,9 @@ luma-architecture/
 ## 快速开始
 
 ```bash
-# 环境
-# Python 3.12, PyTorch 2.11+, CUDA 12.8+, RTX 5090 (32GB)
+# 环境: Python 3.12, PyTorch 2.11+, CUDA 12.8+, RTX 5090 (32GB)
 
-# 训练 (必须从 trainer/ 目录运行)
+# 推荐配置 (IS9 + NM8)
 cd minimind/trainer
 python train_luma_refactor.py \
   --hidden_size 768 --compression_layers 16 \
@@ -120,20 +129,23 @@ python train_luma_refactor.py \
   --reason_shared_depth 4 --mamba_chunk_size 32 \
   --max_seq_len 2048 --batch_size 1 --reason_loops 20 \
   --fp8 1 --use_gradient_checkpointing 1 \
-  --cpu_offload_optimizer 1 \
-  --phase 6 \
+  --cpu_offload_optimizer 1 --phase 6 \
   --world_jepa_mode full --world_sigreg_weight 0.10 --world_mask_ratio 0.25 \
   --enable_sigreg_ct 1 --sigreg_ct_weight 0.05 \
   --exit_aux_weight 0.01 --exit_second_order_delta_weight 0.3 \
-  --enable_token_depth_routing 1 --mor_target_continue_ratio 0.7
+  --enable_token_depth_routing 1 --mor_target_continue_ratio 0.7 \
+  --enable_time_conditioning 1 --loop_lora_rank 32 \
+  --introspection_input_mode memory --introspection_memory_tokens 4 \
+  --introspection_inject_mode cmda \
+  --enable_neuromod_ct 1 --neuromod_mode surprise --neuromod_hebb_rank 32
 ```
 
 ## 研究方向
 
-1. **循环深度扩展** — Identity-biased recurrence + shortcut-consistency training
-2. **压缩/推理比例优化** — 16 层压缩 + 4 层推理是当前甜区，继续探索
-3. **DataMix V5** — 目标 ~1B tokens，60% 推理数据
-4. **推理时 A* 搜索** — 部署时 286M 逼近 2B 推理质量
+1. **赫布+PC 协同** — 修正版 PC 和赫布协同防遗忘，长训练验证中
+2. **Warmup + Hebbian** — warmup 训出深循环能力，赫布让深循环有用
+3. **推理时 PC** — 不改训练，推理循环内用 PC 收敛检测替代 learned exit
+4. **自省流 v2** — 滑窗注意力补充 SSM、NTM-style slot memory
 
 ## 数据原则
 
@@ -143,23 +155,10 @@ python train_luma_refactor.py \
 - persona + empathy: >= 25% (红线)
 - dialogue: 15-20%
 
-## 不包含的内容
-
-- `luma_dataset/persona_seed/` 私有语料
-- 训练权重 / checkpoint / `*.pth`
-- 本地虚拟环境和缓存
-
-## 推荐阅读顺序
-
-1. [循环深度坍缩分析](docs/reports/Loop_Depth_Collapse_Analysis_20260407.md) — 最新核心发现
-2. [Matrix2 Exit Policy 报告](docs/reports/Matrix2_ExitPolicy_Report_20260406.md) — 退出策略实验
-3. `minimind/model/model_minimind.py` — 核心模型实现
-4. `minimind/trainer/train_luma_refactor.py` — 训练流程
-
 ## 硬件环境
 
 - WSL2 + RTX 5090 (32GB VRAM)
-- A2 架构 (c16_d4): seq=2048 bs=1, ~10 GB peak
+- CR5 + NM8: seq=2048 bs=1, ~10 GB peak VRAM
 - Mamba3 TileLang kernel 需要 Blackwell 架构 GPU
 
 ## License
