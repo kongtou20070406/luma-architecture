@@ -133,7 +133,7 @@ class Mamba3(nn.Module):
         self.out_proj = nn.Linear(self.d_inner, self.d_model, bias=False, **factory_kwargs)
 
 
-    def forward(self, u, seq_idx=None, cu_seqlens=None, inference_params=None):
+    def forward(self, u, seq_idx=None, cu_seqlens=None, inference_params=None, dt_external_bias=None):
         """
         u: (batch, seqlen, hidden_dim)
         Returns: same shape as u
@@ -171,7 +171,10 @@ class Mamba3(nn.Module):
         # Compute ADT, DT
         _A = -F.softplus(dd_A.to(torch.float32)) # (B, L, N)
         _A = torch.clamp(_A, max=-self.A_floor)            
-        DT = F.softplus(dd_dt + self.dt_bias) # (B, L, N)
+        _dt_input = dd_dt + self.dt_bias
+        if dt_external_bias is not None:
+            _dt_input = _dt_input + dt_external_bias  # c_t 调制 SSM 时间步长
+        DT = F.softplus(_dt_input) # (B, L, N)
         ADT = _A * DT
         DT = rearrange(DT, "b l n -> b n l")
         ADT = rearrange(ADT, "b l n -> b n l")

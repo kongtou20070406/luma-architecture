@@ -104,15 +104,15 @@ class Mamba3Block(nn.Module):
         self.dropout = nn.Dropout(cfg.dropout)
         self._mimo_disabled_runtime = False
 
-    def _run_mamba(self, x: torch.Tensor) -> torch.Tensor:
+    def _run_mamba(self, x: torch.Tensor, dt_external_bias=None) -> torch.Tensor:
         """Run the appropriate Mamba path (SISO or MIMO with fallback)."""
         if self.training and self.mamba_siso is not None:
-            return self.mamba_siso(x)
+            return self.mamba_siso(x, dt_external_bias=dt_external_bias)
         elif self._mimo_disabled_runtime and self.mamba_siso is not None:
-            return self.mamba_siso(x)
+            return self.mamba_siso(x, dt_external_bias=dt_external_bias)
         else:
             try:
-                return self.mamba(x)
+                return self.mamba(x, dt_external_bias=dt_external_bias)
             except Exception as err:
                 is_mimo_error = (
                     self.cfg.auto_fallback_on_mimo_error
@@ -138,16 +138,17 @@ class Mamba3Block(nn.Module):
                 print(f"\n{'='*60}\n{msg}\n{'='*60}\n", flush=True)
                 return self.mamba_siso(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, dt_external_bias=None) -> torch.Tensor:
         residual = x
         x = self.pre_norm(x)
-        # Gradient checkpointing: recompute Mamba forward during backward to save VRAM.
-        # Without this, SISO backward buffers accumulate to >3GB at seq>=2048.
-        # Must use use_reentrant=True because Mamba3 backward unpacks saved_tensors multiple times.
         if self.cfg.use_gradient_checkpointing and self.training:
-            x = torch_checkpoint(self._run_mamba, x, use_reentrant=True)
+            if dt_external_bias is not None:
+                # dt_external_bias 需要 detach 后重新 requires_grad，避免 reentrant checkpoint 冲突
+                x = self._run_mamba(x, dt_external_bias=dt_external_bias)
+            else:
+                x = torch_checkpoint(self._run_mamba, x, use_reentrant=True)
         else:
-            x = self._run_mamba(x)
+            x = self._run_mamba(x, dt_external_bias=dt_external_bias)
         x = self.post_norm(x)
         x = self.dropout(x)
         return residual + x

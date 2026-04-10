@@ -192,13 +192,23 @@ exit_logit = bias + Σ(weight_i × signal_i) - gain_weight × predicted_gain
 - **FP8 混精度**: ~130 Linear layers FP8 forward, BF16 backward
 - **8-bit Muon + AdamW**: CPU offload 优化器状态
 
-## 当前状态 (2026-04-08)
+## 当前状态 (2026-04-10)
 
-**推荐架构 (CR5 + NM8)**:
-- 参数量: **~293M**
+**推荐架构 (G0 = IS9 + NM8 + jepa_surprise)**:
+- 参数量: **~293M** (FP8 forward)
 - hidden=768, compression_layers=16, heads=12/3, reason_shared_depth=4
 - Time Conditioning + Loop LoRA rank=32 + Memory K=4 + CMDA
-- **Hebbian rank=32: loss -23.9%** (500 步实验)
+- Hebbian rank=32 + JEPA surprise + c_t RMSNorm + cosine decay
+
+**G0 baseline** (2000步, loss=5.53):
+| 指标 | 值 | 说明 |
+|------|-----|------|
+| loss_lm | 5.53 | 最优 |
+| h_diversity | 0.33 | 自发涌现，不需人为干预 |
+| ct_perp | 0.01-0.05 | c_t 方向稳定（人格特征，非缺陷） |
+| L_est | 0.5-0.7 | 健康收缩率 |
+| DOD rank | 5→7 | 梯度方向多样性 |
+| VRAM | ~20 GB | FP8 + checkpoint + CPU offload |
 
 **实验矩阵进度**:
 
@@ -208,25 +218,38 @@ exit_logit = bias + Σ(weight_i × signal_i) - gain_weight × predicted_gain
 | M1 | World-JEPA 变体 | 完成 | B2' (LeWM sig=0.10, mask=0.25) |
 | M2 | Exit Policy | 完成 | EX5 (20 loops + 2nd_order=0.3) |
 | M5 | 超参优化 | 完成 | E9 (MoR + MHC3 + threshold=0.8) |
-| CR | 压缩/推理比例 | 完成 | CR5 (c16_d4, **-21.6%**) |
-| SJ | Self-JEPA 激活 | 完成 | SJ1 (SigReg ct, **-5.9%**) |
-| IS | 自省流优化 (10 实验) | 完成 | IS9 (Memory K=4 + CMDA, **-15.6%**) |
-| RS | 推理结构 (9 实验) | 完成 | RS5 (LoRA rank=32, **-20%**) |
-| DP | 循环深度推送 (10 实验) | 完成 | DP2 (Time Conditioning, **-8.7%**) |
+| CR | 压缩/推理比例 | 完成 | CR5 (c16_d4, -21.6%) |
+| SJ | Self-JEPA 激活 | 完成 | SJ1 (SigReg ct, -5.9%) |
+| IS | 自省流优化 (10 实验) | 完成 | IS9 (Memory K=4 + CMDA, -15.6%) |
+| RS | 推理结构 (9 实验) | 完成 | RS5 (LoRA rank=32, -20%) |
+| DP | 循环深度推送 (10 实验) | 完成 | DP2 (Time Conditioning, -8.7%) |
 | LD | 循环深度 v2 (10 实验) | 完成 | LD1 (bias=-1, avg=2.4 安全推深) |
-| **NM+ES** | **赫布+退出信号 (28 实验)** | **完成** | **NM8 (hebb32, -23.9%)** |
-| **PC** | **预测编码 (8 实验)** | **完成** | **PC7 (PC+hebb32, -11.5%)** |
-| **Long** | **1000 步长训练验证** | **进行中** | 待定 |
+| NM+ES | 赫布+退出信号 (28 实验) | 完成 | NM8 (hebb32, -23.9%) |
+| PC | 预测编码 (8 实验) | 完成 | PC7 (PC+hebb32, -11.5%) |
+| **H/I/J/K** | **循环动力学筛选 (20+ 实验)** | **完成** | **G0 (无干预最优)** |
+| **H/I/J/K/M** | **循环动力学 + per-layer 注入 (25+ 实验)** | **完成** | **G0 (无干预最优)** |
+| **G0 长训** | **0.5 epoch 预训练 (v5 330M tokens)** | **进行中** | 40222 steps, ~10h |
 
-**核心发现**（2026-04-08）：
-- **Hebbian rank=32 是全场最强单项改进 (-23.9%)**，核心价值是防灾难性遗忘
-- Rank 消融呈双峰：rank=16 (-14.9%) 和 rank=32 (-23.9%) 是两个峰，中间 rank=20/24 塌陷
-- FUSE 组合全军覆没：hebb32 单独最强，叠加 ES 信号反而干扰 (+16~24%)
-- PC 符号修正后和 hebb 协同：PC(修正)+hebb32 = -11.5%（修正前 +3.5%）
-- 自省流瓶颈（mean pool + 1536→96 压缩）是循环坍缩的主因之一
-- warmup=200 可训出 avg=8.6 深循环，但需要配合赫布才有用
+**核心发现**（2026-04-10）：
 
-详见 [赫布可塑性分析报告](docs/reports/Hebbian_Neuromodulation_Analysis_20260408.md) | [循环深度坍缩分析](docs/reports/Loop_Depth_Collapse_Analysis_20260407.md)
+**c_t = 人格/情绪，不是工作记忆。** 这是今天最重要的范式转换。
+
+c_t 的方向稳定性（ct_perp≈0.01）不是需要修复的缺陷，而是人格的正确行为：
+- **c_t 方向** = 人格（稳定，不随推理步变化 — 你做数学题时性格不会变）
+- **c_t 范数增长**（8→302）= 人格随经验增强（训练越久，个性越鲜明）
+- **h** = 工作记忆（h_diversity=0.33，每轮循环方向在变 — spiral refinement 就是思考过程）
+- **赫布写入** = 人格强化（surprise × hebb(δh ⊗ prev_c_t) 强化既有人格方向）
+- **PC 误差** = 情绪反应（pred_h - h = 人格视角下的预期违背）
+- **Loop LoRA** = 思考阶段（per-loop 差异化 = 工作记忆的分阶段处理）
+
+这解释了为什么所有强迫 c_t 方向变化的实验都恶化 loss — 相当于强迫模型每步换人格。G0（零干预）最优是因为人格稳定本来就是对的。
+
+其他发现：
+- h_diversity=0.33 自发涌现，不需人为干预
+- 五个核心动力学方程已建立（收缩率、不动点敏感度、相变边界、β 架构公式、ct_perp 演化）
+- 相变边界 α_crit≈0.04-0.05，非线性系数 γ≈200-250
+
+详见 [4.10 进展报告](docs/reports/Progress_Report_20260410.md) | [赫布可塑性分析](docs/reports/Hebbian_Neuromodulation_Analysis_20260408.md) | [动力学分析技能](../Luma_Dynamics_Analysis_Skill.md)
 
 ## 项目结构
 
@@ -278,10 +301,10 @@ python train_luma_refactor.py \
 
 ## 研究方向
 
-1. **赫布+PC 协同** — 修正版 PC 和赫布协同防遗忘，长训练验证中
-2. **Warmup + Hebbian** — warmup 训出深循环能力，赫布让深循环有用
-3. **推理时 PC** — 不改训练，推理循环内用 PC 收敛检测替代 learned exit
-4. **自省流 v2** — 滑窗注意力补充 SSM、NTM-style slot memory
+1. **长程预训练** — G0 配置跑完整 v5 (532M tokens)，验证模型质量（进行中，0.5 epoch ~10h）
+2. **人格注入** — 推理时初始化 c_t 方向 = 选择 persona，无需改训练
+3. **per-layer c_t 注入** — 加强人格渗透力（当前单次注入被 ρ⁴ 衰减），需解决梯度路径 OOM
+4. **acceleration-based exit** — 用 h 轨迹几何判断替代/辅助 learned exit
 
 ## 数据原则
 

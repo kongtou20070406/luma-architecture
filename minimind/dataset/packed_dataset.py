@@ -52,6 +52,10 @@ class PackedPretrainDataset(Dataset):
         shuffle_docs: bool = True,
         min_doc_tokens: int = 4,
     ):
+        import hashlib
+        import os
+        import torch
+        from pathlib import Path
         from datasets import load_dataset
 
         self.tokenizer = tokenizer
@@ -60,23 +64,48 @@ class PackedPretrainDataset(Dataset):
         self.eos_id = tokenizer.eos_token_id
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
-        # 读取并 tokenize 所有文档
+        # 缓存机制：hash(resolved_path + max_length) → .pt 文件
+        resolved_path = str(Path(data_path).resolve())
+        data_hash = hashlib.md5(f"{resolved_path}_{max_length}_{min_doc_tokens}".encode()).hexdigest()[:12]
+        cache_dir = Path(resolved_path).parent / ".pack_cache"
+        cache_dir.mkdir(exist_ok=True)
+        cache_path = cache_dir / f"packed_{data_hash}.pt"
+
+        if cache_path.exists():
+            print(f"PackedDataset: loading cache {cache_path}")
+            cached = torch.load(cache_path, weights_only=False)
+            self.packed_sequences = cached["packed_sequences"]
+            print(f"PackedDataset: {len(self.packed_sequences)} packs (cached)")
+            return
+
+        # 多线程 tokenize
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import multiprocessing as mp
+
         raw = load_dataset("json", data_files=data_path, split="train")
+        texts = [str(s.get("text", "")).strip() for s in raw]
+        texts = [t for t in texts if t]
+        print(f"PackedDataset: tokenizing {len(texts)} docs with {min(mp.cpu_count(), 16)} workers...")
+
+        # batch tokenize（比逐条快很多）
+        batch_size = 1000
         all_docs: List[List[int]] = []
-        for sample in raw:
-            text = str(sample.get("text", "")).strip()
-            if not text:
-                continue
-            ids = tokenizer(
-                text,
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            encoded = tokenizer(
+                batch,
                 add_special_tokens=False,
                 truncation=False,
-            ).input_ids
-            if len(ids) < min_doc_tokens:
-                continue
-            # 每篇文档: [BOS] + tokens + [EOS]
-            doc = [self.bos_id] + ids + [self.eos_id]
-            all_docs.append(doc)
+            )
+            for ids in encoded.input_ids:
+                if len(ids) < min_doc_tokens:
+                    continue
+                doc = [self.bos_id] + ids + [self.eos_id]
+                all_docs.append(doc)
+            if (i // batch_size) % 50 == 0 and i > 0:
+                print(f"  tokenized {i}/{len(texts)} ({i*100//len(texts)}%)")
+
+        print(f"PackedDataset: {len(all_docs)} docs tokenized")
 
         if shuffle_docs:
             random.shuffle(all_docs)
@@ -84,6 +113,10 @@ class PackedPretrainDataset(Dataset):
         # 打包：把多个文档拼成 max_length 的序列
         self.packed_sequences: List[Tuple[List[int], List[int]]] = []
         self._pack(all_docs)
+
+        # 保存缓存
+        torch.save({"packed_sequences": self.packed_sequences}, cache_path)
+        print(f"PackedDataset: saved cache → {cache_path} ({os.path.getsize(cache_path)/1e6:.0f}MB)")
 
     # ------------------------------------------------------------------
     def _pack(self, docs: List[List[int]]) -> None:

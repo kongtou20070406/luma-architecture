@@ -394,7 +394,7 @@ def render_dynamics_report(
         "energy_mode1_pct_trajectory": [round(v, 1) for v in energy_m1],
         "dmd_spectral_radius_trajectory": [round(v, 4) for v in dmd_radii],
         "ct_dmd_spectral_radius_trajectory": [round(v, 4) for v in ct_radii],
-        "verdict": _verdict(final.get("dod_rank", -1), final.get("energy_mode1_pct", 100.0), phase),
+        "verdict_v1": "(deprecated — use v2_verdict)",  # v1 三维 POD 上限=3，已无诊断价值
         "full_snapshots": grad_history,
     }
 

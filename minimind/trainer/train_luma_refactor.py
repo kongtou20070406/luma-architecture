@@ -157,6 +157,7 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         exit_min_loops=getattr(args, "exit_min_loops", 2),
         exit_bias_init=getattr(args, "exit_bias_init", 0.0),
         exit_warmup_steps=getattr(args, "exit_warmup_steps", 0),
+        exit_progressive_warmup=getattr(args, "exit_progressive_warmup", 0),
         exit_ct_drift_weight=getattr(args, "exit_ct_drift_weight", 0.0),
         identity_recurrence_alpha=getattr(args, "identity_recurrence_alpha", 0.0),
         exit_entropy_weight=getattr(args, "exit_entropy_weight", 0.0),
@@ -171,6 +172,8 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         introspection_input_mode=getattr(args, "introspection_input_mode", "mean"),
         introspection_memory_tokens=getattr(args, "introspection_memory_tokens", 4),
         introspection_inject_mode=getattr(args, "introspection_inject_mode", "broadcast"),
+        enable_introspection_swa=bool(getattr(args, "enable_introspection_swa", 0)),
+        neuromod_fox_decay=bool(getattr(args, "neuromod_fox_decay", 0)),
         enable_neuromod_ct=bool(getattr(args, "enable_neuromod_ct", 0)),
         neuromod_hebb_rank=getattr(args, "neuromod_hebb_rank", 8),
         neuromod_use_delta_rule=bool(getattr(args, "neuromod_use_delta_rule", 0)),
@@ -323,6 +326,19 @@ def build_phase4_config(args: argparse.Namespace) -> LumaConfig:
         enable_sigreg_rollout=False,
         enable_sigreg_ct=bool(getattr(args, "enable_sigreg_ct", 0)),
         sigreg_ct_weight=getattr(args, "sigreg_ct_weight", 0.05),
+        loop_sigreg_weight=getattr(args, "loop_sigreg_weight", 0.0),
+        ct_injection_mode=getattr(args, "ct_injection_mode", "add"),
+        jepa_predictor_dropout=getattr(args, "jepa_predictor_dropout", 0.0),
+        cmda_token_wish=bool(getattr(args, "cmda_token_wish", 0)),
+        ct_gated_attn=bool(getattr(args, "ct_gated_attn", 0)),
+        ct_conditioned_lora=bool(getattr(args, "ct_conditioned_lora", 0)),
+        ct_delta_inject=bool(getattr(args, "ct_delta_inject", 0)),
+        ct_inject_scale=getattr(args, "ct_inject_scale", 1.0),
+        ct_per_layer_inject=bool(getattr(args, "ct_per_layer_inject", 0)),
+        delta_h_scale=getattr(args, "delta_h_scale", 0.0),
+        delta_h_normalize=bool(getattr(args, "delta_h_normalize", 0)),
+        cos_sigreg_weight=getattr(args, "cos_sigreg_weight", 0.0),
+        ct_momentum=getattr(args, "ct_momentum", 0.0),
         sigreg_delta_weight=args.sigreg_delta_weight,
         sigreg_num_slices=128,
         sigreg_t_min=0.2,
@@ -403,6 +419,19 @@ def build_phase6_config(args: argparse.Namespace) -> LumaConfig:
         enable_sigreg_ct=bool(getattr(args, "enable_sigreg_ct", 0)),
         sigreg_delta_weight=args.sigreg_delta_weight,
         sigreg_ct_weight=getattr(args, "sigreg_ct_weight", 0.05),
+        loop_sigreg_weight=getattr(args, "loop_sigreg_weight", 0.0),
+        ct_injection_mode=getattr(args, "ct_injection_mode", "add"),
+        jepa_predictor_dropout=getattr(args, "jepa_predictor_dropout", 0.0),
+        cmda_token_wish=bool(getattr(args, "cmda_token_wish", 0)),
+        ct_gated_attn=bool(getattr(args, "ct_gated_attn", 0)),
+        ct_conditioned_lora=bool(getattr(args, "ct_conditioned_lora", 0)),
+        ct_delta_inject=bool(getattr(args, "ct_delta_inject", 0)),
+        ct_inject_scale=getattr(args, "ct_inject_scale", 1.0),
+        ct_per_layer_inject=bool(getattr(args, "ct_per_layer_inject", 0)),
+        delta_h_scale=getattr(args, "delta_h_scale", 0.0),
+        delta_h_normalize=bool(getattr(args, "delta_h_normalize", 0)),
+        cos_sigreg_weight=getattr(args, "cos_sigreg_weight", 0.0),
+        ct_momentum=getattr(args, "ct_momentum", 0.0),
         sigreg_rollout_weight=getattr(args, "sigreg_rollout_weight", 0.05),
         sigreg_num_slices=128,
         sigreg_t_min=0.2,
@@ -537,10 +566,16 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
+    # ── 动力学监控：区间峰值 loops、loss EMA、步计时 ──
+    interval_max_loops = 0       # 改进 #1: log_interval 内的最大循环数
+    loss_ema = None              # 改进 #2: loss 滑动平均
+    step_start_time = time.time()  # 改进 #6: 每步计时
+
     for input_ids, labels in _infinite_loader(loader):
         step += 1
         if step > args.iters:
             break
+        step_start_time = time.time()  # 改进 #6: 每步开始计时
         model.model.exit_controller._global_step = step
 
         input_ids = input_ids.to(args.device)
@@ -628,9 +663,24 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
         scalar_lr = next(g["lr"] for g in optimizer.param_groups if g.get("optim_family") == "adamw")
         matrix_lr = next(g["lr"] for g in optimizer.param_groups if g.get("optim_family") == "muon")
 
+        # 改进 #5: NaN watchdog — loss 异常时立即停止训练
+        if not math.isfinite(current_loss):
+            Logger(f"⚠ NaN/Inf detected at step {step}, loss={current_loss}, stopping training")
+            break
+
+        # 改进 #2: loss 滑动平均 (EMA, alpha=0.01)
+        loss_ema = 0.99 * loss_ema + 0.01 * current_loss if loss_ema is not None else current_loss
+
         # ── Exit depth tracking ──────────────────────────────────────────
         _last_aux = getattr(getattr(model, "_orig_mod", model), "last_aux", {})
         _exit_loops = _last_aux.get("executed_loops", 0)
+
+        # 改进 #1: 区间峰值 loops
+        interval_max_loops = max(interval_max_loops, _exit_loops)
+
+        # 改进 #6: 训练速度（tok/s）
+        _step_elapsed = max(time.time() - step_start_time, 1e-6)
+        _tok_per_sec = int(args.batch_size * args.accumulation_steps * args.max_seq_len / _step_elapsed)
 
         record = {
             "step": step,
@@ -659,12 +709,63 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             )
             compress_line = f"  loss_c={loss_compress_val:.4f}" if compress_weight > 0 else ""
             jepa_line = f"  loss_j={loss_jepa_val:.4f}" if loss_jepa_val > 0 else ""
-            exit_line = f"  loops={_exit_loops}/{args.reason_loops}" if _exit_loops > 0 else ""
+            # 改进 #3: World JEPA loss 单独显示
+            _world_jepa_eff = _last_aux.get("world_jepa_loss_effective")
+            _world_jepa_val = _world_jepa_eff.item() if _world_jepa_eff is not None and hasattr(_world_jepa_eff, "item") else (float(_world_jepa_eff) if _world_jepa_eff is not None else 0.0)
+            world_jepa_line = f"  loss_w={_world_jepa_val:.4f}" if _world_jepa_val > 0 else ""
+            # 改进 #1: peak loops + 改进 #2: ema + 改进 #6: tok/s
+            exit_line = f"  loops={_exit_loops}/{args.reason_loops}  peak={interval_max_loops}" if _exit_loops > 0 else ""
+            ema_line = f"  ema={loss_ema:.3f}" if loss_ema is not None else ""
+            speed_line = f"  tok/s={_tok_per_sec}"
             Logger(
-                f"[{step}/{args.iters}] loss_lm={loss_lm.item():.4f}{compress_line}{jepa_line}"
-                f"  scalar_lr={scalar_lr:.2e}  eta={eta:.1f}min{exit_line}"
+                f"[{step}/{args.iters}] loss_lm={loss_lm.item():.4f}{compress_line}{jepa_line}{world_jepa_line}"
+                f"  scalar_lr={scalar_lr:.2e}  eta={eta:.1f}min{exit_line}{ema_line}{speed_line}"
                 + grad_line
             )
+            # 改进 #1: 每次打印后重置 interval_max_loops
+            interval_max_loops = 0
+            # ── 动力学监控摘要 ──
+            _aux = _last_aux
+            if _aux.get("per_loop_delta_h"):
+                _dh_raw = _aux["per_loop_delta_h"]
+                _dh = [f"{x:.3f}" for x in _dh_raw]
+                _ct = [f"{x:.3f}" for x in _aux.get("per_loop_ct_change", [])]
+                _je = [f"{x:.3f}" for x in _aux.get("per_loop_jepa_err", [])]
+                # L_est: 每步都能算的收缩率估计 (δh[1]/δh[0])
+                _L_est = _dh_raw[1] / max(_dh_raw[0], 1e-8) if len(_dh_raw) >= 2 else 0.0
+                # ct_perp: c_t 变化方向和 c_t 自身的垂直度 (1=垂直/新方向, 0=平行/同方向累积)
+                _ct_perp = _aux.get("ct_delta_perp", [0.0])[0] if _aux.get("ct_delta_perp") else 0.0
+                _ct_inj_r = _aux.get("ct_inject_ratio", 0.0)
+                Logger(f"  loops detail: dh={_dh}  ct={_ct}  jepa={_je}  L_est={_L_est:.3f}  ct_perp={_ct_perp:.3f}  ct_inj={_ct_inj_r:.3f}")
+            if _aux.get("nm_gain_history"):
+                _g = [f"{x:.2f}" for x in _aux["nm_gain_history"]]
+                _h = [f"{x:.4f}" for x in _aux.get("nm_hebb_norm_history", [])]
+                Logger(f"  hebb: gain={_g}  norm={_h}")
+            if _aux.get("ct_cosine_trajectory"):
+                _cos = [f"{x:.3f}" for x in _aux["ct_cosine_trajectory"]]
+                Logger(f"  ct_traj: cos={_cos}")
+            if _aux.get("per_loop_dt_inject") and any(x > 0 for x in _aux["per_loop_dt_inject"]):
+                _di = [f"{x:.4f}" for x in _aux["per_loop_dt_inject"]]
+                Logger(f"  dt_ratio: {_di}")  # <0.01 无效, 0.01-0.1 轻度, >0.1 强, >1.0 危险
+            _fp = _aux.get("fixed_point_analysis", {})
+            if _fp:
+                _Lg = _fp.get("L_global", -1)
+                _Ld = _fp.get("L_per_dir_top4", [])
+                _sd = _fp.get("slow_directions", 0)
+                _dd = _fp.get("dead_directions", 0)
+                Logger(f"  fixed_point: L={_Lg:.3f}  dirs={_Ld}  slow={_sd}  dead={_dd}")
+            _snorms = _aux.get("step_norms", [])
+            _sangles = _aux.get("step_angles", [])
+            _accels = _aux.get("accel_norms", [])
+            if _snorms and len(_snorms) >= 2:
+                Logger(f"  dynamics: step_norm={_snorms[0]:.3f}→{_snorms[-1]:.3f} decay={_snorms[-1]/_snorms[0]:.3f}"
+                       f"  angle={'→'.join(f'{a:.2f}' for a in _sangles[:3])}"
+                       f"  accel={'→'.join(f'{a:.2f}' for a in _accels[:3])}")
+            if _aux.get("loss_head") is not None:
+                _lh = _aux["loss_head"].item() if hasattr(_aux["loss_head"], "item") else _aux["loss_head"]
+                _lm = _aux["loss_mid"].item() if hasattr(_aux.get("loss_mid", 0), "item") else _aux.get("loss_mid", 0)
+                _lt = _aux["loss_tail"].item() if hasattr(_aux.get("loss_tail", 0), "item") else _aux.get("loss_tail", 0)
+                Logger(f"  loss_pos: head={_lh:.4f}  mid={_lm:.4f}  tail={_lt:.4f}")
 
         # ── 梯度方向诊断 ────────────────────────────────────────────────────
         if do_grad_log and grad_metrics:
@@ -725,13 +826,18 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                                  f" std={snap_exit['std_depth']:.2f}"
                                  f" entropy={snap_exit['depth_entropy']:.3f}")
                 Logger(
-                    f"[DOD/DMD step {step}]  dod_rank={dod_rank}"
-                    f"  mode1_energy={e1:.1f}%"
-                    f"  grad_dmd_radius={dmd_str}"
-                    f"  v2_rank={v2_rank}/{v2_dims} v2_mode1={v2_e1:.1f}%"
+                    f"[DOD step {step}]"
+                    f"  rank={v2_rank}/{v2_dims} mode1={v2_e1:.1f}%"
+                    f"  dmd_radius={dmd_str}"
                     + (f"  dead={dead}" if dead else "")
                     + exit_info
                 )
+                # h_diversity: 跨循环 h 的多样性（DOD 时打印）
+                _hd = _last_aux.get("h_diversity_across_loops", 0) if _last_aux else 0
+                Logger(f"  h_diversity={_hd:.4f}")
+                _md = _last_aux.get("mamba_diag", {}) if _last_aux else {}
+                if _md.get("layer1_cos"):
+                    Logger(f"  mamba_diag: L1_cos={[f'{x:.3f}' for x in _md['layer1_cos']]}  L2_cos={[f'{x:.3f}' for x in _md['layer2_cos']]}")
                 # 快照写入 jsonl
                 snapshot_record = {"step": step, "dynamics_snapshot": snap_grad, "ct_snapshot": snap_ct}
                 if snap_layer:
@@ -903,6 +1009,8 @@ if __name__ == "__main__":
                         help="Initial bias for exit logit (negative = stay longer)")
     parser.add_argument("--exit_warmup_steps", type=int, default=0,
                         help="Training steps during which exit is disabled (force full loops)")
+    parser.add_argument("--exit_progressive_warmup", type=int, default=0,
+                        help="Progressive loop warmup: first N steps cycle through depths 1→max→1→max...")
     parser.add_argument("--exit_ct_drift_weight", type=float, default=0.0,
                         help="Exit: weight on c_t drift signal (higher = stay longer when c_t changing)")
     parser.add_argument("--identity_recurrence_alpha", type=float, default=0.0,
@@ -934,6 +1042,10 @@ if __name__ == "__main__":
                         choices=["broadcast", "token_aware", "bixt", "cmda", "bixt_cmda"],
                         help="IS: c_t injection mode (broadcast/token_aware/bixt/cmda/bixt_cmda)")
     # NM: Neuromodulated c_t writer
+    parser.add_argument("--enable_introspection_swa", type=int, default=0, choices=[0, 1],
+                        help="IS: sliding window attention between Mamba layers in introspection")
+    parser.add_argument("--neuromod_fox_decay", type=int, default=0, choices=[0, 1],
+                        help="NM: FoX-style learned forget gate on prev_c_t (prevent hebb noise accumulation)")
     parser.add_argument("--enable_neuromod_ct", type=int, default=0, choices=[0, 1],
                         help="NM: enable neuromodulated c_t writer")
     parser.add_argument("--neuromod_hebb_rank", type=int, default=8,
@@ -948,6 +1060,10 @@ if __name__ == "__main__":
                         help="PC: predictive coding error correction in reasoning loop")
     parser.add_argument("--pc_alpha", type=float, default=0.1,
                         help="PC: error correction strength (0.1=gentle)")
+    parser.add_argument("--cosine_total_steps", type=int, default=0,
+                        help="Cosine decay 总步数 (0=用 iters，设大于 iters 可截掉尾段)")
+    parser.add_argument("--enable_cosine_decay", type=int, default=0, choices=[0, 1],
+                        help="LR: cosine decay to min_lr over total iters (default: fixed LR)")
     parser.add_argument("--enable_exit_entropy_signal", type=int, default=0, choices=[0, 1],
                         help="ES: entropy proxy for exit decision")
     parser.add_argument("--enable_exit_token_sensitivity", type=int, default=0, choices=[0, 1],
@@ -989,6 +1105,32 @@ if __name__ == "__main__":
                         help="Phase 3.5+: self-JEPA pred_delta_c 的 SIGreg 正则权重（LeJEPA 论文推荐 0.05-0.1）")
     parser.add_argument("--sigreg_ct_weight", type=float, default=0.05,
                         help="Phase 3.5-b+: c_t 本身的 SIGreg 正则权重，防止认知状态空间坍缩")
+    parser.add_argument("--loop_sigreg_weight", type=float, default=0.0,
+                        help="Loop SigReg: c_t 跨循环多样性正则，惩罚 loop 间 c_t 过于相似")
+    parser.add_argument("--ct_injection_mode", type=str, default="add", choices=["add", "film"],
+                        help="c_t 注入方式: add(加法) / film(FiLM调制，c_t微变→h大变)")
+    parser.add_argument("--jepa_predictor_dropout", type=float, default=0.0,
+                        help="JEPA predictor dropout，弱化预测器防止完美预测")
+    parser.add_argument("--cmda_token_wish", type=int, default=0, choices=[0, 1],
+                        help="CMDA per-token wish gate: 每个 token 决定被调制程度")
+    parser.add_argument("--ct_gated_attn", type=int, default=0, choices=[0, 1],
+                        help="c_t 条件门控: 自省流调制 diff_attn 输出")
+    parser.add_argument("--ct_conditioned_lora", type=int, default=0, choices=[0, 1],
+                        help="c_t 条件 LoRA: c_t 控制 FFN 的 LoRA 权重，改变 F 的不动点")
+    parser.add_argument("--ct_delta_inject", type=int, default=0, choices=[0, 1],
+                        help="c_t 调制 Mamba SSM dt: 直接改变状态转移特征值")
+    parser.add_argument("--ct_inject_scale", type=float, default=1.0,
+                        help="c_t 注入主流的权重缩放 (1.0=默认, 2.0=翻倍)")
+    parser.add_argument("--ct_per_layer_inject", type=int, default=0, choices=[0, 1],
+                        help="c_t 每层独立注入 (4 个独立控制通道)")
+    parser.add_argument("--delta_h_scale", type=float, default=0.0,
+                        help="δh 注入 introspection 的缩放 (0=off, 0.1=轻度)")
+    parser.add_argument("--delta_h_normalize", type=int, default=0, choices=[0, 1],
+                        help="是否归一化 δh 方向 (0=原始, 1=单位向量)")
+    parser.add_argument("--cos_sigreg_weight", type=float, default=0.0,
+                        help="Cos SigReg: 惩罚相邻 loop c_t 方向相似度，直接推动方向多样性")
+    parser.add_argument("--ct_momentum", type=float, default=0.0,
+                        help="自省流更新频率: 每 slow_k 轮更新一次 (1=每轮, 2=隔轮)")
     parser.add_argument("--enable_sigreg_ct", type=int, default=0, choices=[0, 1],
                         help="1=对 c_t 加 SIGreg（方案 2），0=只对 pred_delta_c 加（方案 1）")
     parser.add_argument("--self_check_loss_weight", type=float, default=0.1,
@@ -1072,6 +1214,15 @@ if __name__ == "__main__":
     vram_est_gb = total_params * (2 if param_dtype == torch.bfloat16 else 4) / 1024
     fp8_tag = " [FP8]" if args.fp8 else ""
     Logger(f"Luma Refactor Params: {total_params:.3f}M  param_dtype={param_dtype}  ~{vram_est_gb:.2f}GB param VRAM{fp8_tag}")
+    # 模型结构摘要：每个子模块的名称和参数量
+    Logger("Model structure:")
+    for name, module in model.named_children():
+        n_params = sum(p.numel() for p in module.parameters()) / 1e6
+        Logger(f"  {name}: {n_params:.3f}M  {type(module).__name__}")
+        for sub_name, sub_module in module.named_children():
+            sub_params = sum(p.numel() for p in sub_module.parameters()) / 1e6
+            if sub_params > 0.01:  # 只打印 >10K 参数的子模块
+                Logger(f"    {sub_name}: {sub_params:.3f}M  {type(sub_module).__name__}")
     if args.phase == 6:
         Logger(f"Phase 6: World-JEPA (mode={args.world_jepa_mode}, weight={args.world_jepa_weight}, "
                f"sigreg={args.world_sigreg_weight}, mask={args.world_mask_ratio}) "
@@ -1109,10 +1260,13 @@ if __name__ == "__main__":
     if getattr(args, "cpu_offload_optimizer", 0):
         optimizer.enable_cpu_offload()
         Logger("Optimizer CPU offload enabled — states will live on CPU pinned memory")
-    # 固定 lr：把 total_steps 设成极大值，余弦因子始终 ≈ 1.0
+    # LR schedule: cosine decay 到 min_lr (enable_cosine_decay=1) 或固定 LR (默认)
+    _lr_total = getattr(args, "cosine_total_steps", 0) or args.iters
+    if not getattr(args, "enable_cosine_decay", 0):
+        _lr_total = 10 ** 9
     scheduler = LumaCosineScheduler(
         optimizer,
-        total_steps=10 ** 9,
+        total_steps=_lr_total,
         matrix_base_lr=args.matrix_lr,
         scalar_base_lr=args.scalar_lr,
         min_lr_ratio=0.1,
