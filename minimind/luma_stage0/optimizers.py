@@ -31,6 +31,9 @@ CONTROL_TENSOR_NAME_PATTERNS = (
     "embedding",
     "embed_table",
     "lm_head",
+    "ct_injection",   # W_c 用 AdamW：Muon 正交化 + 固定方向梯度 → wd 不够压
+    "c_t_head",       # introspection 输出层，同理
+    "hebb_out",       # 赫布写入层，同理
 )
 
 

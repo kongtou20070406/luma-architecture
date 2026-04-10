@@ -334,6 +334,7 @@ def build_phase4_config(args: argparse.Namespace) -> LumaConfig:
         ct_conditioned_lora=bool(getattr(args, "ct_conditioned_lora", 0)),
         ct_delta_inject=bool(getattr(args, "ct_delta_inject", 0)),
         ct_inject_scale=getattr(args, "ct_inject_scale", 1.0),
+        ct_inj_max=getattr(args, "ct_inj_max", 0.04),
         ct_per_layer_inject=bool(getattr(args, "ct_per_layer_inject", 0)),
         delta_h_scale=getattr(args, "delta_h_scale", 0.0),
         delta_h_normalize=bool(getattr(args, "delta_h_normalize", 0)),
@@ -427,6 +428,7 @@ def build_phase6_config(args: argparse.Namespace) -> LumaConfig:
         ct_conditioned_lora=bool(getattr(args, "ct_conditioned_lora", 0)),
         ct_delta_inject=bool(getattr(args, "ct_delta_inject", 0)),
         ct_inject_scale=getattr(args, "ct_inject_scale", 1.0),
+        ct_inj_max=getattr(args, "ct_inj_max", 0.04),
         ct_per_layer_inject=bool(getattr(args, "ct_per_layer_inject", 0)),
         delta_h_scale=getattr(args, "delta_h_scale", 0.0),
         delta_h_normalize=bool(getattr(args, "delta_h_normalize", 0)),
@@ -740,7 +742,8 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             if _aux.get("nm_gain_history"):
                 _g = [f"{x:.2f}" for x in _aux["nm_gain_history"]]
                 _h = [f"{x:.4f}" for x in _aux.get("nm_hebb_norm_history", [])]
-                Logger(f"  hebb: gain={_g}  norm={_h}")
+                _w = [f"{x:.4f}" for x in _aux.get("nm_hebb_write_history", [])]
+                Logger(f"  hebb: gain={_g}  norm={_h}  write={_w}")
             if _aux.get("ct_cosine_trajectory"):
                 _cos = [f"{x:.3f}" for x in _aux["ct_cosine_trajectory"]]
                 Logger(f"  ct_traj: cos={_cos}")
@@ -1121,6 +1124,8 @@ if __name__ == "__main__":
                         help="c_t 调制 Mamba SSM dt: 直接改变状态转移特征值")
     parser.add_argument("--ct_inject_scale", type=float, default=1.0,
                         help="c_t 注入主流的权重缩放 (1.0=默认, 2.0=翻倍)")
+    parser.add_argument("--ct_inj_max", type=float, default=0.04,
+                        help="ct_inj 上限 (‖proj(c_t)‖/‖h‖)，防长训练相变发散")
     parser.add_argument("--ct_per_layer_inject", type=int, default=0, choices=[0, 1],
                         help="c_t 每层独立注入 (4 个独立控制通道)")
     parser.add_argument("--delta_h_scale", type=float, default=0.0,

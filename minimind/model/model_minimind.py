@@ -437,6 +437,7 @@ class LumaConfig(PretrainedConfig):
         self.ct_conditioned_lora = kwargs.get("ct_conditioned_lora", False)  # c_t 控制 LoRA 权重
         self.ct_delta_inject = kwargs.get("ct_delta_inject", False)  # c_t 调制 Mamba SSM 时间步长
         self.ct_inject_scale = kwargs.get("ct_inject_scale", 1.0)  # c_t 注入权重缩放
+        self.ct_inj_max = kwargs.get("ct_inj_max", 0.04)  # ct_inj 上限，防长训练相变发散
         self.delta_h_scale = kwargs.get("delta_h_scale", 0.0)  # δh 注入 introspection 的缩放 (0=off)
         self.ct_per_layer_inject = kwargs.get("ct_per_layer_inject", False)  # c_t 每层独立注入
         self.delta_h_normalize = kwargs.get("delta_h_normalize", False)  # 是否归一化 δh 方向
@@ -1187,20 +1188,29 @@ class CTInjection(nn.Module):
     Luma 让认知状态轻推主流，而不是让它粗暴接管整段思维。
     mode='add': h + proj(c_t) (原版，加法)
     mode='film': h * (1 + scale) + shift (FiLM 调制，c_t 微小变化 → h 大变化)
+    ct_inj_max: proj(c_t) 范数上限（相对于 h 范数），防止长训练中 W_c 增长越过 α_crit
     """
 
-    def __init__(self, c_t_dim: int, hidden_size: int, mode: str = "add", scale: float = 1.0):
+    def __init__(self, c_t_dim: int, hidden_size: int, mode: str = "add", scale: float = 1.0,
+                 ct_inj_max: float = 0.05):
         super().__init__()
         self._mode = mode
         self._scale = scale
+        self._ct_inj_max = ct_inj_max
         self.proj = nn.Linear(c_t_dim, hidden_size, bias=False)
         if mode == "film":
             self.film_proj = nn.Linear(c_t_dim, hidden_size * 2, bias=False)
             nn.init.zeros_(self.film_proj.weight)
 
     def get_bias(self, c_t: torch.Tensor) -> torch.Tensor:
-        """外部获取 c_t → hidden 的投影，不管 mode 统一返回 [B, D]"""
-        return self.proj(c_t) * self._scale
+        """外部获取 c_t → hidden 的投影，不管 mode 统一返回 [B, D]。
+        手动谱归一化：限制 W 的最大奇异值，防止长训练中 W_c 范数无限增长。"""
+        W = self.proj.weight  # [hidden, c_t_dim]
+        # 快速近似：按行归一化，将行范数 clamp 到 max_row_norm
+        row_norms = W.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        max_row_norm = 1.0  # 限制每行范数 ≤ 1
+        W_normed = W * torch.clamp(max_row_norm / row_norms, max=1.0)
+        return F.linear(c_t, W_normed) * self._scale
 
     def inject(self, h: torch.Tensor, c_t: torch.Tensor) -> torch.Tensor:
         """根据 mode 注入 c_t 到 h"""
@@ -1208,7 +1218,7 @@ class CTInjection(nn.Module):
             film = self.film_proj(c_t).unsqueeze(1)
             scale, shift = film.chunk(2, dim=-1)
             return h * (1.0 + scale) + shift
-        return h + self.proj(c_t).unsqueeze(1) * self._scale
+        return h + self.get_bias(c_t).unsqueeze(1)
 
     def forward(self, h: torch.Tensor, c_t: torch.Tensor) -> torch.Tensor:
         return self.inject(h, c_t)
@@ -1642,7 +1652,10 @@ class IntrospectionStateStream(nn.Module):
         meta_last = layer2_out[:, -1, :]
         next_state_2 = self.state2_norm(slow_state["meta_state_2"] + self.state2_out(meta_last))
         know_gap = torch.sigmoid(self.know_gap_head(meta_last))
-        c_t = self.c_t_head(meta_last)
+        # c_t_head 行范数归一化: 防止长训练中 c_t 范数无限增长
+        _ct_W = self.c_t_head.weight
+        _ct_rn = _ct_W.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        c_t = F.linear(meta_last, _ct_W * torch.clamp(1.0 / _ct_rn, max=1.0))
         if self.uncertainty_head is not None:
             uncertainty = torch.sigmoid(self.uncertainty_head(meta_last))
         else:
@@ -2029,20 +2042,31 @@ class NeuromodulatedCTWriter(nn.Module):
             if self.use_delta_rule:
                 recon_c = self.recon(prev_c_t)
                 c_proj = self.hebb_proj_c(prev_c_t - recon_c)
-            hebb_term = self.hebb_out(h_proj * c_proj)  # [B, c_t_dim]
+            # hebb_out 行范数归一化: 防止长训练中权重无限增长
+            _hebb_W = self.hebb_out.weight
+            _hebb_rn = _hebb_W.norm(dim=1, keepdim=True).clamp(min=1e-8)
+            _hebb_W_normed = _hebb_W * torch.clamp(1.0 / _hebb_rn, max=1.0)
+            hebb_term = F.linear(h_proj * c_proj, _hebb_W_normed)  # [B, c_t_dim]
             if self.mode == "learned":
                 hebb_gate = torch.sigmoid(gain)
             else:
                 hebb_gate = surprise_scalar
-            modulated_c_t = modulated_c_t + hebb_gate * hebb_term
+            _hebb_write = hebb_gate * hebb_term
+            modulated_c_t = modulated_c_t + _hebb_write
             hebb_norm = hebb_term.detach().norm(dim=-1).mean()
+            hebb_write_norm = _hebb_write.detach().norm(dim=-1).mean()
         else:
             hebb_norm = gain.new_zeros(())
-        # c_t RMSNorm: 防止赫布写入后 c_t 范数漂移
+            hebb_write_norm = gain.new_zeros(())
+        # c_t RMSNorm: 归一化方向
         modulated_c_t = self._ct_out_norm(modulated_c_t)
+        # hard clamp c_t 范数: 安全网，防止 RMSNorm scale 增长导致范数失控
+        _ct_norm = modulated_c_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        modulated_c_t = modulated_c_t * torch.clamp(20.0 / _ct_norm, max=1.0)
         aux = {
             "neuromod_gain": gain.detach().mean(),
             "hebb_norm": hebb_norm,
+            "hebb_write": hebb_write_norm,
         }
         return modulated_c_t, aux
 
@@ -3010,7 +3034,7 @@ class LumaReasonCore(nn.Module):
         self.routing_tier_entropy_floor = float(config.routing_tier_entropy_floor)
         self.routing_min_local_share = float(config.routing_min_local_share)
         self.routing_progress_weight = float(config.routing_progress_weight)
-        self.ct_injection = CTInjection(config.c_t_dim, config.hidden_size, mode=config.ct_injection_mode, scale=config.ct_inject_scale)
+        self.ct_injection = CTInjection(config.c_t_dim, config.hidden_size, mode=config.ct_injection_mode, scale=config.ct_inject_scale, ct_inj_max=config.ct_inj_max)
         self.r_injection = nn.Linear(config.r_t_dim, config.hidden_size, bias=False) if config.enable_reasoning_state_ring else None
         self.ct_lowrank_down = nn.Linear(config.c_t_dim, config.ct_lowrank_rank, bias=False) if config.ct_modulation_mode == "lowrank_hyperbias" else None
         self.ct_lowrank_up = nn.Linear(config.ct_lowrank_rank, config.hidden_size, bias=False) if config.ct_modulation_mode == "lowrank_hyperbias" else None
@@ -3891,6 +3915,7 @@ class LumaBackbone(nn.Module):
         _mamba_out_history: List[torch.Tensor] = []  # Mamba layer2 输出方向历史
         nm_gain_history: List[float] = []
         nm_hebb_norm_history: List[float] = []
+        nm_hebb_write_history: List[float] = []
         if self.reasoning_state_ring is not None:
             reasoning_state = self.reasoning_state_ring.bootstrap(h.mean(dim=1))
             r_t_history.append(reasoning_state["state"].detach())
@@ -4189,12 +4214,16 @@ class LumaBackbone(nn.Module):
                     # 赫布项监控：收集 neuromod_gain 和 hebb_norm
                     nm_gain_history.append(_nm_aux["neuromod_gain"].item())
                     nm_hebb_norm_history.append(_nm_aux["hebb_norm"].item())
+                    nm_hebb_write_history.append(_nm_aux["hebb_write"].item())
                 else:
                     c_t = next_c_t
                 # c_t momentum: EMA 式慢更新
                 _ct_mom = self.config.ct_momentum
                 if _ct_mom > 0.0 and loop_idx > 0:
                     c_t = _ct_mom * prev_c_t + (1.0 - _ct_mom) * c_t
+                # c_t 范数安全网: 所有更新路径（introspection/赫布/momentum）的最终出口
+                _ct_n = c_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                c_t = c_t * torch.clamp(20.0 / _ct_n, max=1.0)
                 # 动力学监控：slow_update 轮采集真实 ct_change (c_t 已经过赫布 + RMSNorm)
                 _loop_ct_change = (c_t - prev_c_t).detach().norm(dim=-1).mean().item()
                 if self.config.ct_norm_penalty_weight > 0.0:
@@ -4681,6 +4710,7 @@ class LumaBackbone(nn.Module):
             "per_loop_jepa_err": per_loop_jepa_err,
             "nm_gain_history": nm_gain_history,
             "nm_hebb_norm_history": nm_hebb_norm_history,
+            "nm_hebb_write_history": nm_hebb_write_history,
             "ct_cosine_trajectory": ct_cosine_adjacent,
             "ct_delta_perp": ct_delta_perp,
             "h_diversity_across_loops": h_diversity,
