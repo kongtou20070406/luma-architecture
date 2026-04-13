@@ -1,6 +1,46 @@
 # Luma 工作日志
 
-## [2026-04-13 22:45] 🧪 Hero v6 no-scale 1 epoch 训练启动
+## [2026-04-13 22:45] 🧪 Hero v8 = Hero v7 + h_mask_predictor（赫布激活）
+
+### 背景
+Hero v7 前 600 步观察：赫布从 step 50 的 gain=1.52/write=0.0009 快速衰减到 step 500 的 gain=1.00/write=0.0000。根因是 self-JEPA 预测 `Δc_t` 的目标退化——c_t 方向冻结 → Δc_t 方向固定 → 预测器学常量方向 → `1 - cos(pred_Δc, target_Δc) ≈ 0` → surprise=0 → 赫布停写。
+
+### 解决方案
+激活 `h_mask_predictor`（代码里本来就有，CLI 默认 off）：
+- `c_t → Linear(64→768) → 预测被 mask 的 h 维度`
+- `h_mask_err = 1 - cos(c_t_pred_masked, h_target_masked)` (loss_mode=cosine)
+- 混入 hebb 的 surprise：`_jepa_err_for_hebb = 0.7 × self_jepa_err + 0.3 × h_mask_err`
+- 这是**外部 surprise 信号**（c_t 对真实 h 的理解程度），不会因为 c_t 方向固化而归零
+
+### 配置变化（相对 hero v7）
+- 新增：`--h_mask_ratio 0.25 --h_mask_loss_mode cosine --h_mask_loss_weight 0.03 --h_mask_surprise_weight 0.3`
+- params: 217.004M (+0.049M h_mask_predictor Linear 64→768)
+- h_mask_predictor 路由到 AdamW + wd=0.01（low wd 白名单，zero-init 防被压回 0）
+
+### 启动命令
+```bash
+cd /home/kt/ai/luma-architecture/minimind/scripts && \
+bash run_experiment.sh hero_v8_h_mask_1epoch \
+  --h_mask_ratio 0.25 \
+  --h_mask_loss_mode cosine \
+  --h_mask_loss_weight 0.03 \
+  --h_mask_surprise_weight 0.3
+```
+
+### 预期
+- 赫布全程存活：gain 保持 >1.01，write >0.0005
+- ct_perp 不再衰减到 0（hero v7 step 500 已到 0.02）— 因为外部 surprise 驱动 c_t 方向更新
+- loss 可能略差（额外梯度竞争），也可能更好（人格更丰富 → 更强的 h 调制）
+- 这个 h_mask 是 4.10 G0_jepa_enhanced 只跑 50 步就被 NaN 中断的机制，现在 NaN 根因已修，是第一次真正验证
+
+### 待验证（hero v7 跑完后对比）
+- Hebb write 轨迹（v7 死 vs v8 活）
+- ct_perp 轨迹（v7 衰减到 0 vs v8 维持 >0.1）
+- ema loss 对比
+
+---
+
+## [2026-04-13 22:35] 🧪 Hero v7 no-scale 1 epoch 训练启动（已停，被 v8 替换）
 
 ### 背景
 - 今日根因诊断：长训 NaN 根因是 `LumaZCRMSNorm` 的可学习 `scale` 参数在训练中被优化器推大 → 所有 residual stream / meta_state 的归一化被"假归一化"→ c_t / W_c / hebb_out / h 激活协同爆炸。
