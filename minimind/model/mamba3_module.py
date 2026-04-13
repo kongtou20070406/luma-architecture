@@ -12,6 +12,17 @@ if _MAMBA_LOCAL.exists() and str(_MAMBA_LOCAL) not in sys.path:
     sys.path.insert(0, str(_MAMBA_LOCAL))
 from mamba_ssm.modules.mamba3 import Mamba3
 
+# FP8 activation cache 支持（saved_tensors_hooks + per-block 量化）
+# 不改 triton kernel，只压缩保存给 backward 的激活
+_FP8_SCRIPT = _REPO_ROOT / "minimind" / "scripts" / "fp8_mamba3"
+if _FP8_SCRIPT.exists() and str(_FP8_SCRIPT) not in sys.path:
+    sys.path.insert(0, str(_FP8_SCRIPT))
+try:
+    from fp8_saved_tensors import Fp8ActivationContext  # noqa: E402
+    _FP8_HOOK_AVAILABLE = True
+except Exception:
+    _FP8_HOOK_AVAILABLE = False
+
 
 class ZCRMSNorm(nn.Module):
     """Zero-centered RMSNorm: y = (1 + scale) * RMSNorm(x)."""
@@ -51,6 +62,11 @@ class Mamba3Config:
     # Gradient checkpointing for Mamba3: recompute forward during backward to save VRAM.
     # Critical for seq>=2048 where backward buffers accumulate to >3GB.
     use_gradient_checkpointing: bool = False
+    # FP8 activation cache: pack saved_tensors 到 fp8+scale，backward 前 dequantize 回 bf16。
+    # 不改 triton kernel (compute 仍 bf16)，只压缩激活存储。
+    # ~48% Mamba activation 内存节省，~2% 相对数值误差。
+    use_fp8_activation_cache: bool = False
+    fp8_act_block_size: int = 128
 
 
 class Mamba3Block(nn.Module):
@@ -138,17 +154,36 @@ class Mamba3Block(nn.Module):
                 print(f"\n{'='*60}\n{msg}\n{'='*60}\n", flush=True)
                 return self.mamba_siso(x)
 
+    def _run_mamba_maybe_fp8(self, x: torch.Tensor, dt_external_bias=None) -> torch.Tensor:
+        """Run _run_mamba, optionally wrapping its saved activations in FP8."""
+        if (
+            self.cfg.use_fp8_activation_cache
+            and self.training
+            and _FP8_HOOK_AVAILABLE
+        ):
+            # saved_tensors_hooks 只作用于当前 context 内的 save_for_backward 调用
+            with Fp8ActivationContext(block_size=self.cfg.fp8_act_block_size):
+                return self._run_mamba(x, dt_external_bias=dt_external_bias)
+        return self._run_mamba(x, dt_external_bias=dt_external_bias)
+
     def forward(self, x: torch.Tensor, dt_external_bias=None) -> torch.Tensor:
         residual = x
         x = self.pre_norm(x)
         if self.cfg.use_gradient_checkpointing and self.training:
             if dt_external_bias is not None:
                 # dt_external_bias 需要 detach 后重新 requires_grad，避免 reentrant checkpoint 冲突
-                x = self._run_mamba(x, dt_external_bias=dt_external_bias)
+                x = self._run_mamba_maybe_fp8(x, dt_external_bias=dt_external_bias)
             else:
-                x = torch_checkpoint(self._run_mamba, x, use_reentrant=True)
+                # 根本限制：Mamba triton kernel 的 ctx.saved_tensors 在 backward 中会被
+                # 多次访问，而新 pytorch non-reentrant ckpt 的 saved_tensors_hooks 只允许
+                # 单次 unpack（会触发 CheckpointError: already unpacked once）。
+                # 因此 compression zone 要使用 Mamba + gradient checkpointing 时只能用
+                # use_reentrant=True 路径；但这和 Phase E 主循环里任何 torch.autograd.grad
+                # 调用全局冲突（所以 Phase E 训练必须关 use_gradient_checkpointing=0，
+                # 用 activation_offload_compress 作为替代内存策略）。
+                x = torch_checkpoint(self._run_mamba_maybe_fp8, x, use_reentrant=True)
         else:
-            x = self._run_mamba(x, dt_external_bias=dt_external_bias)
+            x = self._run_mamba_maybe_fp8(x, dt_external_bias=dt_external_bias)
         x = self.post_norm(x)
         x = self.dropout(x)
         return residual + x

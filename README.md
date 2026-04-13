@@ -1,36 +1,40 @@
 # Luma Architecture
 
-**Luma** — 一个从零设计的小型语言模型架构，核心是 **CR-Loop**（Compress → Reason Loop）：用 Mamba3 SSM 做高效一次性压缩，用权重共享的推理循环做深度思考，用自适应退出控制计算预算。
+**Luma** — 一个从零设计的小型语言模型架构，核心是 **CR-Loop**（Compress → Reason Loop）：用 Mamba3 SSM 做高效一次性压缩，用**能量梯度下降**（Phase E）做深度思考，用赫布可塑性实现人格强化。
 
 ## 架构概览
 
 ```
-Input → FactorizedEmbedding → CompressionZone ──→ ReasoningLoop ──→ LM Head → Output
-                                   │                   ↑ ↓
-                                   │              c_t (认知流)
+Input → FactorizedEmbedding → CompressionZone ──→ Phase E Reason Loop ──→ LM Head → Output
+                                   │                      ↑ ↓
+                                   │              c_t (人格/情绪基调)
                                    │              introspection (自省流)
-                                   │              UnifiedAttnRes (回看)
-                                   │              Hebbian associative memory (赫布关联记忆)
-                                   │              PC error correction (预测编码修正)
-                                   │                   ↑
-                                   └── block_reprs ────┘
+                                   │              Phase E damped: h ← (1-η)h + η·F(h)
+                                   │              Hebbian associative memory
+                                   │              PC error correction
+                                   │                      ↑
+                                   └── block_reprs ───────┘
 ```
 
 **数据流**：
 1. **Embedding** 将 token 映射到 hidden space（分解式，省参数）
 2. **CompressionZone** 单次前向，混合 SSM+Attention，输出压缩表征 + 各 block 的摘要 `block_reprs`
-3. **ReasoningLoop** 在压缩表征上循环推理（共享权重 × N 次），每轮：
-   - 认知流 `c_t` 跨循环传递推理上下文
-   - 自省流监控推理健康度，通过 Memory Token + CMDA 双向交互
-   - Hebbian associative memory: surprise-gated 赫布外积，防灾难性遗忘
-   - PC error correction: 自省流预测主流状态，误差修正主流
-   - Loop LoRA: per-loop 低秩适配，让每轮循环做不同计算
-   - Time Conditioning: 循环位置 [t, dt] 注入
-   - MoR (Mixture-of-Recursions) per-token depth routing
-   - UnifiedAttnRes 回看 `block_reprs`（压缩区记忆）和 `loop_history`（循环历史）
+3. **Phase E Reason Loop**：外层 loop（最多 4 轮）× 内层 damped fixed-point iteration（K=3 步）
+   - **Phase E damped**：`h ← (1-η)h + η·F(h)`，η=0.5，K=3 步逼近不动点 h* = F(h*)
+   - 理论上等价于在 `E(h) = 0.5·‖h - F(h)‖²` 上做能量梯度下降，一阶近似
+   - **人格流 `c_t`**：64 维慢变量，方向稳定（ct_perp≈0，见下文 c_t 范式），范数随经验增长
+   - **自省流**：Memory Token K=4 + CMDA 双向调制 + Mamba3 序列建模 → 产出 c_t
+   - **赫布关联记忆**：`c_t += surprise × hebb(δh ⊗ prev_c_t)` 人格强化
+   - **PC 误差修正**：`h -= α × (h - c_t预测(h))` 情绪反应
+   - **Loop LoRA**：per-loop 低秩适配，让每轮循环差异化
+   - **MoR**：Token-level depth routing，简单 token 早退出
 4. **LM Head** 输出下一 token 概率
 
-**关键：CompressionZone 只执行一次，不参与循环。循环只发生在 ReasoningLoop 内部。**
+**关键特性：**
+- CompressionZone 只执行一次，循环只在 Reason Loop 内部
+- Phase E body `F(h) = shared_layers(h)` 每步用同一组参数（weight tying + 深度扩展）
+- damped 模式避开 `autograd.grad(create_graph=True)` 的 bf16 二阶导数值不稳定问题
+- 所有 `LumaZCRMSNorm` **无可学习 scale**（真正的 RMSNorm），保证长训练范数不漂移
 
 ### 模块详细拆解
 
@@ -48,35 +52,41 @@ Token IDs → FactorizedEmbedding → [B, T, 768]
 #### 2. 压缩区 (CompressionZone)
 
 ```
-[B, T, 768] → 16 层混合 SSM+Attn → [B, T, 768] + block_reprs[16]
+[B, T, 768] → 12 层混合 SSM+Attn → [B, T, 768] + block_reprs[12]
 ```
 
 | 类 | 层数 | 说明 |
 |---|---|---|
-| `CompressionMambaLayer` | ~14 层 | Mamba3 MIMO SSM (d_state=192, expand=2) |
-| `CompressionRetrievalLayerSWA` | ~2 层 | 滑窗注意力 (window=512)，穿插在 SSM 间 |
+| `CompressionMambaLayer` | ~10 层 | Mamba3 MIMO SSM (d_state=192, expand=2) |
+| `CompressionRetrievalLayerSWA` | ~2 层 | 滑窗注意力（seq>window 时 chunked SWA 自动启用） |
 | `CompressionBlockAttentionResiduals` | 每层 | 跨 block 注意力残差 — 后层可以回看前层摘要 |
 | `LumaSwiGLUFFN` | 每层 | SwiGLU FFN (768→3072→768) |
-| `MathAdapterLane` | 可选 | 数学适配器旁路 |
 
-每层输出一个 `block_repr`（层摘要），供推理区的 UnifiedAttnRes 回看。
+**规模决策**：`compression_layers=12` 是 Phase E damped 在 bf16 + 216M 下的稳定上限。扩到 16 层会在 seq=2048 下直接溢出（Gap 13 v9/v10 验证）。每层输出一个 `block_repr`（层摘要），供推理区的 UnifiedAttnRes 回看。
 
-#### 3. 推理区 (ReasoningLoop)
+#### 3. 推理区 — Phase E Damped Reason Loop
 
-```
-for loop_idx in range(max_loops):  # 最多 20 轮
-    h = LumaReasonSharedLayer × 4 (权重共享)
-    h = UnifiedAttnRes(h, block_reprs, loop_history)
-    h = PCErrorCorrector(h, c_t)           # 预测编码修正
-    if slow_update:                         # 每 2 轮
-        memory → MemoryTokenReader(h)      # 选择性读取主流
-        h → CMDAModulation(h, c_t)         # 双向通道调制
-        c_t = IntrospectionStateStream()   # 自省流更新
-        c_t += NeuromodulatedCTWriter()    # 赫布关联写入
+```python
+# 外层 loop (outer): 最多 reason_loops=4 轮
+for outer_loop in range(reason_loops):
+    c_t → CTInjection → h += proj(c_t)    # 注入人格偏置
+    # 内层 loop (inner): Phase E damped K=3 步
+    for k in range(K_max):
+        h_new = F(h)                        # F = shared_layers (depth=2)
+        h = (1 - η) × h + η × h_new         # damped fixed-point, η=0.5
+    h = UnifiedAttnRes(h, block_reprs)     # 回看压缩区
+    h = PCErrorCorrector(h, c_t)           # 情绪反应（预测编码）
+    # slow update: 更新 c_t
+    memory → MemoryTokenReader(h)
+    h → CMDAModulation(h, c_t)
+    c_t_new = IntrospectionStateStream(h)
+    c_t += NeuromodulatedCTWriter(c_t_new, c_t, δh, surprise)  # 人格强化
     if ExitController.should_exit: break
 ```
 
-##### 3a. 共享推理层 (LumaReasonSharedLayer × 4)
+**Phase E damped 的等价性**：当 `‖J_F‖` 小时，`∇_h E ≈ (h - F(h))`，所以 `h - η·∇E = (1-η)h + η·F(h)`。damped 模式是 Phase E 能量梯度的一阶近似，理论保留所有核心性质（不动点收敛 + 构造性收缩），工程上完全避开 `autograd.grad(create_graph=True)` 的 bf16 数值陷阱。
+
+##### 3a. 共享推理层 (LumaReasonSharedLayer × 2 — Phase E body)
 
 | 子模块 | 说明 |
 |--------|------|
@@ -192,68 +202,51 @@ exit_logit = bias + Σ(weight_i × signal_i) - gain_weight × predicted_gain
 - **FP8 混精度**: ~130 Linear layers FP8 forward, BF16 backward
 - **8-bit Muon + AdamW**: CPU offload 优化器状态
 
-## 当前状态 (2026-04-11)
+## 当前状态 (2026-04-13)
 
-**推荐架构 (G0 = IS9 + NM8 + jepa_surprise)**:
-- 参数量: **~293M** (FP8 forward)
-- hidden=768, compression_layers=16, heads=12/3, reason_shared_depth=4
-- Time Conditioning + Loop LoRA rank=32 + Memory K=4 + CMDA
-- Hebbian rank=32 + JEPA surprise + c_t RMSNorm + cosine decay
+**生产架构 (Hero v7 = Phase E damped + 216M + scaffold JEPA)**:
+- **参数量：216.955M** (bf16, fp8=0)
+- hidden=768, **compression_layers=12**, heads=12/3, **reason_shared_depth=2, reason_loops=4**
+- **Phase E damped**: K_max=3, η=0.5, damped_mode=1（生产形态）
+- **scaffold World-JEPA**: mask=0.6, sigreg=0.05, block_mean=32（双流 JEPA + EMA target）
+- 全记忆栈：introspection memory K=4 + CMDA + Loop LoRA rank=32 + Hebbian rank=32 + MoR
+- Peak VRAM **~10-11 GB** @ seq=2048（RTX 5090 32GB 还有 20+ GB 余量）
 
-**G0 baseline** (2000步, loss=5.53):
+**Hero v6 历史数据（seq=2048, 10538 iter, NaN 终止）**:
 | 指标 | 值 | 说明 |
 |------|-----|------|
-| loss_lm | 5.53 | 最优 |
-| h_diversity | 0.33 | 自发涌现，不需人为干预 |
-| ct_perp | 0.01-0.05 | c_t 方向稳定（人格特征，非缺陷） |
-| L_est | 0.5-0.7 | 健康收缩率 |
-| DOD rank | 5→7 | 梯度方向多样性 |
-| VRAM | ~20 GB | FP8 + checkpoint + CPU offload |
+| best ema | **7.38** @ step 6475 | 超越 v11 seq=1024 final 8.51 |
+| best loss_lm | **0.56** @ step 9475 | dramatic minimum |
+| best loss_c | **1.73** @ step 9475 | compression 真实学习 |
+| Peak VRAM | 14.33 GB | 全 hero stack |
+| 崩溃点 | step 10538 NaN | 累积 grad spike，根因已修复 |
+
+**长训稳定性修复 (2026-04-13)**:
+- 根因：`LumaZCRMSNorm` 的可学习 `scale` 参数被优化器推大 → 所有 residual stream / meta_state 的"归一化"变成"放大" → residual stream 协同放大 → grad spike → NaN
+- 修复：删掉 `LumaZCRMSNorm.scale`，变成真正的 RMSNorm（参考 T5/Mistral），输出范数严格 = √dim
+- 同时移除所有 ct_inj clamp、行范数归一化、ct 范数 hard clamp 等症状层修复
+- Hero v7 (216.955M = 216.973M − 0.018M scale params) 从头跑 1 epoch 中，验证修复有效性
+
+**c_t = 人格/情绪，不是工作记忆**（2026-04-11 范式转换）：
+- **c_t 方向** = 人格（稳定，不随推理步变化 — 你做数学题时性格不会变）
+- **c_t 范数** = 人格强度（由 `_ct_out_norm` 严格固定为 √64≈8）
+- **h** = 工作记忆（h_diversity 自发涌现，spiral refinement 就是思考过程）
+- **赫布写入** = 人格强化（surprise × hebb(δh ⊗ prev_c_t) 强化既有方向）
+- **PC 误差** = 情绪反应（pred_h - h = 人格视角下的预期违背）
+- **Loop LoRA** = 思考阶段（per-loop 差异化）
+
+这解释了为什么所有强迫 c_t 方向变化的实验都恶化 loss — 相当于强迫模型每步换人格。
 
 **实验矩阵进度**:
 
 | Matrix | 内容 | 状态 | 最优 |
 |--------|------|------|------|
-| M0 | 架构定型 (4 配置) | 完成 | A1 → A2 (CR5) |
-| M1 | World-JEPA 变体 | 完成 | B2' (LeWM sig=0.10, mask=0.25) |
-| M2 | Exit Policy | 完成 | EX5 (20 loops + 2nd_order=0.3) |
-| M5 | 超参优化 | 完成 | E9 (MoR + MHC3 + threshold=0.8) |
-| CR | 压缩/推理比例 | 完成 | CR5 (c16_d4, -21.6%) |
-| SJ | Self-JEPA 激活 | 完成 | SJ1 (SigReg ct, -5.9%) |
-| IS | 自省流优化 (10 实验) | 完成 | IS9 (Memory K=4 + CMDA, -15.6%) |
-| RS | 推理结构 (9 实验) | 完成 | RS5 (LoRA rank=32, -20%) |
-| DP | 循环深度推送 (10 实验) | 完成 | DP2 (Time Conditioning, -8.7%) |
-| LD | 循环深度 v2 (10 实验) | 完成 | LD1 (bias=-1, avg=2.4 安全推深) |
-| NM+ES | 赫布+退出信号 (28 实验) | 完成 | NM8 (hebb32, -23.9%) |
-| PC | 预测编码 (8 实验) | 完成 | PC7 (PC+hebb32, -11.5%) |
+| M0-M10, CR, SJ, IS, RS, DP, LD, NM+ES, PC | 4.4-4.8 早期矩阵 | 完成 | CR5/IS9/NM8/PC7/SJ1 组合 |
 | H/I/J/K/M | 循环动力学 + per-layer 注入 (25+ 实验) | 完成 | G0 (无干预最优) |
-| **G0 长训** | **0.5 epoch 预训练 (v5 330M tokens)** | **待重跑** | **NaN 崩溃 → 修复 Muon/AdamW 分组** |
+| Phase E Gap 11-23 | Phase E 集成 + seq=2048 解锁 | 完成 (4.12-4.13) | damped K=3 η=0.5, 216M 稳定 |
+| **Hero v7 1 epoch** | **Phase E + no-scale + scaffold JEPA** | **进行中 (4.13+)** | **80444 iter，ETA ~18h** |
 
-**核心发现**（2026-04-11）：
-
-**c_t = 人格/情绪，不是工作记忆。**
-
-c_t 的方向稳定性（ct_perp≈0.01）不是需要修复的缺陷，而是人格的正确行为：
-- **c_t 方向** = 人格（稳定，不随推理步变化 — 你做数学题时性格不会变）
-- **c_t 范数增长**（8→20）= 人格随经验增强（需要 clamp 防止无限增长）
-- **h** = 工作记忆（h_diversity=0.33，每轮循环方向在变 — spiral refinement 就是思考过程）
-- **赫布写入** = 人格强化（surprise × hebb(δh ⊗ prev_c_t) 强化既有人格方向）
-- **PC 误差** = 情绪反应（pred_h - h = 人格视角下的预期违背）
-- **Loop LoRA** = 思考阶段（per-loop 差异化 = 工作记忆的分阶段处理）
-
-**长训练稳定性修复：**
-- 发现 W_c/c_t_head/hebb_out 在 Muon 优化器下权重无限增长（c_t 方向固定→梯度同方向→正交化更新压不住）
-- ct_inj 在 ~5800 步越过 α_crit≈0.045，触发循环发散 → NaN（Eq.3 精确预测）
-- 修复：将三个发散源头从 Muon 转到 AdamW + 行范数归一化 + ct 范数 clamp≤20
-
-这解释了为什么所有强迫 c_t 方向变化的实验都恶化 loss — 相当于强迫模型每步换人格。G0（零干预）最优是因为人格稳定本来就是对的。
-
-其他发现：
-- h_diversity=0.33 自发涌现，不需人为干预
-- 五个核心动力学方程已建立（收缩率、不动点敏感度、相变边界、β 架构公式、ct_perp 演化）
-- 相变边界 α_crit≈0.04-0.05，非线性系数 γ≈200-250
-
-详见 [4.11 进展报告](docs/reports/Progress_Report_20260411.md) | [4.10 进展报告](docs/reports/Progress_Report_20260410.md) | [动力学分析技能](../Luma_Dynamics_Analysis_Skill.md)
+详见 [WORKLOG](artifacts/WORKLOG.md) | [4.11 进展报告](docs/reports/Progress_Report_20260411.md) | [4.10 进展报告](docs/reports/Progress_Report_20260410.md) | [动力学分析技能](../Luma_Dynamics_Analysis_Skill.md)
 
 ## 项目结构
 

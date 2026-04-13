@@ -1,13 +1,13 @@
 #!/bin/bash
-# Luma 实验启动脚本 — 所有实验必须通过此脚本启动
+# Luma 实验启动脚本 — 默认 Phase E damped (216M, seq=2048, 1 epoch)
 # 用法: ./run_experiment.sh <实验名> [额外参数...]
-# 例子: ./run_experiment.sh M2_ct_per_layer --ct_per_layer_inject 1
-#       ./run_experiment.sh G0_baseline
+# 例子: ./run_experiment.sh hero_v7_baseline
+#       ./run_experiment.sh hero_v7_h_mask --h_mask_ratio 0.25 --h_mask_loss_mode cosine
 set -e
 
 if [ -z "$1" ]; then
     echo "用法: $0 <实验名> [额外参数...]"
-    echo "例子: $0 M2_ct_per_layer --ct_per_layer_inject 1"
+    echo "例子: $0 hero_v7_baseline"
     exit 1
 fi
 
@@ -16,35 +16,49 @@ EXP_NAME="$1"; shift
 PYTHON="/home/kt/ai/.venvs/luma-global/bin/python"
 TRAINER_DIR="/home/kt/ai/luma-architecture/minimind/trainer"
 ARTIFACTS="/home/kt/ai/luma-architecture/minimind/artifacts"
+LOG_DIR="$ARTIFACTS/phase_e"
 DATA="/home/kt/ai/luma-architecture/luma_dataset/mixes/v5_pretrain.jsonl"
 
-# ── 架构参数（293M，不要改） ──────────────────────────────────────────
+# ── 架构参数（216M hero v7，Phase E damped 生产形态） ─────────────────
+# hero v6/v7 实测最稳定规模：compression=12, reason_depth=2, reason_loops=4
+# 扩到 reason_depth=4 会触发 body Lipschitz > 1，damped 收缩失败
 ARCH="--hidden_size 768 --intermediate_size 3072 \
-  --compression_layers 16 --reason_shared_depth 4 \
+  --compression_layers 12 --reason_shared_depth 2 \
   --num_attention_heads 12 --num_key_value_heads 3 \
   --c_t_dim 64 --meta_dim 96 --mamba_d_state 192 --factorized_vocab_dim 256 \
-  --mamba_chunk_size 32"
+  --mamba_chunk_size 32 --reason_loops 4"
 
-# ── 训练参数（VRAM安全配置） ──────────────────────────────────────────
-TRAIN="--iters 2001 --batch_size 1 --accumulation_steps 2 --max_seq_len 2048 \
-  --fp8 1 --use_gradient_checkpointing 1 --cpu_offload_optimizer 1 \
+# ── 训练参数 ────────────────────────────────────────────────────────
+# 1 epoch v5 = 80444 iters (bs=1, accum=2, 160889 packs)
+# fp8=0, grad_ckpt=0: Phase E 二阶导需求 + Mamba3 reentrant 冲突
+# activation_offload_compress 补偿 VRAM
+TRAIN="--iters 80444 --cosine_total_steps 80444 \
+  --batch_size 1 --accumulation_steps 2 --max_seq_len 2048 \
   --data_path $DATA \
-  --phase 6 --world_jepa_mode full --world_jepa_weight 0.5 \
-  --world_sigreg_weight 0.10 --world_mask_ratio 0.25 \
+  --fp8 0 --use_gradient_checkpointing 0 \
+  --activation_offload_compress 1 --cpu_offload_optimizer 1"
+
+# ── Phase E damped（生产形态：一阶近似 h ← (1-η)h + η·F(h)） ──────────
+PHASE_E="--enable_energy_reason_core 1 \
+  --phase_e_K_max 3 --phase_e_eta 0.5 \
+  --phase_e_damped_mode 1 --phase_e_k_backprop 1"
+
+# ── Phase 6: scaffold World-JEPA (用户红线：双流 JEPA) ────────────────
+# scaffold mode + block mask 32 tokens + LeWM Cramér-Wold SIGReg
+# mask_ratio=0.6 激活 surprise 防退化
+PHASE6="--phase 6 --world_jepa_mode scaffold --world_jepa_weight 0.5 \
+  --world_sigreg_weight 0.05 --world_mask_ratio 0.6 \
+  --world_mask_scheme block --world_mask_block_mean 32 \
   --attnres_compress_mode paper --attnres_reason_mode legacy \
   --mhc_streams 3 --mhc_alpha_init 0.01 \
-  --reason_loops 20 --exit_aux_weight 0.01 --exit_second_order_delta_weight 0.3 \
-  --cosine_total_steps 3500"
+  --exit_aux_weight 0.01 --exit_second_order_delta_weight 0.3"
 
-# ── IS9 基线（赫布+CMDA+MoR+LoRA32+Memory） ─────────────────────────
+# ── IS9 记忆栈：introspection memory + CMDA + MoR + LoRA32 + 赫布 ────
 IS9="--enable_token_depth_routing 1 --mor_target_continue_ratio 0.7 --mor_balance_weight 0.01 \
   --exit_score_threshold 0.8 --enable_sigreg_ct 1 --sigreg_ct_weight 0.05 \
   --enable_time_conditioning 1 --loop_lora_rank 32 \
   --introspection_input_mode memory --introspection_memory_tokens 4 --introspection_inject_mode cmda \
   --enable_neuromod_ct 1 --neuromod_mode jepa_surprise --neuromod_hebb_rank 32"
-
-# ── G0 默认（slow_k=1, 无cos_sigreg） ────────────────────────────────
-G0="--slow_k 1 --cos_sigreg_weight 0.0"
 
 # ── 检查 GPU ──────────────────────────────────────────────────────────
 GPU_PROCS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l)
@@ -55,9 +69,10 @@ if [ "$GPU_PROCS" -gt 0 ]; then
     [ "$confirm" != "y" ] && exit 1
 fi
 
-LOG="$ARTIFACTS/${EXP_NAME}.log"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/${EXP_NAME}.log"
 echo "================================================================"
-echo "  实验: $EXP_NAME"
+echo "  实验: $EXP_NAME (Phase E damped, 216M, 1 epoch)"
 echo "  日志: $LOG"
 echo "  额外参数: $@"
 echo "  时间: $(date)"
@@ -65,14 +80,13 @@ echo "================================================================"
 
 cd "$TRAINER_DIR"
 PYTHONUNBUFFERED=1 nohup $PYTHON train_luma_refactor.py \
-  $ARCH $TRAIN $IS9 $G0 "$@" \
+  $ARCH $TRAIN $PHASE_E $PHASE6 $IS9 "$@" \
   > "$LOG" 2>&1 &
 
 PID=$!
 echo "PID=$PID"
 echo "查看日志: tail -f $LOG"
 
-# 等几秒确认没有立即崩溃
 sleep 5
 if ! kill -0 $PID 2>/dev/null; then
     echo "ERROR: 进程已退出！查看日志:"

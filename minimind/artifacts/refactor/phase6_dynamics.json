@@ -1,143 +1,106 @@
 {
   "phase": 6,
-  "total_steps": 201,
+  "total_steps": 16,
   "final_dod_rank": 3,
-  "final_energy_mode1_pct": 86.51,
-  "final_dmd_spectral_radius": 0.510006,
+  "final_energy_mode1_pct": 97.04,
+  "final_dmd_spectral_radius": 0.500053,
   "dod_rank_trajectory": [
-    3,
     3,
     3
   ],
   "energy_mode1_pct_trajectory": [
-    94.1,
-    86.5,
-    86.5
+    97.0,
+    97.0
   ],
   "dmd_spectral_radius_trajectory": [
-    0.7336,
-    0.51,
-    0.51
+    0.5001,
+    0.5001
   ],
   "ct_dmd_spectral_radius_trajectory": [
-    0.9444,
-    0.9635,
-    0.9635
+    0.9247,
+    0.9247
   ],
   "verdict_v1": "(deprecated — use v2_verdict)",
   "full_snapshots": [
     {
-      "window_steps": 100,
+      "window_steps": 15,
       "first_step": 1,
-      "last_step": 100,
+      "last_step": 15,
       "pod": {
         "effective_rank": 3,
         "energy_top5_pct": [
-          94.06,
-          3.45,
-          2.49
+          97.04,
+          2.33,
+          0.63
         ],
         "sv_top5": [
-          10.1127,
-          1.938,
-          1.6448
+          36.3933,
+          5.6441,
+          2.9268
         ],
-        "energy_mode1_pct": 94.06,
-        "total_energy": 108.727287
+        "energy_mode1_pct": 97.04,
+        "total_energy": 1364.890888
       },
       "dmd": {
-        "spectral_radius": 0.733559,
+        "spectral_radius": 0.500053,
         "stable": true,
         "eig_mags_top5": [
-          0.7336,
-          0.2442
+          0.5001,
+          0.4634
         ]
       },
       "dod_rank": 3,
-      "energy_mode1_pct": 94.06,
-      "dmd_spectral_radius": 0.733559
+      "energy_mode1_pct": 97.04,
+      "dmd_spectral_radius": 0.500053
     },
     {
-      "window_steps": 100,
-      "first_step": 101,
-      "last_step": 200,
+      "window_steps": 15,
+      "first_step": 1,
+      "last_step": 15,
       "pod": {
         "effective_rank": 3,
         "energy_top5_pct": [
-          86.51,
-          12.06,
-          1.42
+          97.04,
+          2.33,
+          0.63
         ],
         "sv_top5": [
-          4.181,
-          1.5613,
-          0.536
+          36.3933,
+          5.6441,
+          2.9268
         ],
-        "energy_mode1_pct": 86.51,
-        "total_energy": 20.205705
+        "energy_mode1_pct": 97.04,
+        "total_energy": 1364.890888
       },
       "dmd": {
-        "spectral_radius": 0.510006,
+        "spectral_radius": 0.500053,
         "stable": true,
         "eig_mags_top5": [
-          0.51,
-          0.0434
+          0.5001,
+          0.4634
         ]
       },
       "dod_rank": 3,
-      "energy_mode1_pct": 86.51,
-      "dmd_spectral_radius": 0.510006
-    },
-    {
-      "window_steps": 100,
-      "first_step": 101,
-      "last_step": 200,
-      "pod": {
-        "effective_rank": 3,
-        "energy_top5_pct": [
-          86.51,
-          12.06,
-          1.42
-        ],
-        "sv_top5": [
-          4.181,
-          1.5613,
-          0.536
-        ],
-        "energy_mode1_pct": 86.51,
-        "total_energy": 20.205705
-      },
-      "dmd": {
-        "spectral_radius": 0.510006,
-        "stable": true,
-        "eig_mags_top5": [
-          0.51,
-          0.0434
-        ]
-      },
-      "dod_rank": 3,
-      "energy_mode1_pct": 86.51,
-      "dmd_spectral_radius": 0.510006
+      "energy_mode1_pct": 97.04,
+      "dmd_spectral_radius": 0.500053
     }
   ],
-  "v2_layer_dod_rank": 5,
-  "v2_layer_energy_mode1_pct": 81.83,
-  "v2_layer_n_dims": 26,
+  "v2_layer_dod_rank": 4,
+  "v2_layer_energy_mode1_pct": 96.53,
+  "v2_layer_n_dims": 20,
   "v2_layer_dead_layers": [
     "exit_ctrl",
     "mhc"
   ],
   "v2_layer_dod_rank_trajectory": [
-    5,
-    5,
-    5
+    4,
+    4
   ],
   "v2_layer_energy_mode1_trajectory": [
-    89.9,
-    81.8,
-    81.8
+    96.5,
+    96.5
   ],
-  "v2_verdict": "RANK_LOW: 5/26 (19%) | mode1=81.8% 集中 | DEAD_LAYERS: ['exit_ctrl', 'mhc']",
+  "v2_verdict": "RANK_LOW: 4/20 (20%) | mode1=96.5% 集中 | DEAD_LAYERS: ['exit_ctrl', 'mhc']",
   "ct_batch_var_mean": 0.0,
   "ct_batch_var_trend": 0.0,
   "ct_norm_spread": 0.0

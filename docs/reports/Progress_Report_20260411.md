@@ -194,9 +194,34 @@ AdamW: wd_eff = 0.1 × lr → 更有效
 - hebb_norm 稳定（不单调递增）
 - 通过 step 6000+ 不崩溃
 
-### 6.2 下一步
+### 6.2 G0_jepa_enhanced 实验（进行中）
 
-1. 验证 v7 长训练稳定性（0.5 epoch, ~10h）
-2. 如果稳定，跑完整 1 epoch
-3. 评估模型质量（loss、生成样本）
+**核心改动：** 让赫布重新苏醒。
+
+| 参数 | G0 v7 | jepa_enhanced |
+|------|-------|---------------|
+| world_mask_ratio | 0.25 | **0.7** |
+| h_mask_ratio | 0 | **0.25** |
+| h_mask_surprise_weight | — | **0.3** |
+
+**机制：**
+- mask=70% 让 World-JEPA 预测任务持续有难度 → surprise 不归零
+- h_mask_predictor：c_t 直接预测 h 的随机 mask 维度 → c_t→h 理解程度的测量
+- h_mask 误差以 30% 权重混入 surprise → 赫布不再沉睡
+
+**Step 50 初步数据：**
+- jepa=[0.176, 0.242]（vs v7 的 0.000）— JEPA 在工作
+- gain=1.34（vs v7 的 1.00）— 赫布在写入
+- ct_perp=0.395（vs v7 的 0.000）— c_t 方向在变化
+- ct_traj cos=0.482（vs v7 的 1.000）— 人格在进化
+
+**人格框架解读：** 不再是"僵死的人格"，而是"有持续经验输入的活人格"。surprise 来自真实的预测困难，不是人为强制（cos_sigreg），所以方向变化是有信息内容的。
+
+**风险：** 赫布积极写入可能加速 ct 范数增长→触发 clamp=20。需要监控。
+
+### 6.3 下一步
+
+1. 监控 G0_jepa_enhanced 长训练稳定性
+2. 如果稳定，对比 loss：jepa_enhanced vs v7
+3. 评估 ct_perp 是否维持 >0.1（不像之前掉到 0）
 4. 人格注入实验（推理时初始化 c_t 方向）

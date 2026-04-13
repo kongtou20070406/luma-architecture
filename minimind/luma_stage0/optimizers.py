@@ -31,9 +31,22 @@ CONTROL_TENSOR_NAME_PATTERNS = (
     "embedding",
     "embed_table",
     "lm_head",
-    "ct_injection",   # W_c 用 AdamW：Muon 正交化 + 固定方向梯度 → wd 不够压
-    "c_t_head",       # introspection 输出层，同理
-    "hebb_out",       # 赫布写入层，同理
+    "hebb",           # hebb_proj_h/c + hebb_out: AdamW 控制增长，surprise>0 保证有梯度
+    # 用行范数归一化控制增长，不用 weight decay
+)
+
+FORCE_ADAMW_PARAM_SUBSTRINGS = (
+    "ct_injection.proj.weight",   # W_c: 显式走 AdamW，避免 Muon 对时变/定向梯度的放大。
+    "c_t_head.weight",            # c_t_head: 自省投影层，显式走 AdamW 便于控制 c_t 范数增长。
+    "h_mask_predictor.weight",    # h_mask_predictor: 直接驱动 c_t 的辅助头，显式走 AdamW。
+    # Loop LoRA 参数：Muon 正交化让 wd 失效 → LoRA 权重在长训练中单调增长 →
+    # F_k 的 Jacobian 扰动线性放大 → rho_h_frozen 后期越过 1。
+    # V5b (rank=0) ablation 证实 LoRA 是 rho_h 恶化的主因（rho_h_frozen p95 从 1.62 降到 0.90）。
+    "lora_A.weight",              # per-loop LoRA A 矩阵 (nn.Embedding.weight)
+    "lora_B.weight",              # per-loop LoRA B 矩阵
+    "lora_coeff_proj.weight",     # ct-conditioned LoRA 系数投影
+    "lora_shared_A",              # 共享 LoRA A 参数（Hypernet lite）
+    "lora_shared_B",              # 共享 LoRA B 参数
 )
 
 
@@ -160,26 +173,36 @@ class LumaOptimizerBundle:
             group["optim_family"] = "muon"
         for group in self.scalar_optimizer.param_groups:
             group["optim_family"] = "adamw"
+        self.routing_summary = getattr(self, "routing_summary", {"muon": [], "adamw": []})
 
     def _split_params(self, model: torch.nn.Module) -> tuple[list[torch.nn.Parameter], list[dict]]:
         matrix_params: list[torch.nn.Parameter] = []
         scalar_groups: list[dict] = []
+        routing_summary = {"muon": [], "adamw": []}
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
             scale = _modular_norm_scale(name, param, self.config.modular_norm_power)
-            if param.ndim >= 2 and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS):
+            force_adamw = any(pattern in name for pattern in FORCE_ADAMW_PARAM_SUBSTRINGS)
+            if param.ndim >= 2 and not force_adamw and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS):
                 matrix_params.append(param)
+                routing_summary["muon"].append(name)
             else:
+                # 低 wd 白名单：zero-init 或梯度偏小的参数（如 hebb/lora/h_mask_predictor），
+                # 默认 wd=0.1 会把零初始化的 B 矩阵压成 0，导致模块彻底失效。
+                _low_wd_hit = ("hebb" in name) or ("lora" in name) or ("h_mask_predictor" in name)
+                wd = 0.01 if _low_wd_hit else self.config.weight_decay
                 scalar_groups.append(
                     dict(
                         params=[param],
                         lr=self.config.scalar_lr * scale,
                         betas=self.config.betas,
                         eps=self.config.eps,
-                        weight_decay=self.config.weight_decay,
+                        weight_decay=wd,
                     )
                 )
+                routing_summary["adamw"].append(name)
+        self.routing_summary = routing_summary
         return matrix_params, scalar_groups
 
     def _build_matrix_optimizer(self, matrix_params: list[torch.nn.Parameter]):

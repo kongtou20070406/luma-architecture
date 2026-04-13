@@ -145,7 +145,14 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         eos_token_id=args.eos_token_id,
         world_jepa_mode=args.world_jepa_mode,
         world_mask_ratio=args.world_mask_ratio,
+        h_mask_ratio=getattr(args, "h_mask_ratio", 0.0),
+        h_mask_surprise_weight=getattr(args, "h_mask_surprise_weight", 0.3),
+        h_mask_loss_mode=getattr(args, "h_mask_loss_mode", "mse"),
+        h_mask_loss_weight=getattr(args, "h_mask_loss_weight", 0.1),
         world_ema_decay=args.world_ema_decay,
+        ct_world_reg_mode=getattr(args, "ct_world_reg_mode", "none"),
+        ct_world_var_weight=getattr(args, "ct_world_var_weight", 1.0),
+        ct_world_cov_weight=getattr(args, "ct_world_cov_weight", 0.04),
         self_rollout_steps=args.self_rollout_steps,
         self_check_dim=args.self_check_dim,
         self_check_k=args.self_check_k,
@@ -186,6 +193,8 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         enable_exit_confidence_gap=bool(getattr(args, "enable_exit_confidence_gap", 0)),
         use_gradient_checkpointing=bool(args.use_gradient_checkpointing),
         activation_offload_compress=bool(getattr(args, "activation_offload_compress", 0)),
+        mamba_fp8_activation_cache=bool(getattr(args, "mamba_fp8_activation_cache", 0)),
+        mamba_fp8_act_block_size=getattr(args, "mamba_fp8_act_block_size", 128),
         reason_num_phases=getattr(args, "reason_num_phases", 0),
         reason_head_partition=bool(getattr(args, "reason_head_partition", 0)),
         reason_mor_routing=bool(getattr(args, "reason_mor_routing", 0)),
@@ -199,6 +208,18 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         attnres_mode=getattr(args, "attnres_mode", "legacy"),
         attnres_compress_mode=getattr(args, "attnres_compress_mode", ""),
         attnres_reason_mode=getattr(args, "attnres_reason_mode", ""),
+        # ── Phase E 能量梯度流推理（主 backbone 集成）──────────────────
+        enable_energy_reason_core=bool(getattr(args, "enable_energy_reason_core", 0)),
+        phase_e_K_max=getattr(args, "phase_e_K_max", 3),
+        phase_e_eta=getattr(args, "phase_e_eta", 0.1),
+        phase_e_k_backprop=getattr(args, "phase_e_k_backprop", 1),
+        phase_e_temperature=getattr(args, "phase_e_temperature", 0.0),
+        phase_e_grad_stop_eps=getattr(args, "phase_e_grad_stop_eps", 0.0),
+        phase_e_damped_mode=bool(getattr(args, "phase_e_damped_mode", 1)),
+        # World JEPA 难度 / 防崩升级（2026-04-13）
+        world_mask_scheme=getattr(args, "world_mask_scheme", "block"),
+        world_mask_block_mean=getattr(args, "world_mask_block_mean", 32),
+        world_mask_use_mask_token=bool(getattr(args, "world_mask_use_mask_token", 1)),
     )
 
 
@@ -334,12 +355,12 @@ def build_phase4_config(args: argparse.Namespace) -> LumaConfig:
         ct_conditioned_lora=bool(getattr(args, "ct_conditioned_lora", 0)),
         ct_delta_inject=bool(getattr(args, "ct_delta_inject", 0)),
         ct_inject_scale=getattr(args, "ct_inject_scale", 1.0),
-        ct_inj_max=getattr(args, "ct_inj_max", 0.04),
         ct_per_layer_inject=bool(getattr(args, "ct_per_layer_inject", 0)),
         delta_h_scale=getattr(args, "delta_h_scale", 0.0),
         delta_h_normalize=bool(getattr(args, "delta_h_normalize", 0)),
         cos_sigreg_weight=getattr(args, "cos_sigreg_weight", 0.0),
         ct_momentum=getattr(args, "ct_momentum", 0.0),
+        freeze_ct_during_reason=bool(getattr(args, "freeze_ct_during_reason", 0)),
         sigreg_delta_weight=args.sigreg_delta_weight,
         sigreg_num_slices=128,
         sigreg_t_min=0.2,
@@ -428,12 +449,12 @@ def build_phase6_config(args: argparse.Namespace) -> LumaConfig:
         ct_conditioned_lora=bool(getattr(args, "ct_conditioned_lora", 0)),
         ct_delta_inject=bool(getattr(args, "ct_delta_inject", 0)),
         ct_inject_scale=getattr(args, "ct_inject_scale", 1.0),
-        ct_inj_max=getattr(args, "ct_inj_max", 0.04),
         ct_per_layer_inject=bool(getattr(args, "ct_per_layer_inject", 0)),
         delta_h_scale=getattr(args, "delta_h_scale", 0.0),
         delta_h_normalize=bool(getattr(args, "delta_h_normalize", 0)),
         cos_sigreg_weight=getattr(args, "cos_sigreg_weight", 0.0),
         ct_momentum=getattr(args, "ct_momentum", 0.0),
+        freeze_ct_during_reason=bool(getattr(args, "freeze_ct_during_reason", 0)),
         sigreg_rollout_weight=getattr(args, "sigreg_rollout_weight", 0.05),
         sigreg_num_slices=128,
         sigreg_t_min=0.2,
@@ -528,6 +549,122 @@ def log_jsonl(path: Path, record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _to_python_scalar(value):
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return None
+        if value.numel() == 1:
+            return float(value.detach().float().item())
+        return value.detach().float().mean().item()
+    if isinstance(value, (int, float, bool)):
+        return value
+    return float(value)
+
+
+def _mean_or_default(values, default: float = 0.0) -> float:
+    if not values:
+        return default
+    return float(sum(values) / len(values))
+
+
+def _find_named_param(named_params: dict[str, torch.nn.Parameter], suffix: str) -> torch.nn.Parameter | None:
+    for name, param in named_params.items():
+        if name.endswith(suffix):
+            return param
+    return None
+
+
+@torch.no_grad()
+def compute_wc_spectrum(raw_model: LumaForCausalLM) -> dict[str, float | list[float]]:
+    named_params = dict(raw_model.named_parameters())
+    wc = _find_named_param(named_params, "reason_core.ct_injection.proj.weight")
+    if wc is None:
+        return {"wc_sv_top3": [], "wc_sv_top1": 0.0, "wc_cond": 0.0}
+    sv = torch.linalg.svdvals(wc.detach().float())
+    top3 = sv[:3].tolist()
+    cond = float((sv[0] / sv[-1].clamp(min=1e-8)).item()) if sv.numel() > 1 else 1.0
+    return {
+        "wc_sv_top3": [float(x) for x in top3],
+        "wc_sv_top1": float(top3[0]) if top3 else 0.0,
+        "wc_cond": cond,
+    }
+
+
+def compute_gradient_source_split(
+    raw_model: LumaForCausalLM,
+    lm_loss: torch.Tensor,
+    aux: dict,
+    enabled: bool,
+    allow_multi_backward: bool = False,
+) -> dict[str, float]:
+    """梯度源分解 probe。
+
+    注意：torch.autograd.grad(inputs=...) 和 use_reentrant=True 的 gradient checkpointing
+    不兼容。训练主流程开启 checkpointing 时，allow_multi_backward 必须为 False，
+    此时 probe 返回 0.0 占位，实际分解只能在单独的理论诊断运行里做
+    （关闭 checkpointing 或改用 use_reentrant=False）。
+    """
+    if not enabled or not allow_multi_backward:
+        return {
+            "grad_lm_to_wc": 0.0,
+            "grad_hmask_to_ct_head": 0.0,
+            "grad_selfjepa_to_hebb": 0.0,
+            "grad_probe_enabled": 0.0,
+        }
+    named_params = dict(raw_model.named_parameters())
+    wc = _find_named_param(named_params, "reason_core.ct_injection.proj.weight")
+    c_t_head = _find_named_param(named_params, "introspection_state_stream.c_t_head.weight")
+    hebb = _find_named_param(named_params, "neuromod_ct_writer.hebb_out.weight")
+
+    def _grad_norm(loss_term: torch.Tensor | None, param: torch.nn.Parameter | None) -> float:
+        if loss_term is None or param is None:
+            return 0.0
+        if not isinstance(loss_term, torch.Tensor) or not loss_term.requires_grad:
+            return 0.0
+        grad = torch.autograd.grad(loss_term, param, retain_graph=True, allow_unused=True)[0]
+        return float(grad.detach().float().norm().item()) if grad is not None else 0.0
+
+    return {
+        "grad_lm_to_wc": _grad_norm(lm_loss, wc),
+        "grad_hmask_to_ct_head": _grad_norm(aux.get("h_mask_loss"), c_t_head),
+        "grad_selfjepa_to_hebb": _grad_norm(aux.get("self_jepa_loss"), hebb),
+        "grad_probe_enabled": 1.0,
+    }
+
+
+@torch.no_grad()
+def compute_param_grad_totals(raw_model: LumaForCausalLM) -> dict[str, float]:
+    """Backward 后直接从 .grad 读关键参数的总梯度范数，不触发额外 autograd.grad。
+    这是 gradient source split 在 checkpointing 开启时的降级版本——只给出 "lm 主路径" 的总梯度，
+    不能分解出每个 loss 的贡献，但足够用于监控增长趋势。
+    """
+    named_params = dict(raw_model.named_parameters())
+    targets = {
+        "grad_total_wc": _find_named_param(named_params, "reason_core.ct_injection.proj.weight"),
+        "grad_total_c_t_head": _find_named_param(named_params, "introspection_state_stream.c_t_head.weight"),
+        "grad_total_hebb_out": _find_named_param(named_params, "neuromod_ct_writer.hebb_out.weight"),
+    }
+    out: dict[str, float] = {}
+    for key, param in targets.items():
+        if param is None or param.grad is None:
+            out[key] = 0.0
+        else:
+            out[key] = float(param.grad.detach().float().norm().item())
+    return out
+
+
+def should_log_dynamics_detail(step: int, args, burst_remaining: int) -> bool:
+    if burst_remaining > 0:
+        return True
+    if step <= 256:
+        return step % args.dynamics_log_dense_interval == 0
+    if step <= 2048:
+        return step % args.dynamics_log_mid_interval == 0
+    return step % args.dynamics_log_sparse_interval == 0
+
+
 # ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
@@ -564,6 +701,10 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
     exit_depth_snapshots = []
     dyn_report_path = metrics_path.parent / metrics_path.name.replace("_metrics.jsonl", "_dynamics.json")
     dyn_md_path = dyn_report_path.with_suffix(".md")
+    dynamics_path = ARTIFACTS_DIR.parent / "dynamics" / f"{args.save_weight}_phase{args.phase}.jsonl"
+    burst_remaining = 0
+    prev_wc_cond = None
+    prev_grad_probe = None
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -582,9 +723,14 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
 
         input_ids = input_ids.to(args.device)
         labels = labels.to(args.device)
+        detail_requested = should_log_dynamics_detail(step, args, burst_remaining)
+        theory_probe_requested = detail_requested or (args.theory_probe_interval > 0 and step % args.theory_probe_interval == 0)
 
         with autocast_ctx:
-            res = model(input_ids, labels=labels)
+            # theory_probe_requested 时让 model 在 loop_idx==0 跑一次 rho_h_frozen/rho_c_drift/eta_moving_fp 测量
+            res = model(input_ids, labels=labels, measure_theory_probes=theory_probe_requested)
+            raw_model = getattr(model, "_orig_mod", model)
+            aux_snapshot = getattr(raw_model, "last_aux", {})
             # Phase 3+: res.loss 已包含 self_jepa_term（模型内部加权）
             # res.aux_loss = self_jepa_weight * self_jepa_loss（+ 其他目前为 0 的项）
             loss_jepa_val = res.aux_loss.item() if res.aux_loss is not None else 0.0
@@ -633,15 +779,34 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             else:
                 loss = _total_lm / args.accumulation_steps
 
+        wc_spectrum = compute_wc_spectrum(raw_model) if theory_probe_requested else {"wc_sv_top3": [], "wc_sv_top1": 0.0, "wc_cond": 0.0}
+        # grad_source_split 需要多次 backward，与 gradient checkpointing (use_reentrant=True) 不兼容。
+        # 开启 checkpointing 时降级为占位 0.0，只能在专门的理论诊断 run 里关闭 checkpointing 才能激活。
+        _allow_multi_backward = theory_probe_requested and not bool(getattr(args, "use_gradient_checkpointing", 0))
+        grad_source_split = compute_gradient_source_split(
+            raw_model, loss_lm, aux_snapshot, theory_probe_requested,
+            allow_multi_backward=_allow_multi_backward,
+        )
         scaler.scale(loss).backward()
+
+        # NaN 探针：检查梯度是否有 NaN
+        for _pname, _pparam in model.named_parameters():
+            if _pparam.grad is not None and not torch.isfinite(_pparam.grad).all():
+                _nan_g = (~torch.isfinite(_pparam.grad)).sum().item()
+                print(f"[NaN PROBE grad] step={step} {_pname} has {_nan_g} non-finite grads, grad_norm={_pparam.grad.norm().item()}", flush=True)
+                break  # 只报第一个
 
         # ── 梯度监控（backward 后、step 前）────────────────────────────────
         do_grad_log = (step % args.grad_log_interval == 0)
         # Always unscale so grad_metrics can be computed for tracker every step
         scaler.unscale_(optimizer.matrix_optimizer)
         scaler.unscale_(optimizer.scalar_optimizer)
-        raw_model = getattr(model, "_orig_mod", model)
         grad_metrics = compute_grad_metrics(raw_model)
+        # grad_totals: backward 后直接读 .grad 的总范数，不受 checkpointing 限制
+        if theory_probe_requested:
+            grad_totals = compute_param_grad_totals(raw_model)
+        else:
+            grad_totals = {"grad_total_wc": 0.0, "grad_total_c_t_head": 0.0, "grad_total_hebb_out": 0.0}
 
         if step % args.accumulation_steps == 0:
             all_params = list(model.parameters())
@@ -699,6 +864,88 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
         }
         log_jsonl(metrics_path, record)
 
+        dynamics_trigger = False
+        alpha_true = _to_python_scalar(aux_snapshot.get("ct_inject_ratio", 0.0)) or 0.0
+        if alpha_true >= 0.04:  # α_crit ≈ 0.045，预警线
+            dynamics_trigger = True
+        if prev_wc_cond is not None and wc_spectrum["wc_cond"] > max(1.0, prev_wc_cond * 1.5):
+            dynamics_trigger = True
+        # burst trigger 用 grad_totals（backward 后真实读出的总梯度），
+        # 不受 gradient checkpointing 限制；grad_source_split 只在专门诊断 run 里有值。
+        current_grad_probe = (
+            grad_totals.get("grad_total_wc", 0.0),
+            grad_totals.get("grad_total_c_t_head", 0.0),
+            grad_totals.get("grad_total_hebb_out", 0.0),
+        )
+        if prev_grad_probe is not None:
+            for now, prev in zip(current_grad_probe, prev_grad_probe):
+                if prev > 0 and now > 2.0 * prev:
+                    dynamics_trigger = True
+                    break
+        if dynamics_trigger:
+            burst_remaining = max(burst_remaining, args.dynamics_burst_len)
+
+        if args.dynamics_jsonl and detail_requested:
+            dynamics_mod_summary = aux_snapshot.get("dynamics_modulation_summary", {})
+            layer_grad_norms = grad_metrics.get("layer_grad_norms", {})
+            detail_record = {
+                "step": step,
+                "seed": 42,
+                "phase": args.phase,
+                "loop_idx": int(aux_snapshot.get("executed_loops", 0)) - 1,
+                "lm_loss": loss_lm.item(),
+                "aux_loss": _to_python_scalar(aux_loss),
+                "h_mask_loss": _to_python_scalar(aux_snapshot.get("h_mask_loss")),
+                "world_jepa_loss": _to_python_scalar(aux_snapshot.get("world_jepa_loss")),
+                "self_jepa_loss": _to_python_scalar(aux_snapshot.get("self_jepa_loss")),
+                # ct_inj_pre: 注入前的相对强度 = ||proj(c_t)|| / ||h||。
+                "ct_inj_pre": _to_python_scalar(aux_snapshot.get("ct_inject_ratio_pre")),
+                # alpha_true: 实际注入到 h 的相对强度 = ||applied_ct_bias|| / ||h||。
+                "alpha_true": alpha_true,
+                # rho_h_frozen: 冻结 c_t 和 loop_idx，扰动 h 测 F_k 局部雅可比谱半径
+                # rho_c_drift: 冻结 h 和 loop_idx，测 F_k 对 c_t 的敏感度
+                # eta_moving_fp: c_t 变化对 F 的贡献 / h 扰动对 F 的贡献（moving fixed point 强度）
+                "rho_h_frozen": (aux_snapshot.get("theory_probes") or {}).get("rho_h_frozen"),
+                "rho_c_drift": (aux_snapshot.get("theory_probes") or {}).get("rho_c_drift"),
+                "eta_moving_fp": (aux_snapshot.get("theory_probes") or {}).get("eta_moving_fp"),
+                # probe_delta_*_norm: probe 时实际用的扰动 L2 范数，调试用
+                "probe_delta_h_norm": (aux_snapshot.get("theory_probes") or {}).get("probe_delta_h_norm"),
+                "probe_delta_c_norm": (aux_snapshot.get("theory_probes") or {}).get("probe_delta_c_norm"),
+                "ct_norm_raw": _mean_or_default(aux_snapshot.get("ct_norm_raw_history", [])),
+                "ct_norm_after_writer": _mean_or_default(aux_snapshot.get("ct_norm_after_writer_history", [])),
+                "meta_last_norm": _mean_or_default(aux_snapshot.get("meta_last_norm_history", [])),
+                "c_t_head_out_norm": _mean_or_default(aux_snapshot.get("c_t_head_out_norm_history", [])),
+                "wc_sv_top1": wc_spectrum["wc_sv_top1"],
+                "wc_sv_top3": wc_spectrum["wc_sv_top3"],
+                "wc_cond": wc_spectrum["wc_cond"],
+                "hebb_write_norm": _mean_or_default(aux_snapshot.get("nm_hebb_write_history", [])),
+                "surprise_mean": _mean_or_default(aux_snapshot.get("nm_surprise_history", [])),
+                # grad_probe_enabled: 0=降级占位（checkpointing 开）, 1=真实分解
+                "grad_probe_enabled": grad_source_split.get("grad_probe_enabled", 0.0),
+                "grad_lm_to_wc": grad_source_split["grad_lm_to_wc"],
+                "grad_hmask_to_ct_head": grad_source_split["grad_hmask_to_ct_head"],
+                "grad_selfjepa_to_hebb": grad_source_split["grad_selfjepa_to_hebb"],
+                # grad_total_*: backward 后直接读 .grad 的总范数，checkpointing 兼容的降级版
+                "grad_total_wc": grad_totals.get("grad_total_wc", 0.0),
+                "grad_total_c_t_head": grad_totals.get("grad_total_c_t_head", 0.0),
+                "grad_total_hebb_out": grad_totals.get("grad_total_hebb_out", 0.0),
+                "grad_shared_0": layer_grad_norms.get("reason_shared_0", 0.0),
+                "grad_shared_last": layer_grad_norms.get(f"reason_shared_{max(args.reason_shared_depth - 1, 0)}", 0.0),
+                "loop_lora_delta_ratio_mean": _to_python_scalar(dynamics_mod_summary.get("loop_lora_delta_ratio_mean", 0.0)),
+                "loop_lora_delta_norm_mean": _to_python_scalar(dynamics_mod_summary.get("loop_lora_delta_norm_mean", 0.0)),
+                "ct_perp": _to_python_scalar((aux_snapshot.get("ct_delta_perp") or [0.0])[0]),
+                "l_est": (
+                    aux_snapshot["per_loop_delta_h"][1] / max(aux_snapshot["per_loop_delta_h"][0], 1e-8)
+                    if len(aux_snapshot.get("per_loop_delta_h", [])) >= 2 else 0.0
+                ),
+            }
+            log_jsonl(dynamics_path, detail_record)
+
+        prev_wc_cond = wc_spectrum["wc_cond"] if wc_spectrum["wc_cond"] else prev_wc_cond
+        prev_grad_probe = current_grad_probe
+        if burst_remaining > 0:
+            burst_remaining -= 1
+
         if step % args.log_interval == 0 or step == args.iters:
             spend = time.time() - start_time
             eta = spend / step * (args.iters - step) / 60
@@ -715,12 +962,15 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             _world_jepa_eff = _last_aux.get("world_jepa_loss_effective")
             _world_jepa_val = _world_jepa_eff.item() if _world_jepa_eff is not None and hasattr(_world_jepa_eff, "item") else (float(_world_jepa_eff) if _world_jepa_eff is not None else 0.0)
             world_jepa_line = f"  loss_w={_world_jepa_val:.4f}" if _world_jepa_val > 0 else ""
+            _h_mask_val = _last_aux.get("h_mask_loss", torch.tensor(0.0))
+            _h_mask_val = _h_mask_val.item() if hasattr(_h_mask_val, "item") else float(_h_mask_val)
+            h_mask_line = f"  loss_hm={_h_mask_val:.4f}" if _h_mask_val > 0 else ""
             # 改进 #1: peak loops + 改进 #2: ema + 改进 #6: tok/s
             exit_line = f"  loops={_exit_loops}/{args.reason_loops}  peak={interval_max_loops}" if _exit_loops > 0 else ""
             ema_line = f"  ema={loss_ema:.3f}" if loss_ema is not None else ""
             speed_line = f"  tok/s={_tok_per_sec}"
             Logger(
-                f"[{step}/{args.iters}] loss_lm={loss_lm.item():.4f}{compress_line}{jepa_line}{world_jepa_line}"
+                f"[{step}/{args.iters}] loss_lm={loss_lm.item():.4f}{compress_line}{jepa_line}{world_jepa_line}{h_mask_line}"
                 f"  scalar_lr={scalar_lr:.2e}  eta={eta:.1f}min{exit_line}{ema_line}{speed_line}"
                 + grad_line
             )
@@ -733,12 +983,14 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                 _dh = [f"{x:.3f}" for x in _dh_raw]
                 _ct = [f"{x:.3f}" for x in _aux.get("per_loop_ct_change", [])]
                 _je = [f"{x:.3f}" for x in _aux.get("per_loop_jepa_err", [])]
-                # L_est: 每步都能算的收缩率估计 (δh[1]/δh[0])
+                # L_est: 旧口径 proxy，时变系统里只表示相邻两步 δh 的相对变化，不等于真实收缩率。
                 _L_est = _dh_raw[1] / max(_dh_raw[0], 1e-8) if len(_dh_raw) >= 2 else 0.0
                 # ct_perp: c_t 变化方向和 c_t 自身的垂直度 (1=垂直/新方向, 0=平行/同方向累积)
                 _ct_perp = _aux.get("ct_delta_perp", [0.0])[0] if _aux.get("ct_delta_perp") else 0.0
+                _ct_inj_pre = _aux.get("ct_inject_ratio_pre", 0.0)
                 _ct_inj_r = _aux.get("ct_inject_ratio", 0.0)
-                Logger(f"  loops detail: dh={_dh}  ct={_ct}  jepa={_je}  L_est={_L_est:.3f}  ct_perp={_ct_perp:.3f}  ct_inj={_ct_inj_r:.3f}")
+                _lora_ratio = _to_python_scalar(_aux.get("dynamics_modulation_summary", {}).get("loop_lora_delta_ratio_mean", 0.0)) or 0.0
+                Logger(f"  loops detail: dh={_dh}  ct={_ct}  jepa={_je}  L_est={_L_est:.3f}  ct_perp={_ct_perp:.3f}  ct_inj_pre={_ct_inj_pre:.3f}  alpha={_ct_inj_r:.3f}  lora_ratio={_lora_ratio:.3f}")
             if _aux.get("nm_gain_history"):
                 _g = [f"{x:.2f}" for x in _aux["nm_gain_history"]]
                 _h = [f"{x:.4f}" for x in _aux.get("nm_hebb_norm_history", [])]
@@ -756,7 +1008,7 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                 _Ld = _fp.get("L_per_dir_top4", [])
                 _sd = _fp.get("slow_directions", 0)
                 _dd = _fp.get("dead_directions", 0)
-                Logger(f"  fixed_point: L={_Lg:.3f}  dirs={_Ld}  slow={_sd}  dead={_dd}")
+                Logger(f"  fp_proxy: L={_Lg:.3f}  dirs={_Ld}  slow={_sd}  dead={_dd}")
             _snorms = _aux.get("step_norms", [])
             _sangles = _aux.get("step_angles", [])
             _accels = _aux.get("accel_norms", [])
@@ -983,6 +1235,36 @@ if __name__ == "__main__":
     parser.add_argument("--attnres_reason_mode", type=str, default="",
                         help="覆盖推理区 AttnRes 模式（空=跟随 attnres_mode）")
     parser.add_argument("--world_jepa_mode", type=str, default="full")
+    # ── Phase E 能量梯度流推理（主 backbone 集成）──────────────────
+    # 启用时 LumaReasonCore 会把 shared_layers stack 从 "一次 forward" 换成 "K 步能量梯度下降"
+    # E(h) = 0.5 ||h - body(h, c_t)||²，h ← h - η ∇_h E
+    parser.add_argument("--enable_energy_reason_core", type=int, default=0, choices=[0, 1],
+                        help="Phase E: 主 backbone 启用能量梯度流推理（替换 shared_layers 单次 forward）")
+    parser.add_argument("--phase_e_K_max", type=int, default=3,
+                        help="Phase E: 每个 outer loop 内的能量梯度步数（3 是稳定值）")
+    parser.add_argument("--phase_e_eta", type=float, default=0.1,
+                        help="Phase E: 梯度步长 η，η·λ_max(∇²E)<2 保证稳定")
+    parser.add_argument("--phase_e_k_backprop", type=int, default=1,
+                        help="Phase E: truncated backprop 最后 N 步保留 create_graph（显存与梯度权衡）")
+    parser.add_argument("--phase_e_temperature", type=float, default=0.0,
+                        help="Phase E: Langevin 噪声温度 T（0=确定性，Step 3 探索性）")
+    parser.add_argument("--phase_e_grad_stop_eps", type=float, default=0.0,
+                        help="Phase E: 梯度范数早停阈值（0=跑满 K_max）")
+    parser.add_argument("--phase_e_damped_mode", type=int, default=1, choices=[0, 1],
+                        help="Phase E: 1=damped fixed-point (默认, 稳定), 0=grad mode (完整∇E, 需 double backward)")
+    # Mamba3 FP8 activation cache (saved_tensors_hooks per-block 量化, 不改 kernel)
+    parser.add_argument("--mamba_fp8_activation_cache", type=int, default=0, choices=[0, 1],
+                        help="Mamba3 激活缓存 FP8 (per-block 量化, 30-68% 内存节省, bf16 compute 不变)")
+    parser.add_argument("--mamba_fp8_act_block_size", type=int, default=128,
+                        help="FP8 每 block scale 的 block 大小 (默认 128)")
+    # ── World JEPA 难度升级（scaffold 模式防崩 + V-JEPA 风格）──
+    parser.add_argument("--world_mask_scheme", type=str, default="block", choices=["random", "block"],
+                        help="scaffold JEPA mask 策略: random=旧版单 token 随机, block=V-JEPA 风格 span")
+    parser.add_argument("--world_mask_block_mean", type=int, default=32,
+                        help="scaffold block mask 的几何分布平均 span 长度（token 数），32≈1 子句；LeWM 用 48")
+    parser.add_argument("--world_mask_use_mask_token", type=int, default=1, choices=[0, 1],
+                        help="scaffold: 用 learned mask token 替换被遮挡位置的 hidden（防止 predictor 泄漏）")
+    # SIGReg（Cramér-Wold）单正则项防崩，复用已有 --world_sigreg_weight 等 flag
     parser.add_argument("--world_jepa_weight", type=float, default=1.0,
                         help="Phase 6+: world JEPA loss 权重")
     parser.add_argument("--world_sigreg_weight", type=float, default=0.05,
@@ -994,6 +1276,20 @@ if __name__ == "__main__":
     parser.add_argument("--ct_world_jepa_weight", type=float, default=0.3,
                         help="Phase 6+: c_t World JEPA loss 权重")
     parser.add_argument("--world_mask_ratio", type=float, default=0.25)
+    parser.add_argument("--h_mask_ratio", type=float, default=0.0,
+                        help="masked h prediction ratio，error 混入赫布 surprise (0=off)")
+    parser.add_argument("--h_mask_surprise_weight", type=float, default=0.3,
+                        help="masked h error 在 surprise 中的混合权重")
+    parser.add_argument("--h_mask_loss_mode", type=str, default="cosine", choices=["mse", "cosine", "surprise_only", "off"],
+                        help="h_mask loss 模式: mse=数值回传（长训练会爆炸）, cosine=方向回传（有界 [0,2]，推荐）, surprise_only=不反传只做 surprise, off=完全关闭")
+    parser.add_argument("--h_mask_loss_weight", type=float, default=0.1,
+                        help="h_mask_term 在总 loss 中的权重（仅 mse 模式下生效）")
+    parser.add_argument("--ct_world_reg_mode", type=str, default="none", choices=["none", "vicreg"],
+                        help="c_t World JEPA 正则: none/vicreg")
+    parser.add_argument("--ct_world_var_weight", type=float, default=1.0,
+                        help="c_t World JEPA VICReg variance 权重")
+    parser.add_argument("--ct_world_cov_weight", type=float, default=0.04,
+                        help="c_t World JEPA VICReg covariance 权重")
     parser.add_argument("--world_ema_decay", type=float, default=0.99)
     parser.add_argument("--self_check_dim", type=int, default=16)
     parser.add_argument("--self_check_k", type=int, default=2)
@@ -1053,6 +1349,8 @@ if __name__ == "__main__":
                         help="NM: enable neuromodulated c_t writer")
     parser.add_argument("--neuromod_hebb_rank", type=int, default=8,
                         help="NM: rank for Hebbian outer product approximation")
+    parser.add_argument("--hebb_init_scale", type=float, default=0.0,
+                        help="hebb_out 权重初始化缩放 (0=默认zeros, >0 用 normal(std=scale) 模拟长训练)")
     parser.add_argument("--neuromod_use_delta_rule", type=int, default=0, choices=[0, 1],
                         help="NM: use Delta Rule to reduce Hebbian interference")
     parser.add_argument("--neuromod_mode", type=str, default="surprise",
@@ -1124,8 +1422,6 @@ if __name__ == "__main__":
                         help="c_t 调制 Mamba SSM dt: 直接改变状态转移特征值")
     parser.add_argument("--ct_inject_scale", type=float, default=1.0,
                         help="c_t 注入主流的权重缩放 (1.0=默认, 2.0=翻倍)")
-    parser.add_argument("--ct_inj_max", type=float, default=0.04,
-                        help="ct_inj 上限 (‖proj(c_t)‖/‖h‖)，防长训练相变发散")
     parser.add_argument("--ct_per_layer_inject", type=int, default=0, choices=[0, 1],
                         help="c_t 每层独立注入 (4 个独立控制通道)")
     parser.add_argument("--delta_h_scale", type=float, default=0.0,
@@ -1136,6 +1432,8 @@ if __name__ == "__main__":
                         help="Cos SigReg: 惩罚相邻 loop c_t 方向相似度，直接推动方向多样性")
     parser.add_argument("--ct_momentum", type=float, default=0.0,
                         help="自省流更新频率: 每 slow_k 轮更新一次 (1=每轮, 2=隔轮)")
+    parser.add_argument("--freeze_ct_during_reason", type=int, default=0, choices=[0, 1],
+                        help="理论诊断: 推理环内冻结 c_t 梯度，区分 moving fixed point 与主循环不稳定")
     parser.add_argument("--enable_sigreg_ct", type=int, default=0, choices=[0, 1],
                         help="1=对 c_t 加 SIGreg（方案 2），0=只对 pred_delta_c 加（方案 1）")
     parser.add_argument("--self_check_loss_weight", type=float, default=0.1,
@@ -1172,6 +1470,18 @@ if __name__ == "__main__":
                         help="c_t 增量方向局部一致性权重")
     parser.add_argument("--self_local_curvature_weight", type=float, default=0.0,
                         help="c_t 轨迹曲率正则权重")
+    parser.add_argument("--theory_probe_interval", type=int, default=100,
+                        help="每隔多少步计算一次高开销理论 probe（LoRA 扰动、梯度源分解、谱诊断）")
+    parser.add_argument("--dynamics_log_dense_interval", type=int, default=10,
+                        help="step 1-256 的详细动力学日志间隔")
+    parser.add_argument("--dynamics_log_mid_interval", type=int, default=50,
+                        help="step 257-2048 的详细动力学日志间隔")
+    parser.add_argument("--dynamics_log_sparse_interval", type=int, default=200,
+                        help="step 2049+ 的详细动力学日志间隔")
+    parser.add_argument("--dynamics_burst_len", type=int, default=64,
+                        help="触发 burst 后连续逐步记录的长度")
+    parser.add_argument("--dynamics_jsonl", type=int, default=1, choices=[0, 1],
+                        help="1=写出结构化 dynamics JSONL 到 artifacts/dynamics/")
 
     args = parser.parse_args()
     setup_seed(42)
@@ -1215,6 +1525,19 @@ if __name__ == "__main__":
         from model.fp8_linear import convert_to_fp8
         fp8_count = convert_to_fp8(model, min_size=4096)
         Logger(f"FP8: converted {fp8_count} Linear layers to FP8 forward")
+    # hebb_init_scale: 模拟长训练后的权重状态（验证用）
+    if getattr(args, "hebb_init_scale", 0) > 0:
+        _scale = args.hebb_init_scale
+        for name, param in model.named_parameters():
+            if "hebb_out.weight" in name:
+                torch.nn.init.normal_(param, std=_scale)
+                Logger(f"hebb_init_scale: {name} → normal(std={_scale})")
+            elif "_ct_out_norm.scale" in name:
+                param.data.fill_(_scale)  # RMSNorm scale 放大 → ct 范数放大
+                Logger(f"hebb_init_scale: {name} → fill({_scale})")
+            elif "ct_injection" in name and "proj.weight" in name:
+                torch.nn.init.normal_(param, std=_scale * 0.1)  # W_c 也放大
+                Logger(f"hebb_init_scale: {name} → normal(std={_scale*0.1})")
     total_params = sum(p.numel() for p in model.parameters()) / 1e6
     vram_est_gb = total_params * (2 if param_dtype == torch.bfloat16 else 4) / 1024
     fp8_tag = " [FP8]" if args.fp8 else ""
@@ -1265,6 +1588,20 @@ if __name__ == "__main__":
     if getattr(args, "cpu_offload_optimizer", 0):
         optimizer.enable_cpu_offload()
         Logger("Optimizer CPU offload enabled — states will live on CPU pinned memory")
+    routing_summary = getattr(optimizer, "routing_summary", {})
+    targeted_routes = []
+    for family in ("adamw", "muon"):
+        for name in routing_summary.get(family, []):
+            if (
+                "ct_injection.proj.weight" in name
+                or "c_t_head.weight" in name
+                or "h_mask_predictor.weight" in name
+            ):
+                targeted_routes.append(f"{name} -> {family}")
+    if targeted_routes:
+        Logger("Optimizer routing:")
+        for line in targeted_routes:
+            Logger(f"  {line}")
     # LR schedule: cosine decay 到 min_lr (enable_cosine_decay=1) 或固定 LR (默认)
     _lr_total = getattr(args, "cosine_total_steps", 0) or args.iters
     if not getattr(args, "enable_cosine_decay", 0):
@@ -1306,6 +1643,8 @@ if __name__ == "__main__":
 
     metrics_path = ARTIFACTS_DIR / f"phase{args.phase}_metrics.jsonl"
     Logger(f"Metrics → {metrics_path}")
+    if args.dynamics_jsonl:
+        Logger(f"Dynamics JSONL → {ARTIFACTS_DIR.parent / 'dynamics' / f'{args.save_weight}_phase{args.phase}.jsonl'}")
 
     # ── Phase 2+: 压缩区辅助 probe（训练完可丢弃，不影响推理结构）────────
     compress_probe = None

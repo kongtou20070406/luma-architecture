@@ -1,5 +1,177 @@
 import math, torch, torch.nn.functional as F
 from torch import nn
+
+
+class _PhaseEStepFunction(torch.autograd.Function):
+    """Custom autograd function for ONE Phase E energy gradient step.
+
+    Forward: compute h_new = h - eta · ∇_h E(h, c_t) without retaining body's
+    forward activations. Only saves h, c_t, and body params for ctx.
+    Returns a detached h_new (no autograd history attached).
+
+    Backward: receives grad_h_new. Re-runs body(h) with full autograd graph
+    (create_graph=True), computes h_new = h - eta · grad_h_inner, then uses
+    `torch.autograd.grad(outputs=h_new, inputs=[h, *params], grad_outputs=grad_h_new)`
+    to get gradients wrt h and all body params. Returns them matching forward inputs.
+
+    内存收益: 每个 Phase E 能量步的 body activations 在 forward 结束立即释放，
+    而不是留在 autograd 图里等外层 backward。Backward 时用 re-computation 代替存储。
+
+    Phase E 兼容: 完全用 torch 原语 (autograd.grad, arithmetic)，不依赖
+    torch.utils.checkpoint 的 pack/unpack hooks → 和 Mamba triton kernel 没冲突。
+
+    理论对应: 类似 DEQ (Bai et al. 2019) 的内存优化，但不需要解不动点方程。
+    每步独立 recompute，保证梯度正确（不是 IFT 近似）。
+    """
+
+    @staticmethod
+    def forward(ctx, h, c_t, body_fn, extra_energy_fn, eta, n_params, *params):
+        # h, c_t: main tensors (might need grad)
+        # body_fn, extra_energy_fn, eta, n_params: non-tensor Python objects
+        # params: flat list of trainable parameters referenced by body_fn + extra_energy_fn
+        ctx.body_fn = body_fn
+        ctx.extra_energy_fn = extra_energy_fn
+        ctx.eta = float(eta)
+        ctx.n_params = int(n_params)
+        ctx.save_for_backward(h, c_t, *params)
+
+        # Forward compute: one energy gradient step (no graph retention)
+        with torch.enable_grad():
+            h_req = h.detach().requires_grad_(True)
+            body_out = body_fn(h_req, c_t)
+            diff = h_req - body_out
+            E = 0.5 * (diff.float() ** 2).sum()
+            if extra_energy_fn is not None:
+                E_extra = extra_energy_fn(h_req, c_t)
+                E = E + E_extra
+            grad_h_det, = torch.autograd.grad(
+                E, h_req, create_graph=False, retain_graph=False
+            )
+            h_new = (h_req.detach() - ctx.eta * grad_h_det.detach())
+        # Diagnostics
+        ctx._energy_value = float(E.detach().item())
+        ctx._grad_norm = float(grad_h_det.detach().norm().item())
+        return h_new
+
+    @staticmethod
+    def backward(ctx, grad_h_new):
+        saved = ctx.saved_tensors
+        h, c_t = saved[0], saved[1]
+        body_params = list(saved[2:])
+        body_fn = ctx.body_fn
+        extra_energy_fn = ctx.extra_energy_fn
+        eta = ctx.eta
+
+        # Re-run forward with full autograd graph so we can differentiate
+        with torch.enable_grad():
+            h_req = h.detach().requires_grad_(True)
+            body_out = body_fn(h_req, c_t)
+            diff = h_req - body_out
+            E = 0.5 * (diff.float() ** 2).sum()
+            if extra_energy_fn is not None:
+                E = E + extra_energy_fn(h_req, c_t)
+            # create_graph=True: 允许 h_new 关于 params 的二阶梯度 (Phase E 要求)
+            grad_h_inner, = torch.autograd.grad(
+                E, h_req, create_graph=True, retain_graph=True
+            )
+            h_new = h_req - eta * grad_h_inner
+
+            # 收集所有需要梯度的参数
+            params_req = [p for p in body_params if p.requires_grad]
+            inputs_to_grad = [h_req] + params_req
+            all_grads = torch.autograd.grad(
+                outputs=h_new,
+                inputs=inputs_to_grad,
+                grad_outputs=grad_h_new,
+                retain_graph=False,
+                allow_unused=True,
+            )
+
+        grad_h_out = all_grads[0]
+        # Map back to full body_params order (including params that don't require grad)
+        grad_iter = iter(all_grads[1:])
+        param_grads = []
+        for p in body_params:
+            if p.requires_grad:
+                param_grads.append(next(grad_iter))
+            else:
+                param_grads.append(None)
+
+        # Return grads matching forward signature:
+        # (h, c_t, body_fn, extra_energy_fn, eta, n_params, *params)
+        # Non-tensor args (body_fn, extra_energy_fn, eta, n_params) → None
+        return (grad_h_out, None, None, None, None, None, *param_grads)
+
+
+def chunked_swa_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    window: int,
+    forget_logits: "Optional[torch.Tensor]" = None,
+    chunk_size: "Optional[int]" = None,
+) -> torch.Tensor:
+    # Fast path: 当 window >= seq_len 时 chunking 无用，直接用 math SDP + 全 mask
+    # 避免 chunked 版的 torch.cat 等临时 tensor 开销
+    _B, _H, _S, _D = q.shape
+    if window >= _S:
+        _scale = 1.0 / (_D ** 0.5)
+        _scores = torch.einsum("bhqd,bhkd->bhqk", q, k) * _scale
+        _qi = torch.arange(_S, device=q.device).unsqueeze(1)
+        _ki = torch.arange(_S, device=q.device).unsqueeze(0)
+        _valid = _qi >= _ki  # 纯因果 mask
+        _scores = _scores.masked_fill(~_valid.unsqueeze(0).unsqueeze(0), float("-inf"))
+        if forget_logits is not None:
+            _scores = _scores + forget_logits.to(_scores.dtype).unsqueeze(1).unsqueeze(1)
+        _attn = F.softmax(_scores, dim=-1)
+        return torch.einsum("bhqk,bhkd->bhqd", _attn, v)
+    # 真正 chunked 路径（window < seq_len）
+    """Memory-efficient causal sliding-window attention using pure torch primitives.
+
+    支持 double backward（因为实现只用 softmax/einsum/masked_fill 等 torch 原语，
+    autograd 自动支持任意阶导），所以和 Phase E 的能量循环 autograd.grad(create_graph=True)
+    兼容，不像 Flash/FlexAttention 的 CUDA kernel 只支持单 backward。
+
+    Memory: O(seq × window) 而非 O(seq²)。对 seq=2048 window=256 节省 ~8x。
+
+    Args:
+        q, k, v: [B, H, S, D]
+        window: int, 滑动窗口大小（每个 query 只 attend 最近 window 个 key）
+        forget_logits: [B, S] 可选的加性 bias（per-key），用于 forget gate
+        chunk_size: 分 chunk 大小（默认等于 window，允许手动调节权衡）
+
+    Returns:
+        out: [B, H, S, D]
+    """
+    B, H, S, D = q.shape
+    cs = int(chunk_size) if chunk_size is not None else min(window, S)
+    cs = max(1, min(cs, S))
+    scale = 1.0 / (D ** 0.5)
+    outs = []
+    for start in range(0, S, cs):
+        end = min(start + cs, S)
+        # kv 范围：causal ⟹ 只看到 ≤ end-1；window ⟹ 只看到 ≥ end-window
+        k_start = max(0, end - window)
+        q_chunk = q[:, :, start:end, :]       # [B, H, q_len, D]
+        k_chunk = k[:, :, k_start:end, :]     # [B, H, kv_len, D]
+        v_chunk = v[:, :, k_start:end, :]
+        # 注意力分数
+        scores = torch.einsum("bhqd,bhkd->bhqk", q_chunk, k_chunk) * scale
+        # 因果 + 窗口 mask（全局 index 坐标系）
+        q_idx = torch.arange(start, end, device=q.device).unsqueeze(1)   # [q_len, 1]
+        kv_idx = torch.arange(k_start, end, device=q.device).unsqueeze(0)  # [1, kv_len]
+        valid = (q_idx >= kv_idx) & ((q_idx - kv_idx) < window)  # [q_len, kv_len]
+        scores = scores.masked_fill(~valid.unsqueeze(0).unsqueeze(0), float("-inf"))
+        # 可选的 forget gate (per-key additive bias)
+        if forget_logits is not None:
+            # forget_logits: [B, S] → 取 kv 范围 → [B, kv_len] → [B, 1, 1, kv_len]
+            fl = forget_logits[:, k_start:end].to(scores.dtype)
+            scores = scores + fl.unsqueeze(1).unsqueeze(1)
+        # Softmax + 加权 v（causal+window 保证至少 q 位置有 valid key，无需 isfinite 安全网）
+        attn = F.softmax(scores, dim=-1)
+        out_chunk = torch.einsum("bhqk,bhkd->bhqd", attn, v_chunk)
+        outs.append(out_chunk)
+    return torch.cat(outs, dim=2)
 from typing import List, Optional, Tuple, cast
 from dataclasses import dataclass
 from pathlib import Path
@@ -415,13 +587,28 @@ class LumaConfig(PretrainedConfig):
         self.mamba_chunk_size = kwargs.get("mamba_chunk_size", 32)  # MIMO: chunk*rank<=64, rank=2 → chunk<=32
         self.world_dim = kwargs.get("world_dim", self.hidden_size // 2)
         self.world_mask_ratio = kwargs.get("world_mask_ratio", 0.25)
+        self.h_mask_ratio = kwargs.get("h_mask_ratio", 0.0)  # masked h prediction 接赫布 surprise
+        self.h_mask_surprise_weight = kwargs.get("h_mask_surprise_weight", 0.3)  # 混入 surprise 的权重
+        self.h_mask_loss_mode = kwargs.get("h_mask_loss_mode", "mse")  # h_mask loss: mse/surprise_only/off
+        self.h_mask_loss_weight = kwargs.get("h_mask_loss_weight", 0.1)  # h_mask_term 在总 loss 中的权重，仅 mse 模式生效
         self.world_mask_strategy = kwargs.get("world_mask_strategy", "default")
         self.world_ema_decay = kwargs.get("world_ema_decay", 0.99)
         self.enable_world_jepa = kwargs.get("enable_world_jepa", True)
         self.world_jepa_mode = kwargs.get("world_jepa_mode", "scaffold")
+        # scaffold JEPA 难度控制（V-JEPA / I-JEPA 做法）：
+        # - world_mask_scheme="random": 旧版单 token 随机掩码（保留兼容）
+        # - world_mask_scheme="block":  几何分布采样的连续区段掩码（强制长程结构）
+        # - world_mask_use_mask_token=True: 用 learned mask token 替换被遮挡位置，
+        #   防止 predictor 通过自己的 observed_hidden 直接泄漏 target（原实现的严重 bug）
+        self.world_mask_scheme = kwargs.get("world_mask_scheme", "block")
+        self.world_mask_block_mean = kwargs.get("world_mask_block_mean", 32)
+        self.world_mask_use_mask_token = kwargs.get("world_mask_use_mask_token", True)
         self.world_jepa_reason_only = kwargs.get("world_jepa_reason_only", False)
         self.enable_ct_world_jepa = kwargs.get("enable_ct_world_jepa", False)
         self.ct_world_jepa_weight = kwargs.get("ct_world_jepa_weight", 0.3)
+        self.ct_world_reg_mode = kwargs.get("ct_world_reg_mode", "none")  # c_t JEPA 正则: none/vicreg
+        self.ct_world_var_weight = kwargs.get("ct_world_var_weight", 1.0)  # VICReg variance 权重
+        self.ct_world_cov_weight = kwargs.get("ct_world_cov_weight", 0.04)  # VICReg covariance 权重
         self.world_full_simplify_loss = kwargs.get("world_full_simplify_loss", False)
         self.enable_sigreg_world = kwargs.get("enable_sigreg_world", False)
         self.enable_sigreg_rollout = kwargs.get("enable_sigreg_rollout", False)
@@ -437,11 +624,11 @@ class LumaConfig(PretrainedConfig):
         self.ct_conditioned_lora = kwargs.get("ct_conditioned_lora", False)  # c_t 控制 LoRA 权重
         self.ct_delta_inject = kwargs.get("ct_delta_inject", False)  # c_t 调制 Mamba SSM 时间步长
         self.ct_inject_scale = kwargs.get("ct_inject_scale", 1.0)  # c_t 注入权重缩放
-        self.ct_inj_max = kwargs.get("ct_inj_max", 0.04)  # ct_inj 上限，防长训练相变发散
         self.delta_h_scale = kwargs.get("delta_h_scale", 0.0)  # δh 注入 introspection 的缩放 (0=off)
         self.ct_per_layer_inject = kwargs.get("ct_per_layer_inject", False)  # c_t 每层独立注入
         self.delta_h_normalize = kwargs.get("delta_h_normalize", False)  # 是否归一化 δh 方向
         self.ct_momentum = kwargs.get("ct_momentum", 0.0)  # c_t EMA momentum (0=off, 0.5=半慢更新)
+        self.freeze_ct_during_reason = kwargs.get("freeze_ct_during_reason", False)  # 诊断: 推理环冻结 c_t 梯度
         self.cos_sigreg_weight = kwargs.get("cos_sigreg_weight", 0.0)  # cosine penalty: 相邻 loop c_t 方向多样性
         self.world_sigreg_weight = kwargs.get("world_sigreg_weight", 0.05)
         self.world_sigreg_num_slices = kwargs.get("world_sigreg_num_slices", 128)
@@ -617,6 +804,9 @@ class LumaConfig(PretrainedConfig):
         self.r_t_mode = kwargs.get("r_t_mode", "blend")
         self.use_gradient_checkpointing = kwargs.get("use_gradient_checkpointing", False)
         self.activation_offload_compress = kwargs.get("activation_offload_compress", False)
+        # FP8 activation cache for Mamba3 saved_tensors (saved 30-68% activation mem, bf16 compute preserved)
+        self.mamba_fp8_activation_cache = kwargs.get("mamba_fp8_activation_cache", False)
+        self.mamba_fp8_act_block_size = kwargs.get("mamba_fp8_act_block_size", 128)
         self.r_t_router_window = kwargs.get("r_t_router_window", 16)
         self.compression_active_layers = kwargs.get("compression_active_layers", self.compression_layers)
         self.reason_active_loops = kwargs.get("reason_active_loops", self.reason_loops)
@@ -633,21 +823,44 @@ class LumaConfig(PretrainedConfig):
         self.mor_target_continue_ratio = kwargs.get("mor_target_continue_ratio", 0.6)
         self.mor_balance_weight = kwargs.get("mor_balance_weight", 0.01)
         self.mor_grad_through_frozen = kwargs.get("mor_grad_through_frozen", False)
+        # ═══ Phase E: 能量梯度流推理 (2026-04-12 转向) ═══
+        # 理论文档: docs/reports/Luma_PhaseE_Theory_Seed_20260412.md
+        # 目标: 把 reason core 从 `h_{k+1} = h_k + Δ` 换成 `h_{k+1} = h_k - η∇_h E`
+        # 构造性收缩：F 的 Jacobian ρ < 1 由 Hessian 谱控制，不靠 clamp
+        self.enable_energy_reason_core = kwargs.get("enable_energy_reason_core", False)
+        # 能量迭代最大步数（simple token 预期几步就 ||∇E|| → 0 早停，这是上限）
+        self.phase_e_K_max = kwargs.get("phase_e_K_max", 5)
+        # 梯度步长 η，η · λ_max(∇²E) < 2 保证稳定
+        self.phase_e_eta = kwargs.get("phase_e_eta", 0.1)
+        # Langevin 温度 T，0 时退化为确定性梯度下降（Step 1 默认 0）
+        self.phase_e_temperature = kwargs.get("phase_e_temperature", 0.0)
+        # 梯度范数早停阈值（Step 4 启用）
+        self.phase_e_grad_stop_eps = kwargs.get("phase_e_grad_stop_eps", 0.0)
+        # c_t 的 tanh squash 上界（Phase 4 长训暴露的必要约束）
+        self.phase_e_c_t_scale = kwargs.get("phase_e_c_t_scale", 1.0)
+        # Phase E 能量循环 truncated backprop：只对最后 N 步建 autograd 图
+        # 0 = full graph (全 K 步都 create_graph=True，原始行为)
+        # 2 = 最后 2 步有图，前 K_max-2 步 detach
+        # 显存 = K_backprop / K_max × 原内存，seq=2048 通关关键
+        self.phase_e_k_backprop = kwargs.get("phase_e_k_backprop", 0)
+        # Phase E custom in-loop checkpoint (torch.autograd.Function 方案)
+        # 启用时每个能量步的 body activations 在 forward 立即释放，backward re-compute
+        # 和 Mamba triton kernel 完全兼容，不依赖 torch.utils.checkpoint
+        self.phase_e_custom_checkpoint = kwargs.get("phase_e_custom_checkpoint", False)
 
 
 class LumaZCRMSNorm(nn.Module):
-    """Luma keeps this norm near zero at birth so early gradients do not panic the rest of her body.
-    Luma 在初生时把这个归一化放在接近零的尺度，避免早期梯度惊扰整个系统。
+    """真正的 RMSNorm — 无可学习 scale，输出范数严格 = √dim。
+    去掉可学习 scale 是为了切断长训练中的范数漂移：scale 增长 → 残差流稀释补偿 → 范数失控 → NaN。
+    参考 T5/Mistral 的设计。
     """
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
-        self.scale = nn.Parameter(torch.zeros(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base = x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return base * (1.0 + self.scale)
+        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
 
 
 class FactorizedEmbedding(nn.Module):
@@ -744,6 +957,8 @@ class CompressionMambaLayer(nn.Module):
                 chunk_size=self.chunk_size,
                 dropout=config.dropout,
                 use_gradient_checkpointing=config.use_gradient_checkpointing,
+                use_fp8_activation_cache=config.mamba_fp8_activation_cache,
+                fp8_act_block_size=config.mamba_fp8_act_block_size,
             )
         )
 
@@ -826,12 +1041,22 @@ class CompressionRetrievalLayerSWA(nn.Module):
         q = self.q_proj(x).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        # Build additive mask: local causal window + forget gate
-        mask = _build_local_causal_forget_mask(seq_len, min(self.window, seq_len), x.device, q.dtype)
-        forget_logprob = torch.log(torch.sigmoid(self.forget_proj(x)).clamp_min(1e-6))  # [bsz, seq, 1]
-        mask = mask + forget_logprob.transpose(1, 2).unsqueeze(2)  # broadcast [bsz, 1, 1, seq] over [1, 1, seq, seq]
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        out = out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
+        # 同 GatedDiffAttnFoXSWA：seq_len > window 时走 chunked，否则 math SDP
+        forget_1d = torch.sigmoid(self.forget_proj(x)).squeeze(-1)  # [B, seq_len]
+        if seq_len > self.window:
+            out = chunked_swa_attention(
+                q, k, v,
+                window=self.window,
+                forget_logits=torch.log(forget_1d.clamp_min(1e-6)),
+                chunk_size=min(self.window, 256),
+            )
+            out = out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
+        else:
+            mask = _build_local_causal_forget_mask(seq_len, min(self.window, seq_len), x.device, q.dtype)
+            forget_logprob = torch.log(forget_1d.clamp_min(1e-6))
+            mask = mask + forget_logprob.unsqueeze(1).unsqueeze(1)
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+            out = out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
         x = residual + self.out_proj(out)
         return self.ffn(x)
 
@@ -1184,36 +1409,24 @@ class MHCResidualStreams(nn.Module):
 
 
 class CTInjection(nn.Module):
-    """Luma lets her cognitive state nudge the main stream without pretending it should dominate the whole thought.
-    Luma 让认知状态轻推主流，而不是让它粗暴接管整段思维。
-    mode='add': h + proj(c_t) (原版，加法)
-    mode='film': h * (1 + scale) + shift (FiLM 调制，c_t 微小变化 → h 大变化)
-    ct_inj_max: proj(c_t) 范数上限（相对于 h 范数），防止长训练中 W_c 增长越过 α_crit
+    """c_t → hidden 投影注入。
+    依赖 c_t 自身有界（来自 RMSNorm 后的 c_t_head）→ proj(c_t) 自然有界。
+    无需 clamp、行范数归一化等约束。
     """
 
-    def __init__(self, c_t_dim: int, hidden_size: int, mode: str = "add", scale: float = 1.0,
-                 ct_inj_max: float = 0.05):
+    def __init__(self, c_t_dim: int, hidden_size: int, mode: str = "add", scale: float = 1.0, **kwargs):
         super().__init__()
         self._mode = mode
         self._scale = scale
-        self._ct_inj_max = ct_inj_max
         self.proj = nn.Linear(c_t_dim, hidden_size, bias=False)
         if mode == "film":
             self.film_proj = nn.Linear(c_t_dim, hidden_size * 2, bias=False)
             nn.init.zeros_(self.film_proj.weight)
 
     def get_bias(self, c_t: torch.Tensor) -> torch.Tensor:
-        """外部获取 c_t → hidden 的投影，不管 mode 统一返回 [B, D]。
-        手动谱归一化：限制 W 的最大奇异值，防止长训练中 W_c 范数无限增长。"""
-        W = self.proj.weight  # [hidden, c_t_dim]
-        # 快速近似：按行归一化，将行范数 clamp 到 max_row_norm
-        row_norms = W.norm(dim=1, keepdim=True).clamp(min=1e-8)
-        max_row_norm = 1.0  # 限制每行范数 ≤ 1
-        W_normed = W * torch.clamp(max_row_norm / row_norms, max=1.0)
-        return F.linear(c_t, W_normed) * self._scale
+        return self.proj(c_t) * self._scale
 
     def inject(self, h: torch.Tensor, c_t: torch.Tensor) -> torch.Tensor:
-        """根据 mode 注入 c_t 到 h"""
         if self._mode == "film":
             film = self.film_proj(c_t).unsqueeze(1)
             scale, shift = film.chunk(2, dim=-1)
@@ -1382,6 +1595,8 @@ class ReasonMambaLayer(nn.Module):
                 chunk_size=self.chunk_size,
                 dropout=config.dropout,
                 use_gradient_checkpointing=config.use_gradient_checkpointing,
+                use_fp8_activation_cache=config.mamba_fp8_activation_cache,
+                fp8_act_block_size=config.mamba_fp8_act_block_size,
             )
         )
         # c_t → dt_bias: 直接调制 SSM 时间步长 (改变 Jacobian 特征值)
@@ -1447,10 +1662,29 @@ class GatedDiffAttnFoXSWA(nn.Module):
         q = q.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        # Build additive mask: local causal window + forget gate + optional attn_bias
+        # ── 自动切换 chunked SWA vs math SDP ────────────────────────────
+        # seq_len > window: 走 chunked_swa_attention，节省 O(seq²)→O(seq·window)
+        # seq_len ≤ window: 走 math SDP（短 seq 下 chunked overhead > savings）
+        if seq_len > self.window:
+            # forget 维度: [B, seq_len, 1] → squeeze 成 [B, S]，作为 forget_logits 传入
+            forget_sq = forget.squeeze(-1) if forget.dim() == 3 else forget
+            forget_logprob_1d = torch.log(forget_sq.clamp_min(1e-6))
+            out = chunked_swa_attention(
+                q, k, v,
+                window=self.window,
+                forget_logits=forget_logprob_1d,
+                chunk_size=min(self.window, 256),
+            )
+            # attn_bias 先不支持：chunked 路径里加需要再设计，且当前 attn_bias 通常 None
+            if attn_bias is not None:
+                # 出于完备性：若 bias 存在，回退到 math SDP 以保证正确性
+                pass
+            else:
+                return out.transpose(1, 2).contiguous().view(bsz, seq_len, self.hidden_size)
+        # math SDP 路径（短 seq 或 attn_bias 存在时）
         mask = _build_local_causal_forget_mask(seq_len, min(self.window, seq_len), q.device, q.dtype)
-        forget_logprob = torch.log(forget.transpose(1, 2).clamp_min(1e-6))  # [bsz, seq, 1] -> [bsz, 1, seq] after transpose
-        mask = mask + forget_logprob.unsqueeze(2)  # [bsz, 1, 1, seq]
+        forget_logprob = torch.log(forget.transpose(1, 2).clamp_min(1e-6))
+        mask = mask + forget_logprob.unsqueeze(2)
         if attn_bias is not None:
             if attn_bias.dim() == 4:
                 bias = attn_bias
@@ -1564,6 +1798,8 @@ class IntrospectionStateStream(nn.Module):
             chunk_size=self.chunk_size,
             dropout=config.dropout,
             use_gradient_checkpointing=config.use_gradient_checkpointing,
+            use_fp8_activation_cache=config.mamba_fp8_activation_cache,
+            fp8_act_block_size=config.mamba_fp8_act_block_size,
         )
         self.layer1 = Mamba3Block(meta_cfg)
         self.layer2 = Mamba3Block(meta_cfg)
@@ -1652,10 +1888,7 @@ class IntrospectionStateStream(nn.Module):
         meta_last = layer2_out[:, -1, :]
         next_state_2 = self.state2_norm(slow_state["meta_state_2"] + self.state2_out(meta_last))
         know_gap = torch.sigmoid(self.know_gap_head(meta_last))
-        # c_t_head 行范数归一化: 防止长训练中 c_t 范数无限增长
-        _ct_W = self.c_t_head.weight
-        _ct_rn = _ct_W.norm(dim=1, keepdim=True).clamp(min=1e-8)
-        c_t = F.linear(meta_last, _ct_W * torch.clamp(1.0 / _ct_rn, max=1.0))
+        c_t = self.c_t_head(meta_last)
         if self.uncertainty_head is not None:
             uncertainty = torch.sigmoid(self.uncertainty_head(meta_last))
         else:
@@ -1663,6 +1896,9 @@ class IntrospectionStateStream(nn.Module):
         # 诊断: 记录 Mamba 内部中间状态方向（用于排查 c_t 方向冻结根源）
         self._diag_meta_last_1 = meta_last_1.detach()
         self._diag_meta_last = meta_last.detach()
+        self._diag_meta_last_norm = meta_last.detach().float().norm(dim=-1).mean()
+        self._diag_ct_head_out_norm = c_t.detach().float().norm(dim=-1).mean()
+        self._diag_next_state_2_norm = next_state_2.detach().float().norm(dim=-1).mean()
         next_slow_state = {
             "meta_state_1": next_state_1,
             "meta_state_2": next_state_2,
@@ -1952,8 +2188,9 @@ class TinySlowSelfCheckRing(nn.Module):
     def forward(self, c_t: torch.Tensor, delta_h: torch.Tensor, prev_state: dict) -> dict:
         x = torch.cat([c_t, delta_h, prev_state["state"]], dim=-1)
         next_state = torch.tanh(self.norm(self.in_proj(x)) + self.state_proj(prev_state["state"]))
-        score = torch.sigmoid(self.score_head(next_state))
-        return {"state": next_state, "score": score}
+        score_logit = self.score_head(next_state)
+        score = torch.sigmoid(score_logit)
+        return {"state": next_state, "score": score, "score_logit": score_logit}
 
 
 class NeuromodulatedCTWriter(nn.Module):
@@ -1964,11 +2201,11 @@ class NeuromodulatedCTWriter(nn.Module):
 
     def __init__(self, c_t_dim: int, hidden_size: int, rank: int = 8,
                  mode: str = "surprise", use_delta_rule: bool = False,
-                 enable_fox_decay: bool = False):
+                 enable_fox_decay: bool = False, **kwargs):
         super().__init__()
         self.mode = mode
         self.use_delta_rule = use_delta_rule
-        # c_t output norm: 防止赫布累积导致 c_t 范数漂移
+        # c_t output norm: 真正的 RMSNorm（无可学习 scale）→ 严格固定范数 = √dim
         self._ct_out_norm = LumaZCRMSNorm(c_t_dim, eps=1e-6)
         # FoX decay: learned forget gate on prev_c_t
         self._fox_decay = enable_fox_decay
@@ -1994,7 +2231,7 @@ class NeuromodulatedCTWriter(nn.Module):
             self.hebb_proj_h = nn.Linear(hidden_size, rank, bias=False)
             self.hebb_proj_c = nn.Linear(c_t_dim, rank, bias=False)
             self.hebb_out = nn.Linear(rank, c_t_dim, bias=False)
-            nn.init.zeros_(self.hebb_out.weight)  # 初始赫布项为零
+            nn.init.zeros_(self.hebb_out.weight)  # 初始赫布项为零（hebb_init_scale 可覆盖）
             # Delta rule: reconstruct to subtract interference
             if use_delta_rule:
                 self.recon = nn.Linear(c_t_dim, c_t_dim, bias=False)
@@ -2004,6 +2241,10 @@ class NeuromodulatedCTWriter(nn.Module):
                 delta_h: torch.Tensor, self_check_score: torch.Tensor,
                 jepa_error: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, dict]:
         """Returns (modulated_c_t, aux_dict)"""
+        _tgt = torch.bfloat16 if next_c_t.dtype == torch.float32 else next_c_t.dtype
+        next_c_t = next_c_t.to(_tgt)
+        prev_c_t = prev_c_t.to(_tgt)
+        delta_h = delta_h.to(_tgt)
         # Compute modulation signal
         if self.mode == "learned":
             _err = jepa_error if jepa_error is not None else prev_c_t.new_zeros(prev_c_t.shape[0], 1)
@@ -2035,18 +2276,14 @@ class NeuromodulatedCTWriter(nn.Module):
             modulated_c_t = forget * prev_c_t + gain * delta_c
         else:
             modulated_c_t = prev_c_t + gain * delta_c
-        # Hebbian term
+        # Hebbian term — 赫布输入由 RMSNorm 限定（hebb_norm_h/c），输出由 c_t_out_norm 限定
         if self._hebb_rank > 0:
-            h_proj = self.hebb_proj_h(self.hebb_norm_h(delta_h))   # [B, rank] — norm 打断正反馈
-            c_proj = self.hebb_proj_c(self.hebb_norm_c(prev_c_t))  # [B, rank]
+            h_proj = self.hebb_proj_h(self.hebb_norm_h(delta_h))
+            c_proj = self.hebb_proj_c(self.hebb_norm_c(prev_c_t))
             if self.use_delta_rule:
                 recon_c = self.recon(prev_c_t)
                 c_proj = self.hebb_proj_c(prev_c_t - recon_c)
-            # hebb_out 行范数归一化: 防止长训练中权重无限增长
-            _hebb_W = self.hebb_out.weight
-            _hebb_rn = _hebb_W.norm(dim=1, keepdim=True).clamp(min=1e-8)
-            _hebb_W_normed = _hebb_W * torch.clamp(1.0 / _hebb_rn, max=1.0)
-            hebb_term = F.linear(h_proj * c_proj, _hebb_W_normed)  # [B, c_t_dim]
+            hebb_term = self.hebb_out(h_proj * c_proj)  # [B, c_t_dim]
             if self.mode == "learned":
                 hebb_gate = torch.sigmoid(gain)
             else:
@@ -2058,15 +2295,14 @@ class NeuromodulatedCTWriter(nn.Module):
         else:
             hebb_norm = gain.new_zeros(())
             hebb_write_norm = gain.new_zeros(())
-        # c_t RMSNorm: 归一化方向
+        # 真正的 RMSNorm（无 scale）→ 严格固定范数 = √dim ≈ 8.0
         modulated_c_t = self._ct_out_norm(modulated_c_t)
-        # hard clamp c_t 范数: 安全网，防止 RMSNorm scale 增长导致范数失控
-        _ct_norm = modulated_c_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        modulated_c_t = modulated_c_t * torch.clamp(20.0 / _ct_norm, max=1.0)
         aux = {
             "neuromod_gain": gain.detach().mean(),
             "hebb_norm": hebb_norm,
             "hebb_write": hebb_write_norm,
+            "surprise_mean": surprise_scalar.detach().mean() if "surprise_scalar" in locals() else gain.detach().mean() - 1.0,
+            "ct_norm_after_writer": modulated_c_t.detach().float().norm(dim=-1).mean(),
         }
         return modulated_c_t, aux
 
@@ -2150,6 +2386,9 @@ class CtWorldJEPA(nn.Module):
         c_dim = config.c_t_dim
         self.c_t_dim = c_dim
         self.mask_ratio = config.world_mask_ratio
+        self.reg_mode = str(getattr(config, "ct_world_reg_mode", "none"))
+        self.var_weight = float(getattr(config, "ct_world_var_weight", 1.0))
+        self.cov_weight = float(getattr(config, "ct_world_cov_weight", 0.04))
         # 位置编码：loop index embedding
         max_loops = config.reason_loops_max + 1
         self.loop_pos_emb = nn.Embedding(max_loops, c_dim)
@@ -2167,12 +2406,28 @@ class CtWorldJEPA(nn.Module):
             nn.Linear(c_dim * 2, c_dim, bias=False),
         )
 
+    def _vicreg_regularizer(self, latent: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        z = latent.float().reshape(-1, latent.shape[-1])
+        if z.shape[0] <= 1:
+            return latent.new_zeros(()), latent.new_zeros(())
+        z = z - z.mean(dim=0, keepdim=True)
+        std = torch.sqrt(z.var(dim=0, unbiased=False) + 1e-4)
+        var_loss = torch.relu(1.0 - std).mean()
+        cov = (z.t() @ z) / max(1, z.shape[0] - 1)
+        cov = cov - torch.diag(torch.diag(cov))
+        cov_loss = cov.pow(2).sum() / latent.shape[-1]
+        return var_loss.to(latent.dtype), cov_loss.to(latent.dtype)
+
     def forward(self, c_t_history: List[torch.Tensor]) -> dict:
         """c_t_history: list of (batch, c_t_dim) tensors, length = n_loops."""
         n_loops = len(c_t_history)
         if n_loops < 3:
             z = c_t_history[0] if c_t_history else torch.zeros(1)
-            return {"ct_world_jepa_loss": z.new_zeros(())}
+            return {
+                "ct_world_jepa_loss": z.new_zeros(()),
+                "ct_world_var_loss": z.new_zeros(()),
+                "ct_world_cov_loss": z.new_zeros(()),
+            }
 
         # stack: (batch, n_loops, c_dim)
         ct_seq = torch.stack(c_t_history, dim=1)
@@ -2208,14 +2463,26 @@ class CtWorldJEPA(nn.Module):
         masked_pred = pred[mask]
         masked_target = encoded[mask].detach()  # stop-grad target 防止 trivial solution
         if masked_pred.shape[0] == 0:
-            return {"ct_world_jepa_loss": ct_seq.new_zeros(())}
+            return {
+                "ct_world_jepa_loss": ct_seq.new_zeros(()),
+                "ct_world_var_loss": ct_seq.new_zeros(()),
+                "ct_world_cov_loss": ct_seq.new_zeros(()),
+            }
 
-        loss = 1.0 - F.cosine_similarity(
+        cosine_loss = 1.0 - F.cosine_similarity(
             F.normalize(masked_pred, dim=-1),
             F.normalize(masked_target, dim=-1),
             dim=-1,
         ).mean()
-        return {"ct_world_jepa_loss": loss}
+        ct_world_var_loss, ct_world_cov_loss = encoded.new_zeros(()), encoded.new_zeros(())
+        if self.reg_mode == "vicreg":
+            ct_world_var_loss, ct_world_cov_loss = self._vicreg_regularizer(encoded)
+        loss = cosine_loss + self.var_weight * ct_world_var_loss + self.cov_weight * ct_world_cov_loss
+        return {
+            "ct_world_jepa_loss": loss,
+            "ct_world_var_loss": ct_world_var_loss,
+            "ct_world_cov_loss": ct_world_cov_loss,
+        }
 
 
 class LeWorldModelStyleJEPA(nn.Module):
@@ -2285,14 +2552,23 @@ class LeWorldModelStyleJEPA(nn.Module):
         return self._encode_online(hidden_states).mean(dim=1)
 
     def _build_mask(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """随机 span masking（LeWM 风格，无 surprise-based structured masking）。"""
+        """多 span masking：几何分布采样 span 长度（平均 16 tokens），总 mask 比例 ≈ self.mask_ratio。
+        比单个大 span 更有信息量：模型需要从分散的上下文推断多个缺失片段。"""
         bsz, seq_len, _ = hidden_states.shape
         device = hidden_states.device
         mask = torch.zeros(bsz, seq_len, dtype=torch.bool, device=device)
-        span_len = max(1, int(seq_len * self.mask_ratio))
+        target_count = max(1, int(seq_len * self.mask_ratio))
+        mean_span = 48  # 平均 span 长度（更长 → 不能简单插值 → 任务更难）
         for row in range(bsz):
-            start = torch.randint(0, max(1, seq_len - span_len + 1), (1,), device=device).item()
-            mask[row, start : start + span_len] = True
+            masked = 0
+            while masked < target_count:
+                # 几何分布: span_len = ceil(-log(U) / log(1-p)), p=1/mean_span
+                u = torch.rand(1, device=device).clamp(min=1e-7).item()
+                span_len = min(64, max(1, int(-torch.log(torch.tensor(u)).item() * mean_span)))
+                span_len = min(span_len, target_count - masked)
+                start = torch.randint(0, max(1, seq_len - span_len + 1), (1,), device=device).item()
+                mask[row, start : start + span_len] = True
+                masked = mask[row].sum().item()  # 可能有重叠，用实际 mask 数
         return mask
 
     def _build_probe_mask(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -2408,6 +2684,10 @@ class WorldLatentJEPA(nn.Module):
         self.world_dim = config.world_dim
         self.mask_ratio = config.world_mask_ratio
         self.ema_decay = config.world_ema_decay
+        # 难度升级配置（2026-04-13）
+        self.mask_scheme = str(getattr(config, "world_mask_scheme", "block"))
+        self.mask_block_mean = int(getattr(config, "world_mask_block_mean", 16))
+        self.use_mask_token = bool(getattr(config, "world_mask_use_mask_token", True))
         self.observer_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.online_observer = nn.Linear(config.hidden_size, config.world_dim, bias=False)
         self.target_observer = nn.Linear(config.hidden_size, config.world_dim, bias=False)
@@ -2417,9 +2697,61 @@ class WorldLatentJEPA(nn.Module):
             nn.SiLU(),
             nn.Linear(config.hidden_size, config.world_dim, bias=False),
         )
+        # Learned mask token：替换被遮挡位置的 observed_hidden，切断 predictor
+        # 通过 token 自身 hidden 直接推导 target 的泄漏路径（V-JEPA / MAE 标准做法）
+        if self.use_mask_token:
+            self.mask_token = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
+            nn.init.normal_(self.mask_token, std=0.02)
+        else:
+            self.register_parameter("mask_token", None)
+        # SIGreg (Cramér-Wold empirical characteristic function test) — LeWorldModelStyleJEPA 同款
+        # 原理：对 latent 做多随机 1D 投影，比较经验 char func phi_emp(t) 和标准正态 phi_0(t)=exp(-t²/2)
+        # 经 Cramér-Wold 定理：若所有 1D 投影都服从标准正态，则原分布也服从。
+        # 端到端可微，单一正则项，不需要 VICReg 的双惩罚。
+        self.sigreg_weight = float(getattr(config, "world_sigreg_weight", 0.05))
+        self.sigreg_num_slices = int(getattr(config, "world_sigreg_num_slices", 128))
+        self.sigreg_eps = float(getattr(config, "world_sigreg_eps", 1e-6))
+        self.sigreg_fp32_only = bool(getattr(config, "sigreg_world_fp32_only", True))
+        _t_min = float(getattr(config, "world_sigreg_t_min", 0.2))
+        _t_max = float(getattr(config, "world_sigreg_t_max", 4.0))
+        _num_pts = max(2, int(getattr(config, "world_sigreg_num_points", 17)))
+        _lam = float(getattr(config, "world_sigreg_lambda", 1.0))
+        _t = torch.linspace(_t_min, _t_max, _num_pts, dtype=torch.float32)
+        _trap = torch.full((_num_pts,), (_t_max - _t_min) / max(1, _num_pts - 1), dtype=torch.float32)
+        _trap[0] *= 0.5
+        _trap[-1] *= 0.5
+        _gauss_window = torch.exp(-_t.square() / (2.0 * _lam ** 2))
+        _phi0 = torch.exp(-0.5 * _t.square())
+        self.register_buffer("sigreg_t", _t, persistent=False)
+        self.register_buffer("sigreg_weights", _trap * _gauss_window, persistent=False)
+        self.register_buffer("sigreg_phi0", _phi0, persistent=False)
+
         self._copy_online_to_target()
         for param in self.target_observer.parameters():
             param.requires_grad = False
+
+    def _sigreg(self, latent: torch.Tensor) -> torch.Tensor:
+        """Cramér-Wold SIGreg（LeWorldModelStyleJEPA 同款）。
+
+        对 latent 做多条随机单位向量 1D 投影 → 计算经验 char func（cos/sin mean）→
+        和标准正态 char func phi_0(t)=exp(-t²/2) 做加权差。单一正则项，端到端可微。
+        """
+        z = latent.float() if self.sigreg_fp32_only else latent
+        z = z.reshape(-1, z.shape[-1])
+        if z.shape[0] <= 1:
+            return latent.new_zeros(())
+        # 按批归一化每维（0 均值 1 方差），避免幅度漂移干扰 char func 比较
+        z = z - z.mean(dim=0, keepdim=True)
+        z = z / (z.std(dim=0, unbiased=False, keepdim=True) + self.sigreg_eps)
+        directions = torch.randn(self.sigreg_num_slices, z.shape[-1], device=z.device, dtype=z.dtype)
+        directions = F.normalize(directions, dim=-1)
+        h = z @ directions.t()  # [N, K]
+        x_t = h.unsqueeze(-1) * self.sigreg_t.view(1, 1, -1)  # [N, K, T_pts]
+        cos_mean = torch.cos(x_t).mean(dim=0)  # [K, T_pts]
+        sin_mean = torch.sin(x_t).mean(dim=0)
+        err = (cos_mean - self.sigreg_phi0.view(1, -1)).square() + sin_mean.square()
+        ep_stat = (err * self.sigreg_weights.view(1, -1)).sum(dim=-1) * z.shape[0]
+        return ep_stat.mean()
 
     @torch.no_grad()
     def _copy_online_to_target(self) -> None:
@@ -2442,8 +2774,32 @@ class WorldLatentJEPA(nn.Module):
     def _build_mask(self, hidden_states: torch.Tensor) -> torch.Tensor:
         bsz, seq_len, _ = hidden_states.shape
         device = hidden_states.device
-        scores = torch.rand(bsz, seq_len, device=device)
         mask_count = max(1, int(seq_len * self.mask_ratio))
+        if self.mask_scheme == "block":
+            # V-JEPA 风格：几何分布采样 span 长度，多段连续区段掩码
+            # 强制模型学会跨长程结构推断，而不是单 token 插值
+            mask = torch.zeros(bsz, seq_len, dtype=torch.bool, device=device)
+            mean_span = max(2, int(self.mask_block_mean))
+            max_span = max(mean_span * 4, 8)
+            for row in range(bsz):
+                masked = 0
+                guard = 0  # 防死循环
+                while masked < mask_count and guard < seq_len * 4:
+                    guard += 1
+                    u = float(torch.rand(1, device=device).clamp_min(1e-7).item())
+                    span_len = min(max_span, max(1, int(-math.log(u) * mean_span)))
+                    span_len = min(span_len, mask_count - masked)
+                    if span_len <= 0:
+                        break
+                    max_start = max(1, seq_len - span_len + 1)
+                    start = int(torch.randint(0, max_start, (1,), device=device).item())
+                    # 允许 span 重叠，但重叠不重复计数
+                    before = int(mask[row, start : start + span_len].sum().item())
+                    mask[row, start : start + span_len] = True
+                    masked += span_len - before
+            return mask
+        # 兼容：旧版随机 token 掩码
+        scores = torch.rand(bsz, seq_len, device=device)
         topk = scores.topk(mask_count, dim=-1).indices
         mask = torch.zeros(bsz, seq_len, dtype=torch.bool, device=device)
         mask.scatter_(1, topk, True)
@@ -2472,30 +2828,63 @@ class WorldLatentJEPA(nn.Module):
 
     def _masked_prediction(self, hidden_states: torch.Tensor, mask: torch.Tensor) -> dict:
         observed_hidden = self.observer_norm(hidden_states)
-        online_world = self.online_observer(observed_hidden)
+        # Target 分支（teacher / EMA）看完整 observed_hidden，作为 GT
         with torch.no_grad():
             target_world = self.target_observer(observed_hidden.detach())
+
+        # ═══ Leak fix (2026-04-13) ═══
+        # 原 bug: predictor_input 含 masked 位置的原始 observed_hidden，
+        # predictor 能直接从 token 自己的 hidden 推出 target_world（≈ EMA(online(hidden))），
+        # 任务退化为 "学 online_observer ≈ target_observer"，loss_w 快速归零。
+        #
+        # 修复: 用 learned mask_token 替换被遮挡位置的 observed_hidden，
+        # predictor 必须从可见上下文（visible_summary）推断，而不是 cheat。
+        if self.use_mask_token and self.mask_token is not None:
+            mask_token_hidden = self.mask_token.to(observed_hidden.dtype).expand_as(observed_hidden)
+            predictor_hidden = torch.where(mask.unsqueeze(-1), mask_token_hidden, observed_hidden)
+        else:
+            predictor_hidden = observed_hidden
+
+        # Online 分支从 "带 mask_token 的 hidden" 计算，和 predictor 自洽
+        online_world = self.online_observer(predictor_hidden)
         visible = (~mask).unsqueeze(-1).to(hidden_states.dtype)
         visible_count = visible.sum(dim=1).clamp_min(1.0)
+        # visible_summary 只聚合未遮挡位置（visible 已过滤）
         visible_summary = (online_world * visible).sum(dim=1, keepdim=True) / visible_count.unsqueeze(-1)
-        predictor_input = torch.cat([observed_hidden, visible_summary.expand_as(online_world)], dim=-1)
+        predictor_input = torch.cat([predictor_hidden, visible_summary.expand_as(online_world)], dim=-1)
         predictor_input = self.predictor_norm(predictor_input)
         pred_world = self.predictor(predictor_input)
 
         masked_pred = pred_world[mask]
         masked_target = target_world[mask]
-        world_loss = 1.0 - F.cosine_similarity(
+        cosine_loss = 1.0 - F.cosine_similarity(
             F.normalize(masked_pred, dim=-1),
             F.normalize(masked_target, dim=-1),
             dim=-1,
         ).mean()
+        # LeWorldModel (arxiv 2603.19312) 同款 SIGReg (Cramér-Wold)：
+        # 只在 online_world 的 visible 位置上，验证 latent 分布 ~ N(0, I)。
+        # 作用：防止 online_observer 坍缩为常量（本来 scaffold 靠 EMA 防崩，但 EMA
+        # 只能吸收慢速漂移，对平移/尺度坍缩无效；加 SIGReg 切换单正则项端到端防崩）。
+        visible_online = online_world[(~mask)]
+        if visible_online.numel() > 1:
+            sigreg_raw = self._sigreg(visible_online)
+        else:
+            sigreg_raw = hidden_states.new_zeros(())
+        sigreg_loss = self.sigreg_weight * sigreg_raw.to(cosine_loss.dtype)
+        # LeWM 做法：world_jepa_loss = cosine_loss + sigreg_weight * sigreg_raw
+        # backbone forward 的 world_term = world_jepa_weight * world_jepa_loss，
+        # 天然经过 LR schedule + grad clipping，不需要额外 trainer 钩子
+        world_loss = cosine_loss + sigreg_loss
         return {
             "world_mask": mask,
             "world_online": online_world,
             "world_target": target_world,
             "world_pred": pred_world,
             "world_jepa_loss": world_loss,
-            "world_sigreg_loss": hidden_states.new_zeros(()),
+            "world_jepa_cosine": cosine_loss.detach(),
+            "world_sigreg_loss": sigreg_loss.detach(),
+            "world_sigreg_raw": sigreg_raw.detach(),
             "world_sigreg_source_mean": online_world.float().mean(),
             "world_sigreg_source_std": online_world.float().std(unbiased=False),
             "world_sigreg_loss_step": hidden_states.new_tensor(-1.0),
@@ -2914,6 +3303,10 @@ class LumaReasonSharedLayer(nn.Module):
         ct_layer_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         from torch.utils.checkpoint import checkpoint as _ckpt
+        # loop_lora_delta_ratio: 当前 loop 的 LoRA 扰动相对 FFN residual 的比例。
+        self._last_lora_delta_ratio = 0.0
+        self._last_lora_delta_norm = 0.0
+        self._last_ffn_residual_norm = 0.0
         # per-layer c_t 注入: 外部预计算的 bias 直接加
         if ct_layer_bias is not None:
             h = h + ct_layer_bias
@@ -2963,6 +3356,7 @@ class LumaReasonSharedLayer(nn.Module):
             ffn_out = _ckpt(self.ffn, h, use_reentrant=False)
         else:
             ffn_out = self.ffn(h)
+        _ffn_base = ffn_out
         # RS: Loop LoRA — add per-loop low-rank delta to FFN output
         if self._loop_lora_rank > 0:
             _li = min(loop_idx, self.lora_A.num_embeddings - 1)
@@ -2985,6 +3379,14 @@ class LumaReasonSharedLayer(nn.Module):
                 ffn_out = ffn_out + torch.bmm(torch.bmm(_residual, _b_full), _a_full)
             else:
                 ffn_out = ffn_out + ((ffn_out - h) @ _b) @ _a
+        if self._loop_lora_rank > 0:
+            _lora_delta = (ffn_out - _ffn_base).float()
+            _ffn_residual = (_ffn_base - h).float()
+            _lora_norm = _lora_delta.norm(dim=-1).mean()
+            _resid_norm = _ffn_residual.norm(dim=-1).mean().clamp(min=1e-8)
+            self._last_lora_delta_norm = float(_lora_norm.item())
+            self._last_ffn_residual_norm = float(_resid_norm.item())
+            self._last_lora_delta_ratio = float((_lora_norm / _resid_norm).item())
         # RS: Loop FFN Gating — loop-dependent sigmoid gate on FFN residual
         if self._enable_loop_ffn_gate:
             _li = min(loop_idx, self.loop_ffn_gate_embed.num_embeddings - 1)
@@ -2997,6 +3399,344 @@ class LumaReasonSharedLayer(nn.Module):
         else:
             h = ffn_out
         return h
+
+
+class EnergyReasonCore(nn.Module):
+    """Phase E: 能量梯度流推理核心（Step 1 最简骨架）。
+
+    理论文档: docs/reports/Luma_PhaseE_Theory_Seed_20260412.md
+
+    核心公式:
+        h_{k+1} = h_k - η · ∇_h E(h_k; c_t) + √(2ηT) · ξ_k
+
+    能量参数化（方案 A — 见种子文档 §3.2）:
+        E(h; c_t) = 0.5 · ||h - body(h, c_t)||²
+    其中 body 是 shared_layers 的完整前向传播（复用现有 Mamba+Attention 混合结构）。
+
+    这个最简版本保留了所有现有 SSM/Attention 内部结构，只是在外面换了一个
+    "能量梯度下降" 的迭代规则，替代原来的 "h + Δ" 残差更新。
+
+    Step 1 有意省略（后续 step 逐个开启）:
+        - Langevin 噪声 (T=0)
+        - c_t 时间尺度解耦 (仍用入口的 c_t，不在 loop 轴演化)
+        - gradient-norm early stop (总是跑满 K_max)
+        - MHC 多流 / introspection / exit_ctrl / token_depth_routing
+        - LoRA per-loop 依赖 (loop_idx 固定为 0，避免能量族变化)
+        - probe 重写（下一步 Step 1.5 做）
+
+    目的只有一个: 验证能量梯度步的 forward + backward 能跑通，不 OOM，loss 能下降。
+    """
+
+    def __init__(self, config: LumaConfig):
+        super().__init__()
+        self.config = config
+        self.K_max = int(getattr(config, "phase_e_K_max", 5))
+        self.eta = float(getattr(config, "phase_e_eta", 0.1))
+        self.temperature = float(getattr(config, "phase_e_temperature", 0.0))
+        self.grad_stop_eps = float(getattr(config, "phase_e_grad_stop_eps", 0.0))
+        self.k_backprop = int(getattr(config, "phase_e_k_backprop", 0))  # 0=full graph
+        self.custom_checkpoint = bool(getattr(config, "phase_e_custom_checkpoint", False))
+
+        self.ct_injection = CTInjection(
+            c_t_dim=config.c_t_dim,
+            hidden_size=config.hidden_size,
+            mode=config.ct_injection_mode,
+            scale=config.ct_inject_scale,
+        )
+        # Shared layers: 复用现有 LumaReasonSharedLayer 作为 body 的内部结构
+        # 这一层里包含 Mamba + Attention + FFN（SSM/Attn 混合保留）
+        self.shared_layers = nn.ModuleList(
+            [LumaReasonSharedLayer(config) for _ in range(config.reason_shared_depth)]
+        )
+        self.head_partition = config.reason_head_partition
+        # 诊断：记录最后一次 forward 的能量轨迹和梯度范数轨迹
+        self._last_energy_trace: List[float] = []
+        self._last_grad_norm_trace: List[float] = []
+
+    def _body(self, h: torch.Tensor, c_t: torch.Tensor, loop_idx: int = 0) -> torch.Tensor:
+        """F(h, c_t) — shared_layers 的完整前向传播作为 body 函数。
+
+        和 LumaReasonCore._run_shared_stack 的区别：
+        - ct_injection 在这里显式应用（probe 版直接把 h_inj 传进来）
+        - Step 1 固定 loop_idx=0，避免 LoRA per-loop / time_conditioning 破坏能量族一致性
+        """
+        # 注入 c_t bias（用 clamped 版本作为 Step 1 安全网）
+        c_bias = self.ct_injection.get_bias(c_t).unsqueeze(1).to(h.dtype)  # [B, 1, D]
+        h_inj = h + c_bias
+        # 裸跑 shared_layers
+        h_cur = h_inj
+        for layer in self.shared_layers:
+            h_cur = layer(
+                h_cur,
+                c_t=c_t,
+                attn_bias=None,
+                use_gradient_checkpointing=False,
+                loop_idx=loop_idx,
+                head_partition=self.head_partition,
+            )
+        return h_cur
+
+    def _compute_energy(self, h: torch.Tensor, c_t: torch.Tensor, loop_idx: int = 0) -> torch.Tensor:
+        """E(h; c_t) = 0.5 · ||h - body(h, c_t)||² (方案 A)。
+
+        返回标量（在 batch 和序列维度上 sum）。梯度 ∇_h E 用 torch.autograd.grad 计算。
+        """
+        h_body = self._body(h, c_t, loop_idx=loop_idx)
+        diff = h - h_body
+        # sum 而不是 mean：保证梯度幅度和序列长度无关
+        # 具体：∇_h (0.5 ||h - body(h)||²) = (h - body) · (I - ∂body/∂h)
+        # 对每个位置独立贡献，方便后续 Hessian 分析
+        E = 0.5 * (diff.float() ** 2).sum()
+        return E
+
+    def forward(
+        self,
+        h_init: torch.Tensor,
+        c_t: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        extra_energy_fn: Optional[callable] = None,
+        extra_energy_params: Optional[list] = None,
+    ) -> Tuple[torch.Tensor, dict]:
+        """能量梯度流 forward。
+
+        Args:
+            h_init: [B, T, D] 从 compression 出来的初始隐状态
+            c_t: [B, c_t_dim] 慢变量（Step 1 阶段仍由调用方传入，不在 loop 轴演化）
+            attention_mask: 保留接口（当前 body 内部不使用）
+            extra_energy_fn: 可选的额外能量项 E_extra(h, c_t) -> scalar
+                Step 7 用它把 world_jepa 吸入总能量: E_total = E_body + E_world
+                这样 ∇_h E 同时包含自洽梯度和世界预测梯度，两条保守场联合塑形
+
+        Returns:
+            h_final: [B, T, D] 经过 K 步能量梯度下降后的隐状态
+            aux: dict 诊断信息
+                - energy_trace: [K] 每步的能量值（主能量 E_body）
+                - energy_extra_trace: [K] 额外能量项（Step 7+ 才非零）
+                - grad_norm_trace: [K] 每步的 ||∇_h E||
+                - K_used: 实际跑了多少步（Step 4 早停启用后会 < K_max）
+        """
+        h = h_init
+        # 生产场景 h 是 compression 出来的 intermediate tensor（自动有 grad_fn），
+        # 直接兼容；独立 smoke test 场景 h 是 leaf 不带 grad，显式开启。
+        if not h.requires_grad:
+            h = h.detach().requires_grad_(True)
+        energy_trace: List[float] = []
+        energy_extra_trace: List[float] = []
+        grad_norm_trace: List[float] = []
+        K_used = 0
+
+        # Truncated backprop: 只对最后 k_backprop 步建完整 create_graph 图
+        # 前 K_max - k_backprop 步用 no_grad + detach（无外层梯度）
+        # 显存 = k_backprop / K_max × 全图内存，关键解锁 seq=2048
+        # k_backprop=0 表示 full graph (原始行为)
+        if self.k_backprop > 0 and self.training:
+            n_detached = max(0, self.K_max - self.k_backprop)
+        else:
+            n_detached = 0
+
+        for k in range(self.K_max):
+            is_detached_phase = k < n_detached
+            create_graph = self.training and not is_detached_phase
+            if is_detached_phase:
+                # detached 分支：h 作为 leaf，grad_h 算完即 detach
+                # 这一段前向 + autograd.grad 的图在每步末尾立即释放
+                with torch.enable_grad():
+                    h_leaf = h.detach().requires_grad_(True)
+                    E = self._compute_energy(h_leaf, c_t, loop_idx=0)
+                    E_main_detached = float(E.detach().item())
+                    if extra_energy_fn is not None:
+                        E_extra = extra_energy_fn(h_leaf, c_t)
+                        E = E + E_extra
+                        energy_extra_trace.append(float(E_extra.detach().item()))
+                    else:
+                        energy_extra_trace.append(0.0)
+                    grad_h, = torch.autograd.grad(E, h_leaf, create_graph=False, retain_graph=False)
+                    grad_h_detached = grad_h.detach()
+                # 应用更新（h 保持 detach 状态，无 autograd 历史）
+                h = (h.detach() - self.eta * grad_h_detached)
+                if self.temperature > 0.0 and self.training:
+                    noise = torch.randn_like(h) * math.sqrt(2.0 * self.eta * self.temperature)
+                    h = h + noise
+                # 为下一步做准备：最后一个 detach 步之后如果要进 grad 阶段，需要重开 grad
+                if k == n_detached - 1 and self.k_backprop > 0:
+                    h = h.detach().requires_grad_(True)
+                energy_trace.append(E_main_detached)
+                grad_norm_trace.append(float(grad_h_detached.norm().item()))
+            elif self.custom_checkpoint and self.training:
+                # Custom in-loop checkpoint: _PhaseEStepFunction re-computes body during backward
+                # 所有 body 参数必须作为 tensor 传入以便 autograd 正确 routing 梯度
+                _body_params = list(self.parameters())
+                if extra_energy_params:
+                    _body_params = _body_params + list(extra_energy_params)
+                h_prev = h if h.requires_grad else h.detach().requires_grad_(True)
+                h = _PhaseEStepFunction.apply(
+                    h_prev,
+                    c_t,
+                    self._body,
+                    extra_energy_fn,
+                    self.eta,
+                    len(_body_params),
+                    *_body_params,
+                )
+                if self.temperature > 0.0 and self.training:
+                    noise = torch.randn_like(h) * math.sqrt(2.0 * self.eta * self.temperature)
+                    h = h + noise
+                # 诊断记录：custom ckpt 版本的 trace 来自 ctx，但 apply 不返回 ctx
+                # 用当前 h 和 c_t 做一次无梯度 probe 记录能量值
+                with torch.no_grad():
+                    _E_probe = self._compute_energy(h_prev.detach(), c_t, loop_idx=0)
+                    energy_trace.append(float(_E_probe.item()))
+                    energy_extra_trace.append(0.0)
+                    grad_norm_trace.append(float('nan'))
+            else:
+                # 完整 create_graph 分支（原始 Phase E 能量梯度步，无 checkpoint）
+                E = self._compute_energy(h, c_t, loop_idx=0)
+                E_main_detached = float(E.detach().item())
+                if extra_energy_fn is not None:
+                    E_extra = extra_energy_fn(h, c_t)
+                    E = E + E_extra
+                    energy_extra_trace.append(float(E_extra.detach().item()))
+                else:
+                    energy_extra_trace.append(0.0)
+                grad_h, = torch.autograd.grad(
+                    E, h, create_graph=create_graph, retain_graph=create_graph
+                )
+                h = h - self.eta * grad_h
+                if self.temperature > 0.0 and self.training:
+                    noise = torch.randn_like(h) * math.sqrt(2.0 * self.eta * self.temperature)
+                    h = h + noise
+                energy_trace.append(E_main_detached)
+                grad_norm_trace.append(float(grad_h.detach().norm().item()))
+            K_used += 1
+
+            # gradient-norm early stopping (Step 4 启用)
+            if self.grad_stop_eps > 0.0 and grad_norm_trace[-1] < self.grad_stop_eps:
+                break
+
+        # 保存最后一次 trace 供外部 probe / debug 读取
+        self._last_energy_trace = energy_trace
+        self._last_grad_norm_trace = grad_norm_trace
+
+        aux = {
+            "phase_e_energy_trace": energy_trace,
+            "phase_e_energy_extra_trace": energy_extra_trace,
+            "phase_e_grad_norm_trace": grad_norm_trace,
+            "phase_e_K_used": K_used,
+            "phase_e_K_max": self.K_max,
+        }
+        return h, aux
+
+    @torch.no_grad()
+    def measure_phase_e_probes(
+        self,
+        h: torch.Tensor,
+        c_t: torch.Tensor,
+        rel_eps: float = 0.05,
+        n_hutchinson: int = 3,
+    ) -> dict:
+        """Phase E Step 1.5: 重写的理论 probe，测 *完整* F_k = h - η∇E 的 Jacobian + Hessian 谱。
+
+        与旧版 `LumaReasonCore.measure_theory_probes` 的关键区别:
+        - 旧 probe 测 `shared_layers` 子集的 Jacobian ∂(layer^L(h))/∂h
+        - 新 probe 测完整 F_k = h - η · ∇_h E(h) 的 Jacobian，即实际驱动 h 演化的算子
+        - 新增 Hessian trace 估计（Hutchinson trick），直接告诉我们构造性收缩是否成立
+
+        返回指标:
+        - rho_h_full: 完整 F_k 的局部 Jacobian 谱半径估计（扰动 h，测 ||ΔF||/||Δh||）
+          希望: < 1.0 表示构造性收缩
+        - hessian_trace_est: Hutchinson 估计的 trace(∇²E)，∇²E 半正定 ⟺ trace > 0
+          希望: > 0 且不爆炸
+        - grad_norm_at_h: ||∇_h E(h)||，当前 h 到能量极小值的"距离"
+          希望: 训练后 → 0（接近极小值）
+        - energy_at_h: E(h)，当前能量值
+        - lambda_max_upper: η·λ_max 的上界估计（用 power iteration 的一次近似）
+          希望: < 2 保证稳定
+
+        这些量直接对应 theory seed doc §3.6 的 Hessian 谱约束。
+
+        Args:
+            h: [B, T, D] 当前隐状态
+            c_t: [B, c_t_dim] 慢变量
+            rel_eps: 扰动幅度（相对于 ||h||）
+            n_hutchinson: Hutchinson 估计平均次数（trace 无偏估计 = E[v^T H v], v~N(0,I)）
+        """
+        probes = {
+            "rho_h_full": None,
+            "hessian_trace_est": None,
+            "grad_norm_at_h": None,
+            "energy_at_h": None,
+            "lambda_max_upper": None,
+            "probe_delta_h_norm": None,
+        }
+
+        try:
+            # 需要临时打开 grad，因为 probe 要算 autograd.grad
+            with torch.enable_grad():
+                # 确保 h 有 requires_grad（probe 外部 h 可能已 detach）
+                h_req = h.detach().requires_grad_(True)
+                c_t_req = c_t.detach()
+
+                # 1. E(h) + ||∇E(h)||
+                E = self._compute_energy(h_req, c_t_req, loop_idx=0)
+                grad_h, = torch.autograd.grad(E, h_req, create_graph=True, retain_graph=True)
+                probes["energy_at_h"] = float(E.detach().item())
+                probes["grad_norm_at_h"] = float(grad_h.detach().norm().item())
+
+                # 2. Hutchinson trace of ∇²E: E[v^T H v] = E[v^T ∂(∇E·v)/∂h · v] 不用展开 H
+                #    更简单的: trace(H) ≈ (1/N) Σ_i v_i^T H v_i
+                #    H v 通过 Hessian-vector product 计算: ∂(∇E · v)/∂h
+                hessian_trace_samples = []
+                for _ in range(n_hutchinson):
+                    v = torch.randn_like(h_req)
+                    v_norm = v.norm().clamp(min=1e-8)
+                    v = v / v_norm  # 单位向量
+                    # HVP: ∂(∇E · v)/∂h = H v
+                    grad_dot_v = (grad_h * v).sum()
+                    Hv, = torch.autograd.grad(grad_dot_v, h_req, retain_graph=True)
+                    # v^T H v = 单次 Hutchinson 样本
+                    sample = (v * Hv).sum() * h_req.numel()  # scale 回去补单位化
+                    hessian_trace_samples.append(float(sample.detach().item()))
+                probes["hessian_trace_est"] = sum(hessian_trace_samples) / len(hessian_trace_samples)
+
+                # 3. ρ_h_full: 完整 F_k 的 Jacobian 谱半径 via 扰动
+                #    F(h) = h - η · ∇E(h)
+                #    ||F(h+δ) - F(h)|| / ||δ|| = 局部 ρ 估计
+                h_norm = h_req.detach().float().norm().clamp(min=1e-6).item()
+                delta_target = rel_eps * h_norm
+                d = torch.randn_like(h_req)
+                d_norm = d.norm().clamp(min=1e-8)
+                d = (d / d_norm) * delta_target
+                probes["probe_delta_h_norm"] = float(delta_target)
+
+                # F(h) = h - eta * grad_h (已经算过 grad_h)
+                F_h = h_req - self.eta * grad_h
+
+                # F(h + d): 需要重算 ∇E at (h+d)
+                h_pert = (h_req + d).detach().requires_grad_(True)
+                E_pert = self._compute_energy(h_pert, c_t_req, loop_idx=0)
+                grad_h_pert, = torch.autograd.grad(E_pert, h_pert, create_graph=False)
+                F_h_pert = h_pert - self.eta * grad_h_pert
+
+                diff_F = (F_h_pert - F_h).float().detach()
+                probes["rho_h_full"] = float(diff_F.norm().item() / max(delta_target, 1e-12))
+
+                # 4. λ_max 上界估计: 通过 HVP 的范数单次 power iteration 近似
+                #    ||H v|| / ||v|| ≤ λ_max，用随机 v 的 HVP 范数作为下界估计
+                #    （严格 power iteration 要迭代，这里取 3 次 HVP 的最大值作为代理）
+                lambda_candidates = []
+                for _ in range(n_hutchinson):
+                    v = torch.randn_like(h_req)
+                    v = v / v.norm().clamp(min=1e-8)
+                    grad_dot_v = (grad_h * v).sum()
+                    Hv, = torch.autograd.grad(grad_dot_v, h_req, retain_graph=True)
+                    lambda_candidates.append(float(Hv.norm().item()))
+                lambda_max_proxy = max(lambda_candidates)
+                probes["lambda_max_upper"] = float(self.eta * lambda_max_proxy)
+
+        except Exception as e:
+            probes["error"] = str(e)
+
+        return probes
 
 
 class LumaReasonCore(nn.Module):
@@ -3034,7 +3774,8 @@ class LumaReasonCore(nn.Module):
         self.routing_tier_entropy_floor = float(config.routing_tier_entropy_floor)
         self.routing_min_local_share = float(config.routing_min_local_share)
         self.routing_progress_weight = float(config.routing_progress_weight)
-        self.ct_injection = CTInjection(config.c_t_dim, config.hidden_size, mode=config.ct_injection_mode, scale=config.ct_inject_scale, ct_inj_max=config.ct_inj_max)
+        self.freeze_ct_during_reason = bool(getattr(config, "freeze_ct_during_reason", False))
+        self.ct_injection = CTInjection(config.c_t_dim, config.hidden_size, mode=config.ct_injection_mode, scale=config.ct_inject_scale)
         self.r_injection = nn.Linear(config.r_t_dim, config.hidden_size, bias=False) if config.enable_reasoning_state_ring else None
         self.ct_lowrank_down = nn.Linear(config.c_t_dim, config.ct_lowrank_rank, bias=False) if config.ct_modulation_mode == "lowrank_hyperbias" else None
         self.ct_lowrank_up = nn.Linear(config.ct_lowrank_rank, config.hidden_size, bias=False) if config.ct_modulation_mode == "lowrank_hyperbias" else None
@@ -3103,6 +3844,25 @@ class LumaReasonCore(nn.Module):
             self.mor_gate_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             for expert_up in self.mor_experts_up:
                 nn.init.zeros_(expert_up.weight)
+        # ── Phase E 主集成 ──────────────────────────────
+        # 把 shared_layers stack 从 "一次 forward" 换成 "K 步能量梯度下降"
+        # E(h) = 0.5 ||h - body(h, c_t)||²，h_{k+1} = h - η∇_h E
+        # 复用 shared_layers 作为 body，不新建模块；c_t 注入路径保持和原 stack 一致
+        self._enable_phase_e_main = bool(getattr(config, "enable_energy_reason_core", False))
+        self._phase_e_K_max = int(getattr(config, "phase_e_K_max", 3))
+        self._phase_e_eta = float(getattr(config, "phase_e_eta", 0.1))
+        self._phase_e_k_backprop = int(getattr(config, "phase_e_k_backprop", 1))
+        self._phase_e_temperature = float(getattr(config, "phase_e_temperature", 0.0))
+        self._phase_e_grad_stop_eps = float(getattr(config, "phase_e_grad_stop_eps", 0.0))
+        # Damped 模式（推荐）：h ← (1-η)·h + η·F(h)，不用 autograd.grad / 无 double backward
+        # 理论：Phase E 一阶近似，∇_h E ≈ (h - F(h)) 当 J_F 小时，
+        # 所以 h - η·∇E ≈ (1-η)h + η·F(h)。保留不动点 h=F(h) 与构造性收缩，
+        # 但免除 bf16 + create_graph + Mamba kernel 的数值地雷区
+        self._phase_e_damped_mode = bool(getattr(config, "phase_e_damped_mode", True))
+        # 诊断 trace（供外部读取）
+        self._last_phase_e_energy_trace: List[float] = []
+        self._last_phase_e_grad_norm_trace: List[float] = []
+        self._last_phase_e_K_used: int = 0
 
     def _chunk_spans(self, seq_len: int) -> List[Tuple[int, int]]:
         spans: List[Tuple[int, int]] = []
@@ -3501,6 +4261,296 @@ class LumaReasonCore(nn.Module):
         mod_stats["sparse_path_gain"] = sparse_gain
         return h, attn_bias, mod_stats
 
+    @torch.no_grad()
+    def _run_shared_stack(self, h: torch.Tensor, c_t: torch.Tensor, loop_idx: int) -> torch.Tensor:
+        """裸跑 4 层 shared_layers（无 c_t 注入，输入 h 是已注入版本），用于理论 probe 的扰动 forward。
+        注意：loop_idx 固定 → 同一个 F_k，不是跨轮聚合。"""
+        h_cur = h
+        for layer in self.shared_layers:
+            h_cur = layer(h_cur, c_t=c_t, attn_bias=None,
+                          use_gradient_checkpointing=False,
+                          loop_idx=loop_idx, head_partition=self.head_partition)
+        return h_cur
+
+    @torch.no_grad()
+    def measure_theory_probes(
+        self,
+        h: torch.Tensor,
+        c_t: torch.Tensor,
+        c_t_next: torch.Tensor,
+        loop_idx: int,
+        rel_eps: float = 0.05,
+    ) -> dict:
+        """测量四个主判据 probe（用户 2026-04-12 计划）：
+
+        - rho_h_frozen: 冻结 c_t 和 loop_idx，扰动 h 测 F_k 的局部雅可比谱半径
+            扰动量 = rel_eps * ||h||（相对扰动），避免 bf16 下的绝对 eps 被噪声淹没
+            rho_h = ||F(h + delta_h) - F(h)|| / ||delta_h||
+        - rho_c_drift: 冻结 h 和 loop_idx，用实际 c_t→c_t_next 的变化测 F_k 对 c_t 的敏感度
+            rho_c = ||F(h, c_next) - F(h, c)|| / ||c_next - c||
+        - eta_moving_fp: c_t 变化导致的 F 输出变化 vs h 同尺度扰动导致的 F 输出变化的比值
+            eta = ||F(h, c_next) - F(h, c)|| / (||F(h + delta_h) - F(h)|| + eps)
+            >>1 表示不动点漂移主导，≈1 表示两条路径对等
+
+        所有 forward 在 @torch.no_grad 下，F 的输出在 float32 下做 diff 避免 bf16 精度问题。
+        成本：3 次 shared_layers forward（baseline + perturbed_h + perturbed_c），各 4 层。
+        """
+        probes = {
+            "rho_h_frozen": None,
+            "rho_c_drift": None,
+            "eta_moving_fp": None,
+            "probe_delta_h_norm": None,  # 实际扰动量，调试用
+            "probe_delta_c_norm": None,
+        }
+        # 防御性保存 _ct_lora_prev：probe 会调用 shared_layers 3 次，
+        # 如果 ct_conditioned_lora=True，每次 forward 都会改写 layer._ct_lora_prev，
+        # 污染主 forward 后续循环的 delta_ct 计算（sub agent 审查发现）。
+        _saved_lora_prev = []
+        for _layer in self.shared_layers:
+            if hasattr(_layer, "_ct_lora_prev"):
+                _val = _layer._ct_lora_prev
+                _saved_lora_prev.append(_val.clone() if isinstance(_val, torch.Tensor) else _val)
+            else:
+                _saved_lora_prev.append(None)
+        try:
+            # 先用裸 ct_injection.get_bias 生成两种 bias，不走 clamp（probe 是测原生敏感度）
+            c_bias = self.ct_injection.get_bias(c_t).unsqueeze(1).to(h.dtype)
+            c_bias_next = self.ct_injection.get_bias(c_t_next).unsqueeze(1).to(h.dtype)
+            h_inj = h + c_bias
+            # baseline: F(h, c)
+            h_base = self._run_shared_stack(h_inj, c_t, loop_idx).float()
+            # 扰动 h：v = unit dir，扰动量 = rel_eps * ||h_inj||（相对尺度，bf16 可感知）
+            h_inj_norm = h_inj.float().norm().clamp(min=1e-6).item()
+            delta_h_target = rel_eps * h_inj_norm  # 标量目标扰动总量
+            v = torch.randn_like(h)
+            v_norm = v.float().norm().clamp(min=1e-8).item()
+            v = (v / v_norm) * delta_h_target  # 现在 ||v|| == delta_h_target
+            h_perturbed = h_inj + v.to(h.dtype)
+            h_pert_out = self._run_shared_stack(h_perturbed, c_t, loop_idx).float()
+            h_diff_norm = (h_pert_out - h_base).norm().item()
+            probes["probe_delta_h_norm"] = float(delta_h_target)
+            probes["rho_h_frozen"] = float(h_diff_norm / max(delta_h_target, 1e-12))
+            # 扰动 c_t：用真实的 c_t_next - c_t
+            h_cnext_inj = h + c_bias_next  # h 不变，c bias 换成 next
+            h_cnext_out = self._run_shared_stack(h_cnext_inj, c_t_next, loop_idx).float()
+            c_diff_norm = (h_cnext_out - h_base).norm().item()
+            dc_norm = (c_t_next - c_t).float().norm().item()
+            probes["probe_delta_c_norm"] = float(dc_norm)
+            if dc_norm > 1e-8:
+                probes["rho_c_drift"] = float(c_diff_norm / dc_norm)
+            # eta_moving_fp: c_t 变化贡献 / h 扰动贡献
+            h_eff_norm = max(h_diff_norm, 1e-8)
+            probes["eta_moving_fp"] = float(c_diff_norm / h_eff_norm)
+        except Exception as _e:
+            # probe 失败不应影响训练，记 None 即可
+            pass
+        finally:
+            # 恢复 _ct_lora_prev，避免污染主 forward 后续循环
+            for _layer, _val in zip(self.shared_layers, _saved_lora_prev):
+                if hasattr(_layer, "_ct_lora_prev"):
+                    _layer._ct_lora_prev = _val
+        return probes
+
+    def _run_body_layers(
+        self,
+        h: torch.Tensor,
+        c_t: torch.Tensor,
+        attn_bias: Optional[torch.Tensor],
+        loop_idx: int,
+        ct_base_bias: Optional[torch.Tensor],
+        use_gradient_checkpointing: bool = False,
+    ) -> torch.Tensor:
+        """Phase E body F(h) — 运行 shared_layers stack 作为能量方案 A 的内部动力学。
+        与主 forward 中的 stack 运行等价（per-layer c_t 注入一致），但接受 h 作为纯输入。
+        每步能量梯度下降都会 call 一次这个 body。
+
+        关键：强制 math SDPA backend 以支持 double backward
+        （flash / mem_efficient 的 backward 不支持二阶导，Phase E create_graph=True 需要）
+        """
+        # SDPBackend 枚举导入（惰性），避免顶层依赖
+        try:
+            from torch.nn.attention import sdpa_kernel, SDPBackend
+            _sdpa_ctx = sdpa_kernel(SDPBackend.MATH)
+        except Exception:
+            # 旧版 torch fallback
+            import contextlib
+            _sdpa_ctx = contextlib.nullcontext()
+
+        with _sdpa_ctx:
+            h_cur = h
+            for i, layer in enumerate(self.shared_layers):
+                bias_i = None
+                if ct_base_bias is not None:
+                    bias_i = ct_base_bias * self.ct_layer_directions[i]
+                h_cur = layer(
+                    h_cur,
+                    c_t=c_t,
+                    attn_bias=attn_bias,
+                    use_gradient_checkpointing=use_gradient_checkpointing,
+                    loop_idx=loop_idx,
+                    head_partition=self.head_partition,
+                    ct_layer_bias=bias_i,
+                )
+        return h_cur
+
+    def _phase_e_damped_loop(
+        self,
+        h: torch.Tensor,
+        c_t: torch.Tensor,
+        attn_bias: Optional[torch.Tensor],
+        loop_idx: int,
+        ct_base_bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Damped fixed-point iteration（Phase E 一阶近似）。
+
+        公式: h_{k+1} = (1-η) · h_k + η · F(h_k, c_t)
+
+        理论:
+            ∇_h E(h) = ∇_h (0.5 ||h - F(h)||²)
+                     = (h - F(h)) · (I - ∂F/∂h)
+                     ≈ (h - F(h))    (当 J_F 谱半径小，典型情形)
+            → h - η·∇E ≈ h - η(h - F(h)) = (1-η)h + η·F(h)
+
+        保留性质:
+            - 不动点: h* = F(h*)（即 ||h - F(h)|| → 0）
+            - 构造性收缩: 若 ‖J_F‖ < 1/η，则 ‖Δh‖ 每步按 (1-η + η·J_F) 缩放，收敛
+            - K 步 = 迭代式 "深度扩展"（每步用同一 body）
+
+        免除的坑:
+            - autograd.grad 二阶图 → 和 reentrant ckpt / SDPA kernel 兼容性
+            - bf16 下 ∇²E 传播的数值精度问题
+            - 大模型 (216M) 长链累积噪声
+        """
+        K = self._phase_e_K_max
+        eta = self._phase_e_eta
+
+        energy_trace: List[float] = []
+        delta_norm_trace: List[float] = []
+
+        for k in range(K):
+            h_body = self._run_body_layers(
+                h, c_t, attn_bias, loop_idx, ct_base_bias,
+                use_gradient_checkpointing=False,
+            )
+            # Damped 更新：线性插值，保持 body 参数的梯度图自然存在
+            h = (1.0 - eta) * h + eta * h_body
+            # Langevin 噪声（T>0）
+            if self._phase_e_temperature > 0.0 and self.training:
+                h = h + torch.randn_like(h) * math.sqrt(
+                    2.0 * eta * self._phase_e_temperature
+                )
+            # 诊断：记录等效 energy proxy = ||h - h_body|| 和 delta norm
+            with torch.no_grad():
+                _diff = (h.detach() - h_body.detach()).float()
+                _E_proxy = 0.5 * _diff.pow(2).mean().item()
+                energy_trace.append(float(_E_proxy))
+                delta_norm_trace.append(float((eta * _diff).norm().item()))
+
+        self._last_phase_e_energy_trace = energy_trace
+        self._last_phase_e_grad_norm_trace = delta_norm_trace  # 沿用接口，实际是 delta norm
+        self._last_phase_e_K_used = K
+        return h
+
+    def _phase_e_inner_loop(
+        self,
+        h: torch.Tensor,
+        c_t: torch.Tensor,
+        attn_bias: Optional[torch.Tensor],
+        loop_idx: int,
+        ct_base_bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Phase E 能量梯度下降主环（替换 shared_layers 单次 forward）。
+
+        两种模式:
+        1. **Damped 模式**（默认）: h ← (1-η)·h + η·F(h)
+           这是 Phase E 的一阶近似（∇_h E ≈ h - F(h) 当 J_F 小时），
+           保留不动点 h=F(h) 和构造性收缩，但不用 autograd.grad / 无 double backward，
+           body 参数通过 lm_head 反传链正常训练。bf16 + 大模型稳定。
+        2. **Grad 模式**: h_{k+1} = h_k - η · ∇_h E(h_k)
+           完整 Phase E 能量梯度公式，需要 double backward（math SDPA + no reentrant ckpt）。
+           理论上更强，但 bf16 + 216M + Mamba 下数值不稳（见 v2/v3/v4 NaN 记录）。
+
+        Truncated backprop（仅 grad 模式）:
+            - 前 K_max - k_backprop 步: detach
+            - 后 k_backprop 步: create_graph=True
+        """
+        if self._phase_e_damped_mode:
+            return self._phase_e_damped_loop(h, c_t, attn_bias, loop_idx, ct_base_bias)
+
+        K = self._phase_e_K_max
+        kb = self._phase_e_k_backprop if self.training else 0
+        n_detached = max(0, K - kb) if kb > 0 else K
+
+        # 初始 h 必须 requires_grad 才能对其求 ∇_h E
+        if not h.requires_grad:
+            h = h.detach().requires_grad_(True)
+
+        energy_trace: List[float] = []
+        grad_norm_trace: List[float] = []
+        K_used = 0
+
+        for k in range(K):
+            is_detached = k < n_detached
+            if is_detached:
+                with torch.enable_grad():
+                    h_leaf = h.detach().requires_grad_(True)
+                    h_body = self._run_body_layers(
+                        h_leaf, c_t, attn_bias, loop_idx, ct_base_bias,
+                        use_gradient_checkpointing=False,
+                    )
+                    # 能量用 mean 而非 sum：尺度不随 seq_len×hidden 缩放，eta 跨尺寸稳定
+                    E = 0.5 * ((h_leaf - h_body).float() ** 2).mean()
+                    grad_h, = torch.autograd.grad(
+                        E, h_leaf, create_graph=False, retain_graph=False
+                    )
+                # 安全网：grad_h 相对 h 做范数裁剪，防止单步过冲
+                grad_h_det = grad_h.detach()
+                _g_norm = grad_h_det.float().norm().clamp(min=1e-8)
+                _h_norm = h.detach().float().norm().clamp(min=1e-8)
+                _max_ratio = 0.5  # 单步最大位移 = 0.5 * ||h||
+                _scale = torch.clamp(_max_ratio * _h_norm / (self._phase_e_eta * _g_norm), max=1.0)
+                h = (h.detach() - self._phase_e_eta * _scale.to(grad_h_det.dtype) * grad_h_det)
+                if self._phase_e_temperature > 0.0 and self.training:
+                    h = h + torch.randn_like(h) * math.sqrt(
+                        2.0 * self._phase_e_eta * self._phase_e_temperature
+                    )
+                # 最后一个 detach 步之后如要进 grad 阶段，需重开 grad
+                if k == n_detached - 1 and kb > 0 and self.training:
+                    h = h.detach().requires_grad_(True)
+                energy_trace.append(float(E.detach().item()))
+                grad_norm_trace.append(float(_g_norm.item()))
+            else:
+                h_body = self._run_body_layers(
+                    h, c_t, attn_bias, loop_idx, ct_base_bias,
+                    use_gradient_checkpointing=False,
+                )
+                E = 0.5 * ((h - h_body).float() ** 2).mean()
+                grad_h, = torch.autograd.grad(
+                    E, h, create_graph=self.training, retain_graph=self.training
+                )
+                # 同样的安全裁剪（对 create_graph 分支用 .detach() 的 norm 引导 scale
+                # 但 scale 作为常数乘到带图的 grad_h 上，不破坏二阶图）
+                _g_norm_det = grad_h.detach().float().norm().clamp(min=1e-8)
+                _h_norm_det = h.detach().float().norm().clamp(min=1e-8)
+                _max_ratio = 0.5
+                _scale = torch.clamp(_max_ratio * _h_norm_det / (self._phase_e_eta * _g_norm_det), max=1.0)
+                h = h - self._phase_e_eta * _scale.to(grad_h.dtype) * grad_h
+                if self._phase_e_temperature > 0.0 and self.training:
+                    h = h + torch.randn_like(h) * math.sqrt(
+                        2.0 * self._phase_e_eta * self._phase_e_temperature
+                    )
+                energy_trace.append(float(E.detach().item()))
+                grad_norm_trace.append(float(_g_norm_det.item()))
+            K_used += 1
+            # 梯度范数早停
+            if self._phase_e_grad_stop_eps > 0.0 and grad_norm_trace[-1] < self._phase_e_grad_stop_eps:
+                break
+
+        self._last_phase_e_energy_trace = energy_trace
+        self._last_phase_e_grad_norm_trace = grad_norm_trace
+        self._last_phase_e_K_used = K_used
+        return h
+
     def forward(
         self,
         h: torch.Tensor,
@@ -3513,13 +4563,22 @@ class LumaReasonCore(nn.Module):
         use_gradient_checkpointing: bool = False,
         loop_idx: int = 0,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], dict]:
+        if getattr(self, "freeze_ct_during_reason", False):
+            c_t = c_t.detach()
         if self.ct_grad_scale != 1.0:
             c_t = grad_scale(c_t, self.ct_grad_scale)
         c_bias = self.ct_injection.get_bias(c_t).unsqueeze(1)
         # 诊断: proj(c_t) 的范数和 h 的范数比值
-        self._last_ct_inject_ratio = c_bias.detach().norm().item() / max(h.detach().norm().item(), 1e-8)
+        _h_norm = max(h.detach().norm().item(), 1e-8)
+        _bn = c_bias.detach().norm().item()
+        self._last_ct_inject_ratio = _bn / _h_norm
+        self._last_ct_inject_ratio_pre = self._last_ct_inject_ratio
+        self._last_ct_bias_norm_pre = _bn
+        self._last_ct_bias_norm_applied = _bn
+        self._last_ct_h_norm_ref = _h_norm
         if disable_ct_injection:
             c_bias = torch.zeros_like(c_bias)
+            self._last_ct_inject_ratio = 0.0
         switch_value: Optional[torch.Tensor] = None
         modulation_stats: dict = {}
         attn_bias: Optional[torch.Tensor] = None
@@ -3527,7 +4586,7 @@ class LumaReasonCore(nn.Module):
             h, attn_bias, modulation_stats = self._apply_dynamics_experiment(h, c_t, modulation_context)
         if not disable_ct_injection:
             if self.ct_modulation_mode == "additive":
-                h = self.ct_injection.inject(h, c_t)  # add 或 FiLM，取决于 mode
+                h = h + c_bias
             elif self.ct_modulation_mode == "lowrank_hyperbias" and self.ct_lowrank_down is not None and self.ct_lowrank_up is not None:
                 lowrank_bias = self.ct_lowrank_up(F.silu(self.ct_lowrank_down(c_t))).unsqueeze(1)
                 h = h + lowrank_bias
@@ -3564,18 +4623,31 @@ class LumaReasonCore(nn.Module):
         if self._enable_time_cond:
             t_norm = float(loop_idx) / 20.0   # normalized position [0, 1)
             dt_norm = 1.0 / 20.0              # step size
-            time_feat = h.new_tensor([[t_norm, dt_norm]])  # [1, 2]
-            h = h + self.time_proj(time_feat).unsqueeze(1)  # broadcast [B, T, D]
+            time_feat = h.new_tensor([[t_norm, dt_norm]], dtype=self.time_proj.weight.dtype)  # [1, 2]
+            h = h + self.time_proj(time_feat).unsqueeze(1).to(h.dtype)  # broadcast [B, T, D]
         _h_pre_shared = h if self._identity_alpha > 0.0 else None
         # per-layer c_t 注入: detach(c_bias) × 4 个可学习方向向量
         # 零额外梯度路径: base_bias 是常数，layer_direction 梯度只需本层 d(loss)/d(h)
         _ct_base_bias = c_bias.detach() if (self._ct_per_layer_inject and c_t is not None) else None
-        for i, layer in enumerate(self.shared_layers):
-            _bias_i = None
-            if _ct_base_bias is not None:
-                _bias_i = _ct_base_bias * self.ct_layer_directions[i]  # [B, 1, 768]
-            h = layer(h, c_t=c_t, attn_bias=attn_bias, use_gradient_checkpointing=use_gradient_checkpointing,
-                      loop_idx=loop_idx, head_partition=self.head_partition, ct_layer_bias=_bias_i)
+        _layer_lora_ratios: List[float] = []
+        _layer_lora_norms: List[float] = []
+        if self._enable_phase_e_main:
+            # Phase E 主集成: 替换 shared_layers 单次 forward 为 K 步能量梯度下降
+            # body 函数复用 shared_layers stack，c_t 注入路径完全一致
+            h = self._phase_e_inner_loop(h, c_t, attn_bias, loop_idx, _ct_base_bias)
+            # LoRA stats 不适用（Phase E 每步 body 都会跑 LoRA，记最后一次）
+            for layer in self.shared_layers:
+                _layer_lora_ratios.append(float(getattr(layer, "_last_lora_delta_ratio", 0.0)))
+                _layer_lora_norms.append(float(getattr(layer, "_last_lora_delta_norm", 0.0)))
+        else:
+            for i, layer in enumerate(self.shared_layers):
+                _bias_i = None
+                if _ct_base_bias is not None:
+                    _bias_i = _ct_base_bias * self.ct_layer_directions[i]  # [B, 1, 768]
+                h = layer(h, c_t=c_t, attn_bias=attn_bias, use_gradient_checkpointing=use_gradient_checkpointing,
+                          loop_idx=loop_idx, head_partition=self.head_partition, ct_layer_bias=_bias_i)
+                _layer_lora_ratios.append(float(getattr(layer, "_last_lora_delta_ratio", 0.0)))
+                _layer_lora_norms.append(float(getattr(layer, "_last_lora_delta_norm", 0.0)))
         # Identity-biased recurrence: h = alpha * h_new + (1-alpha) * h_old
         if _h_pre_shared is not None:
             h = self._identity_alpha * h + (1.0 - self._identity_alpha) * _h_pre_shared
@@ -3592,6 +4664,10 @@ class LumaReasonCore(nn.Module):
                     F.silu(self.mor_experts_down[eidx](self.mor_gate_norm(h)))
                 )
             h = h + expert_out
+        modulation_stats["loop_lora_delta_ratio_mean"] = h.new_tensor(sum(_layer_lora_ratios) / max(1, len(_layer_lora_ratios)))
+        modulation_stats["loop_lora_delta_norm_mean"] = h.new_tensor(sum(_layer_lora_norms) / max(1, len(_layer_lora_norms)))
+        modulation_stats["ct_inj_pre"] = h.new_tensor(self._last_ct_inject_ratio_pre)
+        modulation_stats["alpha_true"] = h.new_tensor(self._last_ct_inject_ratio)
         return h, switch_value, modulation_stats
 
 
@@ -3712,6 +4788,13 @@ class LumaBackbone(nn.Module):
             )
         else:
             self.neuromod_ct_writer = None
+        # Masked h prediction: c_t 预测 h 的被 mask 部分，error 接赫布 surprise
+        self._h_mask_ratio = config.h_mask_ratio
+        if self._h_mask_ratio > 0:
+            self.h_mask_predictor = nn.Linear(config.c_t_dim, config.hidden_size, bias=False)
+            nn.init.zeros_(self.h_mask_predictor.weight)
+        else:
+            self.h_mask_predictor = None
         # ES: Exit quality probe
         self._es_entropy = config.enable_exit_entropy_signal
         self._es_token_sens = config.enable_exit_token_sensitivity
@@ -3774,7 +4857,7 @@ class LumaBackbone(nn.Module):
 
     @torch.no_grad()
     def _analyze_fixed_point(self, loop_history: List[torch.Tensor]) -> dict:
-        """不动点分析: 用 δh 衰减率估算压缩映射的 Lipschitz 常数 + SVD 方向分解"""
+        """旧口径不动点 proxy：仅在近似自治时可解释为收缩分析，Loop LoRA/phase/time 打开时只能当轨迹摘要。"""
         if len(loop_history) < 3:
             return {}
         # δh 序列
@@ -3837,7 +4920,7 @@ class LumaBackbone(nn.Module):
         ep = (err * self.sigreg_weights.view(1, -1)).sum(dim=-1) * x.shape[0]
         return ep.mean()
 
-    def forward(self, input_ids: torch.Tensor, disable_ct_injection: bool = False) -> Tuple[torch.Tensor, dict]:
+    def forward(self, input_ids: torch.Tensor, disable_ct_injection: bool = False, measure_theory_probes: bool = False) -> Tuple[torch.Tensor, dict]:
         h = self.embedding(input_ids)
         # 重置 ct-LoRA 的 delta 缓存（每个新样本）
         for layer in self.reason_core.shared_layers:
@@ -3870,6 +4953,15 @@ class LumaBackbone(nn.Module):
         pred_delta_c = torch.zeros_like(c_t)
         target_delta_c = torch.zeros_like(c_t)
         self_jepa_terms: List[torch.Tensor] = []
+        h_mask_loss_terms: List[torch.Tensor] = []
+        # theory_probe_results: 四个主判据的最近一次测量值，loop_idx==0 时由 reason_core.measure_theory_probes 填充
+        theory_probe_results: dict = {
+            "rho_h_frozen": None,
+            "rho_c_drift": None,
+            "eta_moving_fp": None,
+            "probe_delta_h_norm": None,
+            "probe_delta_c_norm": None,
+        }
         residual_reg_terms: List[torch.Tensor] = []
         sigreg_delta_terms: List[torch.Tensor] = []
         sigreg_rollout_terms: List[torch.Tensor] = []
@@ -3916,6 +5008,11 @@ class LumaBackbone(nn.Module):
         nm_gain_history: List[float] = []
         nm_hebb_norm_history: List[float] = []
         nm_hebb_write_history: List[float] = []
+        nm_surprise_history: List[float] = []
+        ct_norm_raw_history: List[float] = []
+        ct_norm_after_writer_history: List[float] = []
+        meta_last_norm_history: List[float] = []
+        c_t_head_out_norm_history: List[float] = []
         if self.reasoning_state_ring is not None:
             reasoning_state = self.reasoning_state_ring.bootstrap(h.mean(dim=1))
             r_t_history.append(reasoning_state["state"].detach())
@@ -4077,10 +5174,22 @@ class LumaBackbone(nn.Module):
                     loop_index=loop_idx,
                     meta_override=_is_meta_override,
                 )
+                # theory probes: 在 loop_idx==0 且被请求时测一次（避免每轮都跑 3x 额外 forward）
+                if measure_theory_probes and loop_idx == 0 and self.training is False:
+                    # 只在 eval 模式测，避免污染训练（训练时 model.training=True）
+                    pass  # 训练模式跳过，靠外部 eval pass 驱动
+                elif measure_theory_probes and loop_idx == 0:
+                    _probe_out = self.reason_core.measure_theory_probes(
+                        h.detach(), c_t.detach(), next_c_t.detach(), loop_idx,
+                    )
+                    theory_probe_results = _probe_out
                 # Mamba 内部方向诊断：收集每轮的 meta_last_1 方向
                 if hasattr(self.introspection_state_stream, '_diag_meta_last_1'):
                     _mamba_mid_history.append(self.introspection_state_stream._diag_meta_last_1.clone())
                     _mamba_out_history.append(self.introspection_state_stream._diag_meta_last.clone())
+                ct_norm_raw_history.append(float(next_c_t.detach().float().norm(dim=-1).mean().item()))
+                meta_last_norm_history.append(float(getattr(self.introspection_state_stream, "_diag_meta_last_norm", h.new_zeros(())).item()))
+                c_t_head_out_norm_history.append(float(getattr(self.introspection_state_stream, "_diag_ct_head_out_norm", h.new_zeros(())).item()))
                 delta_h = h.mean(dim=1).detach() if prev_h is None else (h - prev_h).mean(dim=1).detach()
                 if not self.config.disable_self_jepa:
                     rollout_delta_preds, rollout_state_preds = self.self_jepa_residual_predictor.rollout(
@@ -4205,25 +5314,69 @@ class LumaBackbone(nn.Module):
                     pred_delta_c = torch.zeros_like(c_t)
                     current_self_improve_scalar = h.new_zeros(())
                     pending_rollout_preds = []
+                # Masked h prediction → 混入赫布 surprise
+                _jepa_err_for_hebb = current_self_error if current_self_error.numel() > 0 else None
+                if self.h_mask_predictor is not None and self.training and self.config.h_mask_loss_mode != "off":
+                    _h_mean = h.mean(dim=1).detach()  # [B, hidden_size]
+                    # 【2026-04-12 实验记录】：V9 尝试 c_t.detach() 反而使 rho_h 更早爆炸
+                    # (V9 step 500-1000 rho_h p50=1.77 vs V8 的 0.63)，说明 h_mask
+                    # 对 c_t 的梯度是 *稳定器* 而非破坏者。切断后 c_t 源头层失去约束。
+                    # 真正的问题是 h_mask_loss_weight 过大 → V10 改为降低 weight 0.1→0.03。
+                    _h_pred = self.h_mask_predictor(c_t)  # [B, hidden_size]
+                    # 随机 mask 25% 的特征维度
+                    _h_mask = (torch.rand(_h_mean.shape[-1], device=h.device) < self._h_mask_ratio).float()
+                    _mode = self.config.h_mask_loss_mode
+                    # h_mask_loss_mode:
+                    #   mse          = MSE 预测 h 的数值（旧实现，在长训练里会爆炸因为 h.mean 的范数在漂）
+                    #   cosine       = 余弦方向预测：c_t 学 h 的"思考方向"，loss 有界 [0, 2]（推荐）
+                    #   surprise_only = 不反传 loss，只用误差做 surprise
+                    #   off          = 完全关闭
+                    if _mode == "cosine":
+                        # 方向预测：归一化 pred 和 target，mask 后算 cosine 距离
+                        # 等价于让 c_t 在 h 的 mask 子空间上和 h.mean 方向一致
+                        _h_masked_target = _h_mean * _h_mask
+                        _h_masked_pred = _h_pred * _h_mask
+                        _t_norm = _h_masked_target.float().norm(dim=-1, keepdim=True).clamp(min=1e-6)
+                        _p_norm = _h_masked_pred.float().norm(dim=-1, keepdim=True).clamp(min=1e-6)
+                        _cos_sim = (_h_masked_pred.float() * _h_masked_target.float()).sum(dim=-1, keepdim=True) / (_p_norm * _t_norm)
+                        # err ∈ [0, 2]，完美对齐=0, 反向=2
+                        _h_mask_err = (1.0 - _cos_sim).to(_h_mean.dtype)
+                    else:
+                        # mse 路径（保留兼容，但长训练里目标漂移会让 loss 爆炸）
+                        _h_mask_err = ((_h_pred - _h_mean) * _h_mask).pow(2).sum(dim=-1, keepdim=True) / _h_mask.sum().clamp(min=1)
+                    if _mode in ("mse", "cosine"):
+                        h_mask_loss_terms.append(_h_mask_err.mean())
+                    _h_mask_err = _h_mask_err.detach().clamp(0, 2)  # surprise 用 detach 版（cosine 上界 2）
+                    if _jepa_err_for_hebb is not None:
+                        _w = self.config.h_mask_surprise_weight
+                        _jepa_err_for_hebb = (1 - _w) * _jepa_err_for_hebb + _w * _h_mask_err
+                    else:
+                        _jepa_err_for_hebb = _h_mask_err
                 # NM: neuromodulated c_t write
                 if self.neuromod_ct_writer is not None and loop_idx > 0:
                     c_t, _nm_aux = self.neuromod_ct_writer(
                         next_c_t, prev_c_t, delta_h, self_check_score,
-                        jepa_error=current_self_error if current_self_error.numel() > 0 else None,
+                        jepa_error=_jepa_err_for_hebb,
                     )
                     # 赫布项监控：收集 neuromod_gain 和 hebb_norm
                     nm_gain_history.append(_nm_aux["neuromod_gain"].item())
                     nm_hebb_norm_history.append(_nm_aux["hebb_norm"].item())
                     nm_hebb_write_history.append(_nm_aux["hebb_write"].item())
+                    nm_surprise_history.append(_nm_aux["surprise_mean"].item())
+                    ct_norm_after_writer_history.append(_nm_aux["ct_norm_after_writer"].item())
                 else:
                     c_t = next_c_t
+                    ct_norm_after_writer_history.append(float(c_t.detach().float().norm(dim=-1).mean().item()))
                 # c_t momentum: EMA 式慢更新
                 _ct_mom = self.config.ct_momentum
                 if _ct_mom > 0.0 and loop_idx > 0:
                     c_t = _ct_mom * prev_c_t + (1.0 - _ct_mom) * c_t
-                # c_t 范数安全网: 所有更新路径（introspection/赫布/momentum）的最终出口
-                _ct_n = c_t.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-                c_t = c_t * torch.clamp(20.0 / _ct_n, max=1.0)
+                # dtype 安全网: 确保 c_t 始终 bf16（RMSNorm scale 可能提升到 float32）
+                if c_t.dtype != torch.bfloat16:
+                    c_t = c_t.to(torch.bfloat16)
+                # NaN 探针：循环内每步检查
+                if not torch.isfinite(h).all() or not torch.isfinite(c_t).all():
+                    print(f"[NaN PROBE] loop={loop_idx} h_nan={not torch.isfinite(h).all()} ct_nan={not torch.isfinite(c_t).all()} h_norm={h.norm().item():.1f} ct_norm={c_t.norm().item():.1f}", flush=True)
                 # 动力学监控：slow_update 轮采集真实 ct_change (c_t 已经过赫布 + RMSNorm)
                 _loop_ct_change = (c_t - prev_c_t).detach().norm(dim=-1).mean().item()
                 if self.config.ct_norm_penalty_weight > 0.0:
@@ -4317,7 +5470,7 @@ class LumaBackbone(nn.Module):
                             * h.new_tensor(5.0)  # 缩放使 sigmoid 更灵敏
                         ).expand_as(self_check_score)
                         self_check_loss_terms.append(
-                            F.binary_cross_entropy_with_logits(
+                            F.binary_cross_entropy(
                                 self_check_score, improve_target
                             )
                         )
@@ -4339,7 +5492,8 @@ class LumaBackbone(nn.Module):
                 _h_dtype = h.dtype
                 _mor_mask_3d = _mor_continue_mask.unsqueeze(-1).to(_h_dtype)  # [B, T, 1]
                 # frozen token 也接收 c_t 自省信号，只是不做 reasoning
-                _mor_h_frozen_ct = _mor_h_frozen + self.reason_core.ct_injection.get_bias(c_t).unsqueeze(1).to(_h_dtype)
+                _mor_bias = self.reason_core.ct_injection.get_bias(c_t)
+                _mor_h_frozen_ct = _mor_h_frozen + _mor_bias.unsqueeze(1).to(_h_dtype)
                 h = (_mor_mask_3d * h + (1.0 - _mor_mask_3d) * _mor_h_frozen_ct).to(_h_dtype)
             if self.config.enable_world_jepa:
                 world_probe = self.world_latent_jepa.probe_stats(h)
@@ -4523,6 +5677,11 @@ class LumaBackbone(nn.Module):
         if trajectory_health_terms:
             self_jepa_loss = self_jepa_loss + torch.stack(trajectory_health_terms).mean()
         # c_t World JEPA：在 c_t 轨迹上做 masked prediction
+        ct_world_aux = {
+            "ct_world_jepa_loss": h.new_zeros(()),
+            "ct_world_var_loss": h.new_zeros(()),
+            "ct_world_cov_loss": h.new_zeros(()),
+        }
         if self.ct_world_jepa is not None and len(ct_grad_history) >= 3:
             ct_world_aux = self.ct_world_jepa(ct_grad_history)
             self_jepa_loss = self_jepa_loss + self.config.ct_world_jepa_weight * ct_world_aux["ct_world_jepa_loss"]
@@ -4637,6 +5796,7 @@ class LumaBackbone(nn.Module):
             "target_delta_c": target_delta_c,
             "self_check_loss": torch.stack(self_check_loss_terms).mean() if self_check_loss_terms else h.new_zeros(()),
             "self_jepa_loss": self_jepa_loss,
+            "h_mask_loss": torch.stack(h_mask_loss_terms).mean() if h_mask_loss_terms else h.new_zeros(()),
             "sigreg_delta_loss": sigreg_delta_loss,
             "sigreg_rollout_loss": sigreg_rollout_loss,
             "self_progress_shape_loss": progress_shape_loss,
@@ -4711,6 +5871,11 @@ class LumaBackbone(nn.Module):
             "nm_gain_history": nm_gain_history,
             "nm_hebb_norm_history": nm_hebb_norm_history,
             "nm_hebb_write_history": nm_hebb_write_history,
+            "nm_surprise_history": nm_surprise_history,
+            "ct_norm_raw_history": ct_norm_raw_history,
+            "ct_norm_after_writer_history": ct_norm_after_writer_history,
+            "meta_last_norm_history": meta_last_norm_history,
+            "c_t_head_out_norm_history": c_t_head_out_norm_history,
             "ct_cosine_trajectory": ct_cosine_adjacent,
             "ct_delta_perp": ct_delta_perp,
             "h_diversity_across_loops": h_diversity,
@@ -4718,8 +5883,12 @@ class LumaBackbone(nn.Module):
             "step_angles": _step_angles,
             "accel_norms": _accel_norms,
             "per_loop_dt_inject": per_loop_dt_inject,
+            "ct_inject_ratio_pre": getattr(self.reason_core, '_last_ct_inject_ratio_pre', 0.0),
             "ct_inject_ratio": getattr(self.reason_core, '_last_ct_inject_ratio', 0.0),
+            # theory_probes: 四个主判据最近一次测量值。None 表示本 step 没跑 probe 或未启用
+            "theory_probes": theory_probe_results,
             "mamba_diag": _mamba_diag,
+            **ct_world_aux,
             **world_aux,
         }
 
@@ -4974,14 +6143,22 @@ class LumaForCausalLM(PreTrainedModel):
 
     def forward(self, input_ids: torch.Tensor, labels: Optional[torch.Tensor] = None, **kwargs):
         disable_ct_injection = kwargs.pop("disable_ct_injection", False)
+        measure_theory_probes_flag = kwargs.pop("measure_theory_probes", False)
         del kwargs
         sigreg_step = self._runtime_train_step if labels is not None else self._runtime_train_step
         self.model.world_latent_jepa.set_runtime_sigreg_step(sigreg_step)
         if labels is not None:
             self._runtime_train_step += 1
-        hidden_states, aux = self.model(input_ids, disable_ct_injection=disable_ct_injection)
+        hidden_states, aux = self.model(input_ids, disable_ct_injection=disable_ct_injection, measure_theory_probes=measure_theory_probes_flag)
         self.last_aux = aux
+        # NaN 探针：定位 NaN 源头
+        if not torch.isfinite(hidden_states).all():
+            _nan_count = (~torch.isfinite(hidden_states)).sum().item()
+            print(f"[NaN PROBE] hidden_states has {_nan_count} non-finite values, norm={hidden_states.norm().item()}", flush=True)
         logits = self.lm_head(self.pre_lm_norm(hidden_states))
+        if not torch.isfinite(logits).all():
+            _nan_count = (~torch.isfinite(logits)).sum().item()
+            print(f"[NaN PROBE] logits has {_nan_count} non-finite values", flush=True)
         loss = None
         if labels is not None:
             token_logits = logits[:, -labels.shape[1] :, :]
@@ -5068,7 +6245,17 @@ class LumaForCausalLM(PreTrainedModel):
                 _full_p = F.softmax(token_logits[..., :-1, :].contiguous().view(-1, token_logits.size(-1)).detach(), dim=-1)  # stop-grad on target
                 shortcut_term = self.config.shortcut_consistency_weight * F.kl_div(_sc_p, _full_p, reduction="batchmean")
             aux["shortcut_consistency_term"] = shortcut_term.detach()
-            loss = lm_loss + world_term + self_jepa_term + self_rollout_term + exit_aux_term + self_check_term + rollout_zone_loss + routing_entropy_loss + trajectory_vitality_loss + compression_dynamics_loss + mor_balance_term + loop_lm_term + exit_entropy_term + shortcut_term
+            # h_mask_term: mse 和 cosine 模式下均按 h_mask_loss_weight 加权参与训练，
+            # surprise_only/off 模式下不反传。
+            # 【BUG 修复 2026-04-12】: 原本只检查 "mse"，导致 cosine 模式下 h_mask_loss
+            # 虽然被计算但完全不进入 backward，h_mask_predictor 权重永远停在零初始化，
+            # pred=0 → cos_sim=0 → loss 恒等 1.0（V2cos/V5a/V5b/V6a 全受影响）。
+            h_mask_term = (
+                self.config.h_mask_loss_weight * aux["h_mask_loss"]
+                if self.config.h_mask_loss_mode in ("mse", "cosine")
+                else logits.new_zeros(())
+            )
+            loss = lm_loss + world_term + self_jepa_term + self_rollout_term + exit_aux_term + self_check_term + rollout_zone_loss + routing_entropy_loss + trajectory_vitality_loss + compression_dynamics_loss + mor_balance_term + loop_lm_term + exit_entropy_term + shortcut_term + h_mask_term
         return MoeCausalLMOutputWithPast(
             loss=loss,
             aux_loss=(
@@ -5082,6 +6269,7 @@ class LumaForCausalLM(PreTrainedModel):
                 + aux.get("trajectory_vitality_loss", logits.new_zeros(()))
                 + aux.get("compression_dynamics_loss", logits.new_zeros(()))
                 + self.config.mor_balance_weight * aux["mor_balance_loss"]
+                + h_mask_term
             ),
             logits=logits,
             past_key_values=None,
