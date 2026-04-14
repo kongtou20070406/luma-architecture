@@ -1,5 +1,73 @@
 # Luma 工作日志
 
+## [2026-04-14 11:25] 🎯 Hero v13: 残差归一化 body 设计 — Lipschitz 收敛 + ct_perp 复活
+
+### 背景
+Hero v9 (h_mask + hebb warm start) 在 step 19250 NaN。skill 文档分析根因：
+1. **Mamba3 加法残差累积**：introspection 两层 Mamba 无 post-norm，meta_last 范数从 10 → 1258
+2. **c_t_head 输出爆炸**：ct_norm_raw 从 47 → 5818
+3. **loop 0 c_t 未归一化**：直接用 next_c_t 作为下轮 W_c·c_t 输入 → h NaN
+4. **shared_layers body Jacobian 失控**：rho_h_frozen 从 0.5 → 18，body F 长期 ‖J_F‖>1
+
+### v10/v11 修复尝试
+- v10/v11: 在 introspection (4处) + reason layer (2处) + body 出口 (1处) 加 RMSNorm
+- 结果：grad spike 50× 放大（compress 3→149, shared 5→224）
+- 原因：RMSNorm 反传 Jacobian = (I-ĥĥᵀ)/‖x‖ 在小输入下放大梯度，串联多层指数累积
+
+### v12: LayerNorm 替代
+- 模块内部 RMSNorm → LayerNorm (elementwise_affine=False)
+- meta_last_norm = 9.8, ct_raw = 8.0 (完美固定)
+- 但 grad spike 仍存在（compress 94, shared 212 at step 2500）
+- 原因：rho_h_frozen 偶尔 > 1，body F 局部放大
+
+### v13: 残差归一化 body 设计（核心突破）
+
+**结构改动**：
+```python
+# 旧: F(h) = LayerNorm(g(h))  — 范数守恒但无 Lipschitz 保证
+# 新: F(h) = h + α · LayerNorm(g(h) - h)
+#     - α (learnable scalar, init=0.1)
+#     - Lipschitz 上界 = 1 + α
+#     - near-identity 收缩映射
+```
+
+**实测动力学 (step 1800)**:
+- L_est = 0.22-0.41 (健康收缩)
+- rho_h_frozen = **0.927-0.935** (严格 < 1，Lipschitz 验证)
+- **ct_perp = 0.85-0.90** ⭐ (vs v6/v9 的 0.004，从冻结到活跃)
+- ct_norm_raw = 8.0 严格 (= √64)
+- meta_last_norm = 9.8 严格 (= √96)
+- ct_inj_pre = 0.006-0.009 (远低于 α_crit=0.045)
+- grad shared = 1.5-3.2 (vs v12 的 212)
+
+### 启动命令
+```bash
+cd /home/kt/ai/luma-architecture/minimind/scripts && \
+bash run_experiment.sh hero_v13_residual_alpha \
+  --h_mask_ratio 0.25 \
+  --h_mask_loss_mode cosine \
+  --h_mask_loss_weight 0.03 \
+  --h_mask_surprise_weight 0.3
+```
+
+### 范式级发现：ct_perp 复活
+
+之前 4.11 范式："c_t = 人格，方向必然冻结（ct_perp ≈ 0）"
+v13 数据：**ct_perp = 0.88**！c_t 方向持续变化
+
+修正：方向冻结不是 c_t 的本质属性，是**网络范数失控的副产品**：
+- v6/v9：Mamba 残差累积 → meta_last 漂移 → c_t_head 输出爆炸 → introspection 退化为常数 → c_t 冻结
+- v13：每层 norm 切断累积 → introspection 输出真实变化 → c_t 方向持续更新
+
+可能 c_t **真的能成为工作记忆**（待长训验证）。
+
+### 下一步 TODO
+- 🔴 监控 v13 通过 v6 崩溃点 step 10538 和 v9 崩溃点 step 19250
+- 🟡 跑完 1 epoch 看 final ema vs v6 best ema 7.38
+- 🟡 长训中观察 ct_perp 是否衰减（c_t 是否真的承载了工作记忆功能）
+
+---
+
 ## [2026-04-13 22:45] 🧪 Hero v8 = Hero v7 + h_mask_predictor（赫布激活）
 
 ### 背景

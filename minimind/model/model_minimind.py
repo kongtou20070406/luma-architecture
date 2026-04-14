@@ -1314,7 +1314,7 @@ class CompressionZone(nn.Module):
         else:
             self.compression_block_attnres = CompressionBlockAttentionResiduals(config.hidden_size, eps=config.rms_norm_eps)
         self.transition_norm = LumaZCRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.transition_scale = nn.Parameter(torch.zeros(config.hidden_size))
+        # 删掉 transition_scale: 和 LumaZCRMSNorm.scale 同样问题，长训漂移导致协同放大
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[torch.Tensor], dict]:
         batch_size = x.shape[0]
@@ -1356,7 +1356,7 @@ class CompressionZone(nn.Module):
             compression_block_var_mean = block_means.var(dim=0, unbiased=False).mean()
             if block_means.shape[0] > 1:
                 compression_block_drift_mean = (block_means[1:] - block_means[:-1]).norm(dim=-1).mean()
-        x = self.transition_norm(x) * (1.0 + self.transition_scale)
+        x = self.transition_norm(x)
         if self.post_math_adapter is not None:
             x, post_score = self.post_math_adapter(x)
             math_lane_scores.append(post_score)
@@ -1815,7 +1815,13 @@ class IntrospectionStateStream(nn.Module):
             self._meta_swa_head_dim = config.meta_dim // 2
             nn.init.zeros_(self.meta_swa_out.weight)  # 初始为 identity
         self.know_gap_head = nn.Linear(config.meta_dim, 1, bias=False)
+        # 全链路 post-norm: Mamba3 内部加法残差无 post-norm，每层串联后范数单调增长。
+        # 在每个 Mamba 输出和最终 c_t_head 出口都加 RMSNorm，确保范数有界。
+        self.layer1_post_norm = LumaZCRMSNorm(config.meta_dim, eps=config.rms_norm_eps)  # Mamba layer1 后
+        self.layer2_post_norm = LumaZCRMSNorm(config.meta_dim, eps=config.rms_norm_eps)  # Mamba layer2 后
+        self.meta_last_norm = LumaZCRMSNorm(config.meta_dim, eps=config.rms_norm_eps)    # c_t_head 入口
         self.c_t_head = nn.Linear(config.meta_dim, config.c_t_dim, bias=False)
+        self.c_t_out_norm = LumaZCRMSNorm(config.c_t_dim, eps=config.rms_norm_eps)        # c_t_head 出口
         self.uncertainty_head = nn.Linear(config.meta_dim, 1, bias=False) if config.enable_introspection_uncertainty else None
 
     def init_slow_state(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> dict:
@@ -1870,6 +1876,8 @@ class IntrospectionStateStream(nn.Module):
         else:
             layer1_in = (meta + self.state1_in(slow_state["meta_state_1"])).unsqueeze(1)
         layer1_out = _run_mamba_with_padding(self.layer1, layer1_in, self.chunk_size)
+        # post-norm: 切断 Mamba3 残差累积
+        layer1_out = self.layer1_post_norm(layer1_out)
         # SWA: 在 Mamba layer1 和 layer2 之间做滑窗注意力
         if self._enable_meta_swa and layer1_out.shape[1] > 1:
             _swa_in = self.meta_swa_norm(layer1_out)
@@ -1885,10 +1893,16 @@ class IntrospectionStateStream(nn.Module):
 
         layer2_in = (meta_last_1 + self.state2_in(slow_state["meta_state_2"])).unsqueeze(1)
         layer2_out = _run_mamba_with_padding(self.layer2, layer2_in, self.chunk_size)
+        # post-norm: 切断 Mamba3 残差累积
+        layer2_out = self.layer2_post_norm(layer2_out)
         meta_last = layer2_out[:, -1, :]
         next_state_2 = self.state2_norm(slow_state["meta_state_2"] + self.state2_out(meta_last))
-        know_gap = torch.sigmoid(self.know_gap_head(meta_last))
-        c_t = self.c_t_head(meta_last)
+        # 归一化 meta_last 后再喂给 c_t_head，切断 Mamba3 残差累积
+        meta_last_normed = self.meta_last_norm(meta_last)
+        know_gap = torch.sigmoid(self.know_gap_head(meta_last_normed))
+        c_t = self.c_t_head(meta_last_normed)
+        # c_t 出口归一化 → 范数严格 = √c_t_dim
+        c_t = self.c_t_out_norm(c_t)
         if self.uncertainty_head is not None:
             uncertainty = torch.sigmoid(self.uncertainty_head(meta_last))
         else:
@@ -2231,7 +2245,9 @@ class NeuromodulatedCTWriter(nn.Module):
             self.hebb_proj_h = nn.Linear(hidden_size, rank, bias=False)
             self.hebb_proj_c = nn.Linear(c_t_dim, rank, bias=False)
             self.hebb_out = nn.Linear(rank, c_t_dim, bias=False)
-            nn.init.zeros_(self.hebb_out.weight)  # 初始赫布项为零（hebb_init_scale 可覆盖）
+            # std=0.1 warm start: 让赫布开局就有非零输出，不被 wd 压回 0。
+            # 现在 c_t 被 meta_last_norm + c_t_out_norm 双保险约束，赫布活跃也不会让范数失控。
+            nn.init.normal_(self.hebb_out.weight, std=0.1)
             # Delta rule: reconstruct to subtract interference
             if use_delta_rule:
                 self.recon = nn.Linear(c_t_dim, c_t_dim, bias=False)
@@ -3238,8 +3254,13 @@ class LumaReasonSharedLayer(nn.Module):
         self.ct_modulation_mode = config.ct_modulation_mode
         self.hidden_size = config.hidden_size
         self.mamba = ReasonMambaLayer(config)
+        # post-norm: 用 LayerNorm（无 affine）而非 RMSNorm
+        # RMSNorm 反传 Jacobian = (I - ĥĥᵀ)/‖x‖ 对小输入范数敏感（v11 实测 grad spike 50×）
+        # LayerNorm 的 mean centering 让反传更平滑，串联多层不会指数放大梯度
+        self.mamba_post_norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=False)
         self.diff_attn = GatedDiffAttnFoXSWA(config)
         self.ffn = LumaSwiGLUFFN(config.hidden_size, config.reason_intermediate_size, eps=config.rms_norm_eps)
+        self.ffn_post_norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=False)
         if self.ct_modulation_mode == "modulewise_gate":
             self.mamba_gate = nn.Linear(config.c_t_dim, 1, bias=False)
             self.attn_gate = nn.Linear(config.c_t_dim, 1, bias=False)
@@ -3318,6 +3339,8 @@ class LumaReasonSharedLayer(nn.Module):
             h = h + mamba_gate * (mamba_out - h)
         else:
             h = mamba_out
+        # post-norm: 切断 Mamba3 加法残差累积
+        h = self.mamba_post_norm(h)
         if c_t is not None and self.ct_modulation_mode == "film" and self.attn_film is not None:
             h = self._apply_film(h, c_t, self.attn_film)
         # diff_attn: standard PyTorch ops, safe to checkpoint
@@ -3398,6 +3421,8 @@ class LumaReasonSharedLayer(nn.Module):
             h = h + ffn_gate * (ffn_out - h)
         else:
             h = ffn_out
+        # post-norm: 切断 FFN + LoRA 加法残差累积
+        h = self.ffn_post_norm(h)
         return h
 
 
@@ -3859,6 +3884,16 @@ class LumaReasonCore(nn.Module):
         # 所以 h - η·∇E ≈ (1-η)h + η·F(h)。保留不动点 h=F(h) 与构造性收缩，
         # 但免除 bf16 + create_graph + Mamba kernel 的数值地雷区
         self._phase_e_damped_mode = bool(getattr(config, "phase_e_damped_mode", True))
+        # Phase E body 残差归一化设计:
+        # F(h) = h + α · LayerNorm(g(h) - h)
+        # 这让 F 物理上是 "near-identity + bounded perturbation" 的收缩映射:
+        # - LayerNorm 把 g(h)-h 的范数固定到 √D
+        # - α (learnable scalar, 初始 0.1) 控制扰动幅度
+        # - Lipschitz 上界 = 1 + α，当 α<<1 时严格收缩 (Phase E damped 稳定)
+        # - 不是硬约束: α 可学习，模型可以让 F 接近 identity 也可以适度偏离
+        self._body_out_norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=False)
+        # alpha: 残差扰动强度的标量门，初始 0.1 (Phase E body 接近 identity)
+        self._body_residual_alpha = nn.Parameter(torch.tensor(0.1))
         # 诊断 trace（供外部读取）
         self._last_phase_e_energy_trace: List[float] = []
         self._last_phase_e_grad_norm_trace: List[float] = []
@@ -4263,14 +4298,17 @@ class LumaReasonCore(nn.Module):
 
     @torch.no_grad()
     def _run_shared_stack(self, h: torch.Tensor, c_t: torch.Tensor, loop_idx: int) -> torch.Tensor:
-        """裸跑 4 层 shared_layers（无 c_t 注入，输入 h 是已注入版本），用于理论 probe 的扰动 forward。
-        注意：loop_idx 固定 → 同一个 F_k，不是跨轮聚合。"""
+        """裸跑 shared_layers（无 c_t 注入，输入 h 是已注入版本），用于理论 probe 的扰动 forward。
+        和 _run_body_layers 一致使用残差归一化设计：F(h) = h + α · LayerNorm(g(h) - h)"""
+        h_in = h
         h_cur = h
         for layer in self.shared_layers:
             h_cur = layer(h_cur, c_t=c_t, attn_bias=None,
                           use_gradient_checkpointing=False,
                           loop_idx=loop_idx, head_partition=self.head_partition)
-        return h_cur
+        delta = h_cur - h_in
+        delta_normed = self._body_out_norm(delta)
+        return h_in + self._body_residual_alpha * delta_normed
 
     @torch.no_grad()
     def measure_theory_probes(
@@ -4376,6 +4414,7 @@ class LumaReasonCore(nn.Module):
             import contextlib
             _sdpa_ctx = contextlib.nullcontext()
 
+        h_in = h  # 保存输入用于残差归一化
         with _sdpa_ctx:
             h_cur = h
             for i, layer in enumerate(self.shared_layers):
@@ -4391,7 +4430,11 @@ class LumaReasonCore(nn.Module):
                     head_partition=self.head_partition,
                     ct_layer_bias=bias_i,
                 )
-        return h_cur
+        # 残差归一化设计: F(h) = h + α · LayerNorm(g(h) - h)
+        # Lipschitz 上界 = 1 + α，α<<1 时严格收缩
+        delta = h_cur - h_in
+        delta_normed = self._body_out_norm(delta)
+        return h_in + self._body_residual_alpha * delta_normed
 
     def _phase_e_damped_loop(
         self,

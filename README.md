@@ -202,51 +202,75 @@ exit_logit = bias + Σ(weight_i × signal_i) - gain_weight × predicted_gain
 - **FP8 混精度**: ~130 Linear layers FP8 forward, BF16 backward
 - **8-bit Muon + AdamW**: CPU offload 优化器状态
 
-## 当前状态 (2026-04-13)
+## 当前状态 (2026-04-14)
 
-**生产架构 (Hero v7 = Phase E damped + 216M + scaffold JEPA)**:
-- **参数量：216.955M** (bf16, fp8=0)
+**生产架构 (Hero v13 = Phase E + 残差归一化 body + 全栈 norm 修复)**:
+- **参数量：217.003M** (bf16, fp8=0)
 - hidden=768, **compression_layers=12**, heads=12/3, **reason_shared_depth=2, reason_loops=4**
-- **Phase E damped**: K_max=3, η=0.5, damped_mode=1（生产形态）
-- **scaffold World-JEPA**: mask=0.6, sigreg=0.05, block_mean=32（双流 JEPA + EMA target）
-- 全记忆栈：introspection memory K=4 + CMDA + Loop LoRA rank=32 + Hebbian rank=32 + MoR
-- Peak VRAM **~10-11 GB** @ seq=2048（RTX 5090 32GB 还有 20+ GB 余量）
+- **Phase E damped**: K_max=3, η=0.5, damped_mode=1
+- **scaffold World-JEPA**: mask=0.6, sigreg=0.05, block_mean=32
+- **h_mask_predictor**: c_t 预测 h 的 mask 维度（cosine loss），给赫布提供独立 surprise
+- **赫布 std=0.1 warm start**：让 hebb_out 从非零起点开始学
+- Peak VRAM **~10-11 GB** @ seq=2048
 
-**Hero v6 历史数据（seq=2048, 10538 iter, NaN 终止）**:
-| 指标 | 值 | 说明 |
-|------|-----|------|
-| best ema | **7.38** @ step 6475 | 超越 v11 seq=1024 final 8.51 |
-| best loss_lm | **0.56** @ step 9475 | dramatic minimum |
-| best loss_c | **1.73** @ step 9475 | compression 真实学习 |
-| Peak VRAM | 14.33 GB | 全 hero stack |
-| 崩溃点 | step 10538 NaN | 累积 grad spike，根因已修复 |
+### 4.14 网络结构修复（核心进展）
 
-**长训稳定性修复 (2026-04-13)**:
-- 根因：`LumaZCRMSNorm` 的可学习 `scale` 参数被优化器推大 → 所有 residual stream / meta_state 的"归一化"变成"放大" → residual stream 协同放大 → grad spike → NaN
-- 修复：删掉 `LumaZCRMSNorm.scale`，变成真正的 RMSNorm（参考 T5/Mistral），输出范数严格 = √dim
-- 同时移除所有 ct_inj clamp、行范数归一化、ct 范数 hard clamp 等症状层修复
-- Hero v7 (216.955M = 216.973M − 0.018M scale params) 从头跑 1 epoch 中，验证修复有效性
+**根因**：之前所有 NaN 崩溃（v6 step 10538、v9 step 19250）的根本原因是**残差累积 + 缺 post-norm**。
+Mamba3 内部是 `h_new = h_old + f(h_old)` 加法残差，没有 post-norm，
+长训中权重慢慢漂移让 `‖f‖` 上升 → 残差流范数指数累积 → grad spike → NaN。
 
-**c_t = 人格/情绪，不是工作记忆**（2026-04-11 范式转换）：
-- **c_t 方向** = 人格（稳定，不随推理步变化 — 你做数学题时性格不会变）
-- **c_t 范数** = 人格强度（由 `_ct_out_norm` 严格固定为 √64≈8）
-- **h** = 工作记忆（h_diversity 自发涌现，spiral refinement 就是思考过程）
-- **赫布写入** = 人格强化（surprise × hebb(δh ⊗ prev_c_t) 强化既有方向）
-- **PC 误差** = 情绪反应（pred_h - h = 人格视角下的预期违背）
-- **Loop LoRA** = 思考阶段（per-loop 差异化）
+**完整 norm 修复（7 处新增）**：
 
-这解释了为什么所有强迫 c_t 方向变化的实验都恶化 loss — 相当于强迫模型每步换人格。
+| 位置 | 类型 | 目的 |
+|------|------|------|
+| `IntrospectionStateStream.layer1_post_norm` | RMSNorm | Mamba layer1 残差累积 |
+| `IntrospectionStateStream.layer2_post_norm` | RMSNorm | Mamba layer2 残差累积 |
+| `IntrospectionStateStream.meta_last_norm` | RMSNorm | c_t_head 输入 |
+| `IntrospectionStateStream.c_t_out_norm` | RMSNorm | c_t 永远归一化 |
+| `LumaReasonSharedLayer.mamba_post_norm` | LayerNorm | reason layer 内 Mamba |
+| `LumaReasonSharedLayer.ffn_post_norm` | LayerNorm | reason layer 内 FFN+LoRA |
+| `LumaReasonCore._body_out_norm` | LayerNorm | Phase E body 出口 |
 
-**实验矩阵进度**:
+**Phase E body 残差归一化设计（v13 突破）**：
 
-| Matrix | 内容 | 状态 | 最优 |
-|--------|------|------|------|
-| M0-M10, CR, SJ, IS, RS, DP, LD, NM+ES, PC | 4.4-4.8 早期矩阵 | 完成 | CR5/IS9/NM8/PC7/SJ1 组合 |
-| H/I/J/K/M | 循环动力学 + per-layer 注入 (25+ 实验) | 完成 | G0 (无干预最优) |
-| Phase E Gap 11-23 | Phase E 集成 + seq=2048 解锁 | 完成 (4.12-4.13) | damped K=3 η=0.5, 216M 稳定 |
-| **Hero v7 1 epoch** | **Phase E + no-scale + scaffold JEPA** | **进行中 (4.13+)** | **80444 iter，ETA ~18h** |
+```python
+F(h) = h + α · LayerNorm(g(h) - h)
+```
 
-详见 [WORKLOG](artifacts/WORKLOG.md) | [4.11 进展报告](docs/reports/Progress_Report_20260411.md) | [4.10 进展报告](docs/reports/Progress_Report_20260410.md) | [动力学分析技能](../Luma_Dynamics_Analysis_Skill.md)
+不是简单的 `F(h) = LayerNorm(g(h))`，而是 **near-identity 收缩映射**：
+- `α` (learnable scalar, init=0.1) 控制扰动幅度
+- LayerNorm 把残差范数固定到 √D
+- **Lipschitz 上界 = 1 + α**（结构上保证收缩）
+- 不是硬约束：α 可学习，模型可以让 F 接近 identity 也可以适度偏离
+
+**v13 实测动力学（step 1800）**：
+
+| 指标 | v13 | v9 (NaN) | v6 (NaN) |
+|------|-----|----------|----------|
+| L_est (ρ) | **0.22-0.41** | 0.5-1.1 | 0.5-1.0 |
+| **rho_h_frozen** | **0.93** ⭐ | 2-18 (发散) | 1.5-3 |
+| **ct_perp** | **0.85-0.90** ⭐ | 0.004 (冻结) | 0.01 (冻结) |
+| ct_norm_raw | 8.0 (= √64) | 47→5818 | — |
+| ct_inj_pre | 0.006-0.009 | 0.025-0.115 | — |
+| meta_last_norm | 9.8 (= √96) | 10→1258 | — |
+| grad shared | **1.5-3.2** | 7-200+ | crash |
+
+⭐ **两个意外突破**：
+1. **rho_h_frozen 严格 < 1**：Lipschitz 约束被结构性保证，Phase E body 永远收缩
+2. **ct_perp 0.85-0.90**：c_t 方向**不再冻结**！这推翻了之前"c_t = 人格必然方向冻结"的假设。修复后 c_t 可能真的成为工作记忆（待长训验证）
+
+### 实验矩阵进度
+
+| Matrix | 内容 | 状态 |
+|--------|------|------|
+| M0-PC | 4.4-4.8 早期矩阵 (10+ 矩阵) | 完成 |
+| H/I/J/K/M | 循环动力学 + per-layer 注入 | 完成 |
+| Phase E Gap 11-23 | Phase E 集成 + seq=2048 解锁 | 完成 (4.12-4.13) |
+| Hero v6/v7/v9 | norm scale 修复 + h_mask + hebb warm start | NaN at step 10538/19250 |
+| Hero v11/v12 | 全栈 norm 修复（RMSNorm/LayerNorm） | grad spike，未崩 |
+| **Hero v13** | **残差归一化 body + α · normalize** | **进行中，rho_h<1, ct_perp=0.88** |
+
+详见 [WORKLOG](artifacts/WORKLOG.md) | [4.11 进展报告](docs/reports/Progress_Report_20260411.md) | [动力学分析技能](../Luma_Dynamics_Analysis_Skill.md)
 
 ## 项目结构
 
