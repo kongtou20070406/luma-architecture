@@ -44,18 +44,25 @@ PHASE_E="--enable_energy_reason_core 1 \
   --phase_e_damped_mode 1 --phase_e_k_backprop 1"
 
 # ── Phase 6: scaffold World-JEPA (用户红线：双流 JEPA) ────────────────
-# scaffold mode + block mask 32 tokens + LeWM Cramér-Wold SIGReg
-# mask_ratio=0.6 激活 surprise 防退化
-PHASE6="--phase 6 --world_jepa_mode scaffold --world_jepa_weight 0.5 \
-  --world_sigreg_weight 0.05 --world_mask_ratio 0.6 \
+# scaffold mode + block mask + LeWM Cramér-Wold SIGReg
+# 4.14 v17 调参：降 JEPA 难度
+# - mask_ratio 0.6→0.4: 减少 mask 区域，cosine 预测更容易
+# - sigreg_weight 0.05→0.02: v16 sigreg_raw 爆到 80，惩罚项贡献 loss_w≈2（太大）
+# - world_jepa_weight 0.5→0.3: 整体降 backward 贡献
+PHASE6="--phase 6 --world_jepa_mode scaffold --world_jepa_weight 0.3 \
+  --world_sigreg_weight 0.02 --world_mask_ratio 0.4 \
   --world_mask_scheme block --world_mask_block_mean 32 \
   --attnres_compress_mode paper --attnres_reason_mode legacy \
   --mhc_streams 3 --mhc_alpha_init 0.01 \
   --exit_aux_weight 0.01 --exit_second_order_delta_weight 0.3"
 
 # ── IS9 记忆栈：introspection memory + CMDA + MoR + LoRA32 + 赫布 ────
+# 4.14 v18: 关 self-JEPA 所有 SIGReg (ct/delta/rollout/loop/cos)。
+# LeJEPA paper SIGReg 只用于 World-JEPA 防 encoder 坍缩，
+# c_t 是 64 维人格向量，有 RMSNorm + ct_norm clamp，不需要额外正则。
 IS9="--enable_token_depth_routing 1 --mor_target_continue_ratio 0.7 --mor_balance_weight 0.01 \
-  --exit_score_threshold 0.8 --enable_sigreg_ct 1 --sigreg_ct_weight 0.05 \
+  --exit_score_threshold 0.8 --enable_sigreg_ct 0 --sigreg_ct_weight 0.0 \
+  --sigreg_delta_weight 0.0 \
   --enable_time_conditioning 1 --loop_lora_rank 32 \
   --introspection_input_mode memory --introspection_memory_tokens 4 --introspection_inject_mode cmda \
   --enable_neuromod_ct 1 --neuromod_mode jepa_surprise --neuromod_hebb_rank 32"

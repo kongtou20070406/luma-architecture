@@ -847,6 +847,10 @@ class LumaConfig(PretrainedConfig):
         # 启用时每个能量步的 body activations 在 forward 立即释放，backward re-compute
         # 和 Mamba triton kernel 完全兼容，不依赖 torch.utils.checkpoint
         self.phase_e_custom_checkpoint = kwargs.get("phase_e_custom_checkpoint", False)
+        # Stellarator mode (v19+): 主干/调制/融合三层核心
+        self.stellarator_mode = kwargs.get("stellarator_mode", False)
+        self.stellarator_mod_rank = kwargs.get("stellarator_mod_rank", 8)
+        self.phase_e_damped_mode = kwargs.get("phase_e_damped_mode", True)
 
 
 class LumaZCRMSNorm(nn.Module):
@@ -2633,14 +2637,12 @@ class LeWorldModelStyleJEPA(nn.Module):
         # target = 同一 encoder 对被遮挡位置的输出（无 detach，端到端，SIGreg 防坍缩）
         masked_pred = pred_world[mask]
         masked_target = online_world[mask]
-        cosine_loss = 1.0 - F.cosine_similarity(
-            F.normalize(masked_pred, dim=-1),
-            F.normalize(masked_target, dim=-1),
-            dim=-1,
-        ).mean()
+        # LeWorldModel (arxiv 2603.19312) paper 公式: L_pred = ||z_hat - z||_2^2 (MSE)
+        # 4.14 修复: 原代码用 cosine + F.normalize 投影到单位球，和 SIGReg 要求的 N(0,I) 矛盾。
+        pred_loss = F.mse_loss(masked_pred.float(), masked_target.float()).to(masked_pred.dtype)
         sigreg_enabled = self.enable_sigreg_world and self.runtime_sigreg_step >= self.sigreg_world_warmup_steps
         sigreg_loss = self._sigreg(online_world) if sigreg_enabled else online_world.new_zeros(())
-        world_loss = cosine_loss + self.sigreg_weight * sigreg_loss
+        world_loss = pred_loss + self.sigreg_weight * sigreg_loss
         online_float = online_world.float()
         return {
             "world_mask": mask,
@@ -2741,6 +2743,12 @@ class WorldLatentJEPA(nn.Module):
         self.register_buffer("sigreg_t", _t, persistent=False)
         self.register_buffer("sigreg_weights", _trap * _gauss_window, persistent=False)
         self.register_buffer("sigreg_phi0", _phi0, persistent=False)
+        # 4.14 v18: 固定 SIGReg 投影方向（从 per-step 随机改为训练时一次性采样 + buffer）。
+        # 原实现每步新采 torch.randn(K, D) 导致 sig_raw 天然震荡，v17 实测从 6 spike 到 101。
+        # Cramér-Wold 定理只要求 directions 覆盖单位球即可，不要求每步都变。
+        _sigreg_dirs = torch.randn(self.sigreg_num_slices, config.world_dim, dtype=torch.float32)
+        _sigreg_dirs = F.normalize(_sigreg_dirs, dim=-1)
+        self.register_buffer("sigreg_directions", _sigreg_dirs, persistent=True)
 
         self._copy_online_to_target()
         for param in self.target_observer.parameters():
@@ -2749,8 +2757,12 @@ class WorldLatentJEPA(nn.Module):
     def _sigreg(self, latent: torch.Tensor) -> torch.Tensor:
         """Cramér-Wold SIGreg（LeWorldModelStyleJEPA 同款）。
 
-        对 latent 做多条随机单位向量 1D 投影 → 计算经验 char func（cos/sin mean）→
+        对 latent 做多条固定单位向量 1D 投影 → 计算经验 char func（cos/sin mean）→
         和标准正态 char func phi_0(t)=exp(-t²/2) 做加权差。单一正则项，端到端可微。
+
+        4.14 v18 修复:
+        - directions 改为训练时一次性 buffer（原每步 torch.randn 导致 sig_raw 震荡）
+        - 去掉 `* z.shape[0]` 放大（原把 per-sample 平均误差乘 N≈1229 倍）
         """
         z = latent.float() if self.sigreg_fp32_only else latent
         z = z.reshape(-1, z.shape[-1])
@@ -2759,14 +2771,14 @@ class WorldLatentJEPA(nn.Module):
         # 按批归一化每维（0 均值 1 方差），避免幅度漂移干扰 char func 比较
         z = z - z.mean(dim=0, keepdim=True)
         z = z / (z.std(dim=0, unbiased=False, keepdim=True) + self.sigreg_eps)
-        directions = torch.randn(self.sigreg_num_slices, z.shape[-1], device=z.device, dtype=z.dtype)
-        directions = F.normalize(directions, dim=-1)
+        # 固定 directions（buffer），不再每步重采
+        directions = self.sigreg_directions.to(z.dtype)
         h = z @ directions.t()  # [N, K]
         x_t = h.unsqueeze(-1) * self.sigreg_t.view(1, 1, -1)  # [N, K, T_pts]
         cos_mean = torch.cos(x_t).mean(dim=0)  # [K, T_pts]
         sin_mean = torch.sin(x_t).mean(dim=0)
         err = (cos_mean - self.sigreg_phi0.view(1, -1)).square() + sin_mean.square()
-        ep_stat = (err * self.sigreg_weights.view(1, -1)).sum(dim=-1) * z.shape[0]
+        ep_stat = (err * self.sigreg_weights.view(1, -1)).sum(dim=-1)
         return ep_stat.mean()
 
     @torch.no_grad()
@@ -2873,11 +2885,14 @@ class WorldLatentJEPA(nn.Module):
 
         masked_pred = pred_world[mask]
         masked_target = target_world[mask]
-        cosine_loss = 1.0 - F.cosine_similarity(
-            F.normalize(masked_pred, dim=-1),
-            F.normalize(masked_target, dim=-1),
-            dim=-1,
-        ).mean()
+        # LeWorldModel (arxiv 2603.19312) 原 paper 公式:
+        #   L_pred = ||z_hat - z||_2^2  (纯 MSE, 欧氏距离平方)
+        #   L_LeWM = L_pred + λ · SIGReg(Z)
+        # 4.14 修复: 原代码用 cosine + F.normalize 把 pred/target 投影到单位球 (范数=1)，
+        # 但 SIGReg 要求 latent ~ N(0, I) (范数≈√d)。两个约束互相拉扯 → sigreg_raw
+        # 持续爆涨 (v16 观测到 sigreg_raw≈80, loss_w≈2.26)。
+        pred_loss = F.mse_loss(masked_pred.float(), masked_target.float())
+        pred_loss = pred_loss.to(hidden_states.dtype)
         # LeWorldModel (arxiv 2603.19312) 同款 SIGReg (Cramér-Wold)：
         # 只在 online_world 的 visible 位置上，验证 latent 分布 ~ N(0, I)。
         # 作用：防止 online_observer 坍缩为常量（本来 scaffold 靠 EMA 防崩，但 EMA
@@ -2887,18 +2902,16 @@ class WorldLatentJEPA(nn.Module):
             sigreg_raw = self._sigreg(visible_online)
         else:
             sigreg_raw = hidden_states.new_zeros(())
-        sigreg_loss = self.sigreg_weight * sigreg_raw.to(cosine_loss.dtype)
-        # LeWM 做法：world_jepa_loss = cosine_loss + sigreg_weight * sigreg_raw
-        # backbone forward 的 world_term = world_jepa_weight * world_jepa_loss，
-        # 天然经过 LR schedule + grad clipping，不需要额外 trainer 钩子
-        world_loss = cosine_loss + sigreg_loss
+        sigreg_loss = self.sigreg_weight * sigreg_raw.to(pred_loss.dtype)
+        # LeWM 做法：world_jepa_loss = pred_loss + sigreg_weight * sigreg_raw
+        world_loss = pred_loss + sigreg_loss
         return {
             "world_mask": mask,
             "world_online": online_world,
             "world_target": target_world,
             "world_pred": pred_world,
             "world_jepa_loss": world_loss,
-            "world_jepa_cosine": cosine_loss.detach(),
+            "world_jepa_cosine": pred_loss.detach(),  # 保留字段名兼容日志，实际是 smooth_l1
             "world_sigreg_loss": sigreg_loss.detach(),
             "world_sigreg_raw": sigreg_raw.detach(),
             "world_sigreg_source_mean": online_world.float().mean(),
@@ -3894,6 +3907,30 @@ class LumaReasonCore(nn.Module):
         self._body_out_norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=False)
         # alpha: 残差扰动强度的标量门，初始 0.1 (Phase E body 接近 identity)
         self._body_residual_alpha = nn.Parameter(torch.tensor(0.1))
+
+        # ── Stellarator mode (v19+) ──────────────────────────────
+        # 设计原则（4.14 用户指示）:
+        #   托卡马克 → 仿星器。主循环定义为结构性收缩映射 + 慢变量只调地貌。
+        #
+        # 三层结构:
+        #   主干 F_main(h)        不看 c_t，由 shared_layers 单次 forward
+        #   调制 low-rank bias    W_up(silu(W_down(c_t)))，rank=8，有界
+        #   融合 h + g·(F_main - h + bias)  g=sigmoid(scalar)，全局有界
+        self._stellarator_mode = bool(getattr(config, "stellarator_mode", False))
+        if self._stellarator_mode:
+            _ct_dim = config.c_t_dim
+            _hid = config.hidden_size
+            _mod_rank = int(getattr(config, "stellarator_mod_rank", 8))
+            # 低秩调制: c_t → rank → hidden，zero-init up 让初始 bias=0
+            self._stellarator_mod_down = nn.Linear(_ct_dim, _mod_rank, bias=False)
+            self._stellarator_mod_up = nn.Linear(_mod_rank, _hid, bias=False)
+            nn.init.zeros_(self._stellarator_mod_up.weight)
+            # 融合门 scalar: sigmoid(logit_init) = 0.5
+            self._stellarator_gate_logit = nn.Parameter(torch.tensor(0.0))
+            # 诊断
+            self._last_stellarator_gate = 0.0
+            self._last_stellarator_bias_ratio = 0.0
+
         # 诊断 trace（供外部读取）
         self._last_phase_e_energy_trace: List[float] = []
         self._last_phase_e_grad_norm_trace: List[float] = []
@@ -4415,6 +4452,46 @@ class LumaReasonCore(nn.Module):
             _sdpa_ctx = contextlib.nullcontext()
 
         h_in = h  # 保存输入用于残差归一化
+        # ── Stellarator 分支：F_main(h) 不看 c_t ────────────────────────
+        if self._stellarator_mode:
+            with _sdpa_ctx:
+                h_cur = h
+                for i, layer in enumerate(self.shared_layers):
+                    # 关键: c_t=None 阻断所有层内 c_t 分支（Mamba/DiffAttn/FFN 调制）
+                    # ct_layer_bias=None 阻断 per-layer bias
+                    h_cur = layer(
+                        h_cur,
+                        c_t=None,
+                        attn_bias=attn_bias,
+                        use_gradient_checkpointing=use_gradient_checkpointing,
+                        loop_idx=loop_idx,
+                        head_partition=self.head_partition,
+                        ct_layer_bias=None,
+                    )
+            # 残差归一化保留（结构性 Lipschitz 收缩）
+            delta_main = self._body_out_norm(h_cur - h_in)
+            f_main = h_in + self._body_residual_alpha * delta_main
+            # Low-rank c_t modulator: c_t → rank → hidden，zero-init 让初始 bias=0
+            if c_t is not None:
+                _mod = F.silu(self._stellarator_mod_down(c_t))
+                _bias = self._stellarator_mod_up(_mod).unsqueeze(1)  # [B, 1, D]
+                # 归一化 bias 范数和 h 对齐（结构上限制强度）
+                _bias = self._body_out_norm(_bias)
+            else:
+                _bias = h_in.new_zeros((h_in.shape[0], 1, h_in.shape[-1]))
+            # Gated fusion: h_next = h + g · (F_main - h + bias)
+            # g = sigmoid(logit_init=0) = 0.5 → 初始就是 "half-step towards F_main"
+            g = torch.sigmoid(self._stellarator_gate_logit)
+            h_next = h_in + g * ((f_main - h_in) + _bias)
+            # 诊断
+            with torch.no_grad():
+                self._last_stellarator_gate = float(g.item())
+                _fm_delta_norm = (f_main - h_in).detach().norm().item()
+                _bias_norm = _bias.detach().norm().item()
+                self._last_stellarator_bias_ratio = _bias_norm / max(_fm_delta_norm, 1e-8)
+            return h_next
+
+        # ── 旧路径：c_t 深度穿透 body（v18 及以前）────────────────────────
         with _sdpa_ctx:
             h_cur = h
             for i, layer in enumerate(self.shared_layers):
@@ -4475,8 +4552,12 @@ class LumaReasonCore(nn.Module):
                 h, c_t, attn_bias, loop_idx, ct_base_bias,
                 use_gradient_checkpointing=False,
             )
-            # Damped 更新：线性插值，保持 body 参数的梯度图自然存在
-            h = (1.0 - eta) * h + eta * h_body
+            # Stellarator mode: body 内部已做 gated fusion h + g*(F_main-h+bias)，不再叠 damping
+            if self._stellarator_mode:
+                h = h_body
+            else:
+                # Damped 更新：线性插值，保持 body 参数的梯度图自然存在
+                h = (1.0 - eta) * h + eta * h_body
             # Langevin 噪声（T>0）
             if self._phase_e_temperature > 0.0 and self.training:
                 h = h + torch.randn_like(h) * math.sqrt(

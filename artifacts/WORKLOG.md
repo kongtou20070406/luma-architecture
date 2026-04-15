@@ -1,5 +1,203 @@
 # Luma 工作日志
 
+## [2026-04-15 00:30] 🏆 Hero v19: Stellarator 架构 — 仿星器假设完全验证
+
+### 核心胜利（step 26250/80444 = 32.6% epoch）
+- **loss ema = 7.52**（v16 最低 17，v14 step 11000 NaN）
+- **fp_proxy L = 0.062**（v17 震荡 1.0-1.15，v19 单调下降到 0.06）
+- **sig_raw = 0.0 全程**（v17 spike 到 101）
+- **DOD rank = 7-9/20, mode1 = 60-90%**（动态恢复）
+- **dead layers = ['exit_ctrl']**（v19 step 800 的 reason_shared_0 已复活）
+- **ct_perp = 0.2-0.8**（人格有活动）
+- **通过 v17 崩溃点 step 250/400、v16 崩溃点 step 2800/11000**
+
+### 用户假设的全部验证
+"托卡马克 → 仿星器"：把推理核心从"复杂高增益系统 + 事后补丁维稳"改成"天然收缩主流场 + 低维慢变量温和塑形"。
+
+**v19 实现**（三层结构）:
+```
+F_main(h)              # 主干完全不看 c_t (shared_layers 调用时 c_t=None)
+bias = W_up(silu(W_down(c_t)))   # rank=8 low-rank modulator，zero-init
+h_next = h + sigmoid(gate) · (α · LayerNorm(F_main - h) + LayerNorm(bias))
+```
+
+Lipschitz 分析: `Lip(h_next, h) ≤ 1 + g · α · 1 = 1 + 0.5·0.1 = 1.05`
+实测 fp_proxy L 从 0.998 → 0.062（超额收缩，不是边界稳定）。
+
+### v14 → v19 完整时间线
+
+| 版本 | 根因 | 修复 | 结果 |
+|------|------|------|------|
+| v14 | Muon 错误正交化 Mamba 3D 参数 `(24,1,192)` | 不是这里 | NaN @ step 11000 |
+| v15 | Mamba→AdamW + wd 重调 + grad_clip 放宽 | 核心修复 | 稳定但 ema ~15 |
+| v16 | LoRA lr 从 3.6e-6 暴涨到 6e-4 (删 modular_norm) | LoRA 关闭 rank=0 | ema 11 但 DOD 偶发坍缩 |
+| v17 | World-JEPA cosine + normalize vs SIGReg N(0,I) 矛盾 | cosine→MSE (LeWorld paper) | sig_raw spike 101 (SIGReg 实现不稳) |
+| v18 | 未启动 | SIGReg directions 固定 buffer + 去 ×N + self-JEPA SIGReg 全关 | 没跑 |
+| **v19** | **c_t 深度穿透主流 → body 稳定性依赖慢变量** | **Stellarator: F_main 不看 c_t + low-rank modulator + sigmoid gated fusion** | **step 26250 ema=7.52, L=0.062** |
+
+### 决定性证据对照
+
+| 指标 | v14 peak | v16 peak | v17 peak | **v19 step 26000** |
+|------|---------|---------|---------|---------------------|
+| 最低 ema | NaN @ 11k | ~17 | - (停 @ 400) | **7.52** |
+| fp_proxy L | — | 1.0+ | 0.998-1.15 震荡 | **0.062** ⭐ |
+| sig_raw | — | ~80 | spike 101 | **0** |
+| 通过步数 | 11000 | ~1000 | ~400 | **26250+** |
+| DOD rank | 2 崩 | 11→2 震荡 | 2 崩 | **7-9 稳定** |
+
+### 关键认知修正
+**DOD rank 低 ≠ 坏事**。
+- v16 rank=12 但 ema=17（不同 layer 走不同方向，互相冲突）
+- v19 rank=3-8 但 ema=7.5（20 层协同学一个方向，高效）
+- 真正判据是 loss 下降速度 + fp_proxy L，不是 rank 绝对值
+
+v19 step 400-800 rank 先坍缩到 2-3（所有 layer 同步学），step 1400+ rank 回升到 5-9（子空间自然展开），和 fp_proxy L 从 1 降到 0.06 的过程同步 — 这是**收缩算子族下的表征学习**。
+
+### 代码关键改动
+
+1. **optimizers.py** — Mamba→AdamW + wd 重调 + LoRA 白名单（v15）
+2. **model_minimind.py WorldLatentJEPA** — cosine→MSE + SIGReg directions 固定 buffer + 去 ×N（v17-v19）
+3. **model_minimind.py LumaReasonCore** — 新增 stellarator 路径:
+   - `_stellarator_mod_down/up` (rank=8, zero-init up)
+   - `_stellarator_gate_logit` (init=0 → sigmoid=0.5)
+   - `_run_body_layers` 里 stellarator 分支 (layer 传 c_t=None)
+   - `_phase_e_damped_loop` 里 stellarator 模式 bypass damping
+4. **trainer/train_luma_refactor.py** — `--stellarator_mode`, `--stellarator_mod_rank` CLI，拆细 loss log
+5. **scripts/run_experiment.sh** — 关 self-JEPA 所有 SIGReg，v19 通过 CLI 激活 stellarator
+
+### 下一步 TODO
+- 🟢 监控 v19 跑到 1 epoch (step 80444, ETA 16h)
+- 🟢 git commit 固化 v19 状态
+- 🟢 更新 README 记录仿星器架构和里程碑
+- 🟡 v19 成功跑完后，考虑下一个实验方向（v20 数学算子优化 / 长上下文 / 人格注入推理）
+
+---
+
+## [2026-04-14 20:20] 🔥 Hero v15: Mamba 从 Muon 迁移到 AdamW — 长训 NaN 根因
+
+### 背景 & 动机
+v6/v9/v14 反复在 step 10k-20k 区间 NaN。之前的修复（ct clamp、行范数归一化、Phase E damped、LayerNorm body、残差归一化 body）都在解决**症状**——v13 把崩溃推迟到 step 11000+，但总会炸。v14 step 11000+ 再次爆炸：compress grad=1e10, shared=1e9, DOD rank=2/20, mode1=99.2%。
+
+### 根因诊断
+
+用户提出假设：Muon 和 Mamba3 算子冲突。验证后确认。
+
+Muon `muon_update` 的处理逻辑：
+```python
+if update.ndim == 4: # 只处理 conv 4D
+    update = update.view(len(update), -1)
+update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+```
+
+**3D 参数没有被特殊处理**。Mamba3 内部：
+- `B_bias`, `C_bias`: shape `(24, 1, 192)` — 3D
+- `mimo_x`, `mimo_z`, `mimo_o`: shape `(24, 2, 64)` — 3D
+- `in_proj.weight`: `(3960, 768)` — 2D 但输出包含 dt/B/C/x/z/o 多语义混合
+- `out_proj.weight`: `(768, 1536)` — 2D
+
+Newton-Schulz 的 `X @ X.mT` 是 batched 矩阵乘，把 `(24, 1, 192)` 当成 24 个独立的 `(1, 192)` "矩阵"正交化——对 1×N 矩阵做正交化 = **把每行归一化到单位长度**。
+
+**结果：B_bias / C_bias / mimo_* 每步被覆盖成单位向量，梯度幅度信息完全丢失**。SSM B/C 缩放和门控信号每步随机漂移，compression 12 层累积 → 指数爆炸 → 最终 NaN。
+
+### 规模
+
+```
+Total 192M 参数，旧路由:
+  Muon: 146M (76%) — 包含 98M Mamba（错误正交化）
+  AdamW: 46M (24%) — 仅 Embedding + LM head + norm
+```
+
+**98M Mamba 参数（占模型 51%）每步训练都在被 Muon 破坏**。
+
+### 修复
+
+`optimizers.py` FORCE_ADAMW_PARAM_SUBSTRINGS 加 `"mamba"` pattern：
+
+```python
+FORCE_ADAMW_PARAM_SUBSTRINGS = (
+    "ct_injection.proj.weight",
+    "c_t_head.weight",
+    "h_mask_predictor.weight",
+    "mamba",              # 新增: 所有 Mamba3 内部参数
+    "lora_A.weight",
+    "lora_B.weight",
+    ...
+)
+```
+
+新路由：
+```
+Muon: 48.7M (25%) — 只剩 FFN gate/up/down_proj + attn 投影
+AdamW: 143.4M (75%) — Mamba + Embedding + LM head + ct/lora/hebb/norm
+```
+
+### 优化器参数重新设计
+
+Mamba 迁移后，旧 LR/wd/grad_clip 全部过时：
+
+| 参数 | 旧值 | 新值 | 原因 |
+|------|------|------|------|
+| `scalar_lr` | 1e-4 | **6e-4** | 现在覆盖 98M Mamba，需要匹配 Mamba 标准 lr |
+| `weight_decay` | 0.1 | **0.02** | Muon 正交化本身是范数归一化，wd=0.1 是双重压制 |
+| `grad_clip` | 1.0 | **2.0** | 漂移源都在 AdamW 下（自适应 lr），不需要严 clip |
+| `matrix_lr` | 0.008 | 0.008 | 不变 |
+| `muon_clip_factor` | 1.0 | 1.0 | 不变 |
+
+**修复 AdamW modular_norm_scale 压制 bug**：
+旧代码给 AdamW lr 乘 `max(fan_in, fan_out)^(-0.5)`，Mamba `in_proj (3960, 768)` 的 scale ≈ 1/√3960 ≈ 0.016，实际 lr = 1e-4 × 0.016 = **1.6e-6**（近似为 0）。
+→ Mamba 之前在 Muon 时代靠正交化"硬推"才能学，切到 AdamW 后 lr 太小根本学不动。
+→ 删除 AdamW 的 modular_norm_scale，因为 Adam 自带自适应 lr 处理 fan_in。
+→ 真实 scalar_lr 从 2.01e-07 变成 6e-4（**3000× 提升**）。
+
+**三档 wd 白名单**（AdamW 内部分配）：
+- `wd=0.0`: embedding, lm_head, norm（标准做法）
+- `wd=0.01`: mamba, hebb, lora, h_mask_predictor（zero-init 或 SSM 标准）
+- `wd=0.02`: ct_injection, c_t_head（force_adamw 其他）
+- Muon 默认 `wd=0.02`
+
+### v15 验证结果（step 50-200）
+
+v14 vs v15 对比（同 step 50）:
+
+| 指标 | v14 | v15 | 变化 |
+|------|-----|-----|------|
+| compress grad | 7.4 | **3.5** | ↓52% |
+| shared grad | 10.5 | **3.0** | ↓71% |
+| ratio | 2.13 | **1.39** | 更均衡 |
+| loss_lm | 27.4 | **14.3** | ↓48% |
+| scalar_lr | 2.01e-07 | **6.00e-04** | ↑3000× |
+| ema | 42.6 | 38.2 | 略好 |
+
+v15 趋势（step 50→200）:
+- compress grad: 3.5 → 1.2（个位数稳定）
+- loss_lm: 14.3 → 12.1（快速下降）
+- ema: 38.2 → **20.4**（200 步降一半）
+- L_est: 0.48 → 0.86（loop 收缩率，仍 <1）
+- **fp_proxy L: 1.148 → 1.015**（朝 v13 稳态 0.93 收敛，body Lipschitz 正常）
+- ct_perp: 0.36 → 0.77（活人格）
+- ct_inj: 0.009 稳定
+- ct 范数: 8 稳定
+
+v14 同 step 11000 崩溃时 compress grad=1e10；**v15 步 200 只有 1.2（差 10 个数量级）**。
+
+### 启动命令
+```bash
+cd /home/kt/ai/luma-architecture/minimind/scripts && \
+bash run_experiment.sh hero_v15_mamba_adamw
+```
+
+### 下一步 TODO
+- 🔴 监控 v15 通过 v6 崩溃点 step 10538 和 v14 崩溃点 step 11000
+- 🔴 监控 fp_proxy L 是否稳定收敛到 ~0.93（v13 稳态）
+- 🟡 跑完 1 epoch（80444 steps, ~36h），观察 final ema
+- 🟡 对比 v13 best ema 7.38 和 v15 最终 ema
+
+### 当前代码库快照
+- `minimind/luma_stage0/optimizers.py`: FORCE_ADAMW + mamba, 三档 wd, 删除 AdamW modular_norm
+- `minimind/trainer/train_luma_refactor.py`: 默认 scalar_lr=6e-4, weight_decay=0.02, grad_clip=2.0
+
+---
+
 ## [2026-04-14 11:25] 🎯 Hero v13: 残差归一化 body 设计 — Lipschitz 收敛 + ct_perp 复活
 
 ### 背景

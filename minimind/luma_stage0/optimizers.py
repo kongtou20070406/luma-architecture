@@ -39,6 +39,13 @@ FORCE_ADAMW_PARAM_SUBSTRINGS = (
     "ct_injection.proj.weight",   # W_c: 显式走 AdamW，避免 Muon 对时变/定向梯度的放大。
     "c_t_head.weight",            # c_t_head: 自省投影层，显式走 AdamW 便于控制 c_t 范数增长。
     "h_mask_predictor.weight",    # h_mask_predictor: 直接驱动 c_t 的辅助头，显式走 AdamW。
+    # Mamba3 内部所有参数：Muon Newton-Schulz 把 3D SSM 参数 (B_bias/C_bias/mimo_*
+    # shape (24, 1, 192) / (24, 2, 64)) 当 batched 1×N 矩阵正交化 → 每行覆盖成单位向量
+    # → SSM B/C 缩放和门控信号的梯度幅度信息被完全丢弃 → compression 12 层累积 →
+    # 长训中 grad 指数爆炸（v14 step 11000+: compress grad=1e10, rank 坍缩到 2/20）。
+    # in_proj/out_proj 是 2D 但其输出包含 dt/B/C/x/z/o 多语义混合，正交化破坏相对尺度。
+    # → 整个 Mamba3 模块强制走 AdamW，由 weight decay + 自适应 lr 控制权重健康。
+    "mamba",
     # Loop LoRA 参数：Muon 正交化让 wd 失效 → LoRA 权重在长训练中单调增长 →
     # F_k 的 Jacobian 扰动线性放大 → rho_h_frozen 后期越过 1。
     # V5b (rank=0) ablation 证实 LoRA 是 rho_h 恶化的主因（rho_h_frozen p95 从 1.62 降到 0.90）。
@@ -62,7 +69,10 @@ class LumaOptimizerConfig:
     muon_momentum: float = 0.95
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = 1e-8
-    weight_decay: float = 0.1
+    # 4.14 Mamba→AdamW 后 wd 重调：
+    # - Muon 下剩 FFN/attn，正交化本身已经是范数归一化，重 wd 是双重压制 → 0.1 → 0.02
+    # - Mamba/lora/hebb/c_t_head 有各自白名单 wd（见 _split_params）
+    weight_decay: float = 0.02
     muon_clip_factor: float = 1.0
     modular_norm_power: float = 0.5
     use_8bit_muon: bool = False
@@ -182,20 +192,39 @@ class LumaOptimizerBundle:
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            scale = _modular_norm_scale(name, param, self.config.modular_norm_power)
             force_adamw = any(pattern in name for pattern in FORCE_ADAMW_PARAM_SUBSTRINGS)
+            # Modular-Norm 缩放只对 Muon 有意义（控制 NS 步长）。
+            # AdamW 自带 adaptive lr（exp_avg_sq 会处理 fan_in 缩放），再乘 modular scale
+            # 会把 Mamba in_proj (3960×768) 的 lr 压到 1.6e-6，严重欠拟合。
             if param.ndim >= 2 and not force_adamw and not any(pattern in name for pattern in CONTROL_TENSOR_NAME_PATTERNS):
+                scale = _modular_norm_scale(name, param, self.config.modular_norm_power)
                 matrix_params.append(param)
                 routing_summary["muon"].append(name)
             else:
-                # 低 wd 白名单：zero-init 或梯度偏小的参数（如 hebb/lora/h_mask_predictor），
-                # 默认 wd=0.1 会把零初始化的 B 矩阵压成 0，导致模块彻底失效。
-                _low_wd_hit = ("hebb" in name) or ("lora" in name) or ("h_mask_predictor" in name)
-                wd = 0.01 if _low_wd_hit else self.config.weight_decay
+                # 低 wd 白名单：
+                # - hebb / lora / h_mask_predictor: zero-init，wd=0.1 会压成 0 → 模块失效
+                # - mamba: in_proj 输出 dt/B/C/x/z/o 多语义混合，过强 wd 破坏相对尺度
+                #          Mamba 论文标准 wd=0.0~0.01
+                _low_wd_hit = (
+                    ("hebb" in name) or ("lora" in name) or ("h_mask_predictor" in name)
+                    or ("mamba" in name.lower())
+                )
+                # embedding / lm_head / norm 类参数走 0 wd（标准做法）
+                _zero_wd_hit = (
+                    ("embedding" in name) or ("embed_table" in name)
+                    or ("lm_head" in name) or ("norm" in name)
+                )
+                if _zero_wd_hit:
+                    wd = 0.0
+                elif _low_wd_hit:
+                    wd = 0.01
+                else:
+                    wd = self.config.weight_decay
+                # AdamW 不再用 modular_norm scale —— Adam 自带自适应 lr
                 scalar_groups.append(
                     dict(
                         params=[param],
-                        lr=self.config.scalar_lr * scale,
+                        lr=self.config.scalar_lr,
                         betas=self.config.betas,
                         eps=self.config.eps,
                         weight_decay=wd,

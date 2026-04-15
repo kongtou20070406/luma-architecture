@@ -216,6 +216,9 @@ def _base_arch_kwargs(args: argparse.Namespace) -> dict:
         phase_e_temperature=getattr(args, "phase_e_temperature", 0.0),
         phase_e_grad_stop_eps=getattr(args, "phase_e_grad_stop_eps", 0.0),
         phase_e_damped_mode=bool(getattr(args, "phase_e_damped_mode", 1)),
+        # Stellarator mode (v19+): 主干/调制/融合三层推理核心
+        stellarator_mode=bool(getattr(args, "stellarator_mode", 0)),
+        stellarator_mod_rank=getattr(args, "stellarator_mod_rank", 8),
         # World JEPA 难度 / 防崩升级（2026-04-13）
         world_mask_scheme=getattr(args, "world_mask_scheme", "block"),
         world_mask_block_mean=getattr(args, "world_mask_block_mean", 32),
@@ -956,24 +959,45 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                 f"  ratio={grad_metrics.get('grad_ratio', 'n/a'):.2f}"
                 if grad_metrics else ""
             )
-            compress_line = f"  loss_c={loss_compress_val:.4f}" if compress_weight > 0 else ""
-            jepa_line = f"  loss_j={loss_jepa_val:.4f}" if loss_jepa_val > 0 else ""
-            # 改进 #3: World JEPA loss 单独显示
+            # ── Loss 拆细（effective = 已加权；raw = 未加权组件）────────────
+            _compress_s = f"  loss_c={loss_compress_val:.3f}" if compress_weight > 0 else ""
+            # World-JEPA 拆解：cosine + sigreg
             _world_jepa_eff = _last_aux.get("world_jepa_loss_effective")
             _world_jepa_val = _world_jepa_eff.item() if _world_jepa_eff is not None and hasattr(_world_jepa_eff, "item") else (float(_world_jepa_eff) if _world_jepa_eff is not None else 0.0)
-            world_jepa_line = f"  loss_w={_world_jepa_val:.4f}" if _world_jepa_val > 0 else ""
+            _world_cos_raw = _last_aux.get("world_jepa_cosine", torch.tensor(0.0))
+            _world_cos_val = _world_cos_raw.item() if hasattr(_world_cos_raw, "item") else float(_world_cos_raw)
+            _world_sigreg_raw = _last_aux.get("world_sigreg_raw", torch.tensor(0.0))
+            _world_sigreg_val = _world_sigreg_raw.item() if hasattr(_world_sigreg_raw, "item") else float(_world_sigreg_raw)
+            # self-JEPA 已加权
+            _self_jepa_eff = _last_aux.get("self_jepa_loss_effective")
+            _self_jepa_val = _self_jepa_eff.item() if _self_jepa_eff is not None and hasattr(_self_jepa_eff, "item") else (float(_self_jepa_eff) if _self_jepa_eff is not None else 0.0)
             _h_mask_val = _last_aux.get("h_mask_loss", torch.tensor(0.0))
             _h_mask_val = _h_mask_val.item() if hasattr(_h_mask_val, "item") else float(_h_mask_val)
-            h_mask_line = f"  loss_hm={_h_mask_val:.4f}" if _h_mask_val > 0 else ""
-            # 改进 #1: peak loops + 改进 #2: ema + 改进 #6: tok/s
+            _self_check_eff = _last_aux.get("self_check_loss_effective")
+            _self_check_val = _self_check_eff.item() if _self_check_eff is not None and hasattr(_self_check_eff, "item") else (float(_self_check_eff) if _self_check_eff is not None else 0.0)
+            # aux_loss 合计（loss_j 的原始含义）
+            _aux_total = f"  loss_aux={loss_jepa_val:.3f}" if loss_jepa_val > 0 else ""
+
             exit_line = f"  loops={_exit_loops}/{args.reason_loops}  peak={interval_max_loops}" if _exit_loops > 0 else ""
             ema_line = f"  ema={loss_ema:.3f}" if loss_ema is not None else ""
             speed_line = f"  tok/s={_tok_per_sec}"
-            Logger(
-                f"[{step}/{args.iters}] loss_lm={loss_lm.item():.4f}{compress_line}{jepa_line}{world_jepa_line}{h_mask_line}"
-                f"  scalar_lr={scalar_lr:.2e}  eta={eta:.1f}min{exit_line}{ema_line}{speed_line}"
-                + grad_line
-            )
+            # 多行输出，方便人工 review
+            Logger(f"[{step}/{args.iters}] loss_lm={loss_lm.item():.3f}{_compress_s}{_aux_total}  scalar_lr={scalar_lr:.2e}  eta={eta:.1f}min{exit_line}{ema_line}{speed_line}")
+            # loss 拆细子行：world-JEPA 和 self-JEPA
+            _loss_parts = []
+            if _world_jepa_val > 0:
+                _loss_parts.append(f"w={_world_jepa_val:.3f}(cos={_world_cos_val:.3f} sig_raw={_world_sigreg_val:.1f})")
+            if _self_jepa_val > 0:
+                _loss_parts.append(f"sj={_self_jepa_val:.4f}")
+            if _self_check_val > 0:
+                _loss_parts.append(f"sc={_self_check_val:.4f}")
+            if _h_mask_val > 0:
+                _loss_parts.append(f"hm={_h_mask_val:.4f}")
+            if _loss_parts:
+                Logger(f"  losses: {'  '.join(_loss_parts)}")
+            # 梯度子行
+            if grad_metrics:
+                Logger(grad_line)
             # 改进 #1: 每次打印后重置 interval_max_loops
             interval_max_loops = 0
             # ── 动力学监控摘要 ──
@@ -1159,7 +1183,7 @@ if __name__ == "__main__":
                         help="总训练步数（非 epoch）— 默认 3 epoch (214 步/epoch × 3)")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--accumulation_steps", type=int, default=1)
-    parser.add_argument("--grad_clip", type=float, default=1.0)
+    parser.add_argument("--grad_clip", type=float, default=2.0)
     parser.add_argument("--log_interval", type=int, default=50)
     parser.add_argument("--grad_log_interval", type=int, default=50,
                         help="每隔多少步记录一次梯度范数")
@@ -1179,13 +1203,13 @@ if __name__ == "__main__":
     parser.add_argument("--dtype", type=str, default="bfloat16")
     # ── lr (固定，不用余弦退火) ────────────────────────────────────────────
     parser.add_argument("--matrix_lr", type=float, default=0.008,
-                        help="Muon lr（建议取正式训练 matrix_lr 的 30-50%）")
-    parser.add_argument("--scalar_lr", type=float, default=1e-4,
-                        help="AdamW lr（建议取正式训练 scalar_lr 的 30-50%）")
+                        help="Muon lr（只管 48M FFN/attn，正交化后步长稳定）")
+    parser.add_argument("--scalar_lr", type=float, default=6e-4,
+                        help="AdamW lr（管 143M 包括 98M Mamba，匹配 Mamba 标准 lr）")
     parser.add_argument("--muon_momentum", type=float, default=0.95)
     parser.add_argument("--betas", nargs=2, default=(0.9, 0.95), type=float)
     parser.add_argument("--eps", type=float, default=1e-8)
-    parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--weight_decay", type=float, default=0.02)
     parser.add_argument("--muon_clip_factor", type=float, default=1.0)
     parser.add_argument("--modular_norm_power", type=float, default=0.5)
     parser.add_argument("--use_8bit_muon", type=int, default=1, choices=[0, 1])
@@ -1252,6 +1276,11 @@ if __name__ == "__main__":
                         help="Phase E: 梯度范数早停阈值（0=跑满 K_max）")
     parser.add_argument("--phase_e_damped_mode", type=int, default=1, choices=[0, 1],
                         help="Phase E: 1=damped fixed-point (默认, 稳定), 0=grad mode (完整∇E, 需 double backward)")
+    # Stellarator mode (v19+): 结构性仿星器改造
+    parser.add_argument("--stellarator_mode", type=int, default=0, choices=[0, 1],
+                        help="Stellarator: 主干 F_main(h) 不看 c_t + 低秩 modulator(c_t) + sigmoid gated fusion")
+    parser.add_argument("--stellarator_mod_rank", type=int, default=8,
+                        help="Stellarator: c_t modulator 的低秩维度 (默认 8)")
     # Mamba3 FP8 activation cache (saved_tensors_hooks per-block 量化, 不改 kernel)
     parser.add_argument("--mamba_fp8_activation_cache", type=int, default=0, choices=[0, 1],
                         help="Mamba3 激活缓存 FP8 (per-block 量化, 30-68% 内存节省, bf16 compute 不变)")
@@ -1590,6 +1619,8 @@ if __name__ == "__main__":
         Logger("Optimizer CPU offload enabled — states will live on CPU pinned memory")
     routing_summary = getattr(optimizer, "routing_summary", {})
     targeted_routes = []
+    # mamba 统计（不逐个打印，太多）
+    mamba_counts = {"muon": 0, "adamw": 0}
     for family in ("adamw", "muon"):
         for name in routing_summary.get(family, []):
             if (
@@ -1598,10 +1629,13 @@ if __name__ == "__main__":
                 or "h_mask_predictor.weight" in name
             ):
                 targeted_routes.append(f"{name} -> {family}")
-    if targeted_routes:
+            if "mamba" in name.lower():
+                mamba_counts[family] += 1
+    if targeted_routes or mamba_counts["adamw"] + mamba_counts["muon"] > 0:
         Logger("Optimizer routing:")
         for line in targeted_routes:
             Logger(f"  {line}")
+        Logger(f"  mamba.*: {mamba_counts['adamw']} → adamw, {mamba_counts['muon']} → muon")
     # LR schedule: cosine decay 到 min_lr (enable_cosine_decay=1) 或固定 LR (默认)
     _lr_total = getattr(args, "cosine_total_steps", 0) or args.iters
     if not getattr(args, "enable_cosine_decay", 0):

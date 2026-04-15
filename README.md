@@ -202,16 +202,63 @@ exit_logit = bias + Σ(weight_i × signal_i) - gain_weight × predicted_gain
 - **FP8 混精度**: ~130 Linear layers FP8 forward, BF16 backward
 - **8-bit Muon + AdamW**: CPU offload 优化器状态
 
-## 当前状态 (2026-04-14)
+## 当前状态 (2026-04-15)
 
-**生产架构 (Hero v13 = Phase E + 残差归一化 body + 全栈 norm 修复)**:
-- **参数量：217.003M** (bf16, fp8=0)
+**生产架构 (Hero v19 = Stellarator 仿星器 + LeWorld MSE + Mamba→AdamW)**:
+- **参数量：214.995M** (bf16, fp8=0, 190M w/o LoRA)
 - hidden=768, **compression_layers=12**, heads=12/3, **reason_shared_depth=2, reason_loops=4**
-- **Phase E damped**: K_max=3, η=0.5, damped_mode=1
-- **scaffold World-JEPA**: mask=0.6, sigreg=0.05, block_mean=32
-- **h_mask_predictor**: c_t 预测 h 的 mask 维度（cosine loss），给赫布提供独立 surprise
-- **赫布 std=0.1 warm start**：让 hebb_out 从非零起点开始学
-- Peak VRAM **~10-11 GB** @ seq=2048
+- **Stellarator 推理核心**: F_main(h) 不看 c_t + low-rank modulator(c_t, rank=8) + sigmoid gated fusion
+- **Phase E damped**: K_max=3, η=0.5 (stellarator bypass damping)
+- **scaffold World-JEPA (MSE)**: mask=0.4, sigreg_weight=0.02, weight=0.3
+- Peak VRAM **~11 GB** @ seq=2048
+
+### 4.15 仿星器架构突破（v14→v19 时间线）
+
+**用户提出核心洞察（4.14 晚）**："托卡马克 → 仿星器"——推理核心不应该是"高增益系统 + 事后补丁维稳"，而应该是"天然收缩主流场 + 低维慢变量温和塑形"。
+
+**5 个根因依次击穿**:
+
+| 版本 | 根因 | 修复 | 结果 |
+|------|------|------|------|
+| v14 崩溃 | Muon Newton-Schulz 错误正交化 Mamba3 3D 参数 (24,1,192) → batched 1×N → 每行单位化 → 梯度幅度丢失 | 不是这里 | NaN @ step 11000 |
+| v15 | `"mamba"` 加入 FORCE_ADAMW 白名单 + wd 重调 0.1→0.02 + grad_clip 1→2 + modular_norm_scale 对 AdamW 禁用 | 优化器正确路由 | 稳定但 ema ~15 |
+| v16 | 删 modular_norm 后 LoRA lr 从 3.6e-6 暴涨到 6e-4 → body Lipschitz 爬 | `loop_lora_rank=0` 关闭 LoRA | ema 11 但 DOD rank 偶发坍缩 |
+| v17 | World-JEPA 用 cosine + F.normalize 投影单位球，和 SIGReg N(0,I) 要求矛盾 | cosine → MSE（对齐 LeWorldModel paper） | sig_raw 从 80 → 10 但仍 spike |
+| v18 | SIGReg 每步随机重采 directions + ×N 放大 + self-JEPA 5 处多余 SIGReg | 固定 directions buffer + 去 ×N + self-JEPA SIGReg 全关 | - |
+| **v19** | **c_t 深度穿透主流 → body 稳定性依赖慢变量 → 托卡马克式补丁维稳** | **Stellarator: F_main(h) 不看 c_t + low-rank modulator(c_t) + sigmoid gated fusion** | **step 26250 ema=7.52, fp_proxy L=0.062** |
+
+**Stellarator 三层结构**:
+
+```python
+# 1. 主干 — 完全不看 c_t（shared_layers 调用时 c_t=None）
+f_main = h + α · LayerNorm(F_layers(h) - h)    # Lip ≤ 1 + α
+
+# 2. 低秩 modulator — c_t 只塑形不驱动
+bias = LayerNorm(W_up(silu(W_down(c_t))))       # rank=8, zero-init up
+
+# 3. Gated fusion — sigmoid 有界
+g = sigmoid(gate_logit)                          # init=0.5
+h_next = h + g · ((f_main - h) + bias)          # Lip ≤ 1 + g·α
+```
+
+**v19 vs 历史基线（step 26250 @ 32.6% epoch）**：
+
+| 指标 | v14 peak | v16 peak | v17 peak | **v19** |
+|------|---------|---------|---------|---------|
+| 最低 ema | NaN@11k | ~17 | stopped@400 | **7.52** ⭐ |
+| fp_proxy L | — | 1.0+ | 1.0-1.15 震荡 | **0.062** ⭐⭐ |
+| sig_raw | — | ~80 | spike 101 | **0** |
+| loss_w | — | 2.8 | 0.5 | **0.011** |
+| 通过步数 | 11000 | ~1000 | ~400 | **26250+** |
+| DOD rank | 2 崩 | 11→2 震荡 | 2 崩 | **7-9 稳定** |
+
+⭐ **决定性证据**:
+1. **fp_proxy L = 0.062**：主干 Jacobian 谱半径远远 <1，结构性收缩
+2. **sig_raw 全程 0**：World-JEPA latent 稳定在 N(0,I)，SIGReg 零惩罚
+3. **ema 比 v16 低 10 个点**：仿星器没有牺牲学习速度，反而更快
+4. **通过所有历史崩溃点**：step 400（v17）、1000（v16）、2800（v16 首次 rank 坍缩）、11000（v14 NaN）
+
+**认知修正**: DOD rank 低 ≠ 坏事。v16 rank=12 但 ema=17（layer 互相冲突），v19 rank=3-8 但 ema=7.5（layer 协同）。真正判据是 **loss 下降速度 + fp_proxy L**，不是 rank 绝对值。
 
 ### 4.14 网络结构修复（核心进展）
 
@@ -268,7 +315,12 @@ F(h) = h + α · LayerNorm(g(h) - h)
 | Phase E Gap 11-23 | Phase E 集成 + seq=2048 解锁 | 完成 (4.12-4.13) |
 | Hero v6/v7/v9 | norm scale 修复 + h_mask + hebb warm start | NaN at step 10538/19250 |
 | Hero v11/v12 | 全栈 norm 修复（RMSNorm/LayerNorm） | grad spike，未崩 |
-| **Hero v13** | **残差归一化 body + α · normalize** | **进行中，rho_h<1, ct_perp=0.88** |
+| Hero v13 | 残差归一化 body + α·normalize | rho_h<1, ct_perp=0.88 |
+| Hero v14 | v13 + no h_mask | NaN @ step 11000 (Muon/Mamba 冲突) |
+| Hero v15 | Mamba → AdamW | ema ~15 |
+| Hero v16 | LoRA rank=0 | ema 11, DOD rank 偶发坍缩 |
+| Hero v17 | World-JEPA cosine → MSE | sig_raw spike 101 |
+| **Hero v19** | **Stellarator 仿星器 + SIGReg fix + self-JEPA SIGReg 全关** | **step 26250+, ema=7.52, L=0.062 🏆** |
 
 详见 [WORKLOG](artifacts/WORKLOG.md) | [4.11 进展报告](docs/reports/Progress_Report_20260411.md) | [动力学分析技能](../Luma_Dynamics_Analysis_Skill.md)
 
