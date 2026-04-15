@@ -1,16 +1,24 @@
 #!/usr/bin/env python
 """
-Luma Sanity Check v1 (2026-04-15)
+Luma Sanity Check v2 (2026-04-15)
 =================================
-训练完成后的基础能力验证。不是评测，是"训练没白跑、模型学到了东西"的 sanity check。
+训练完成后的基础能力验证。
 
-6 个测试模块：
+v2 修复:
+  - aux 路径从 raw_model.model.last_aux 改为 raw_model.last_aux
+  - Monkey-patch 改用 functools.wraps + inspect.signature 自适应参数
+  - PCA 样本扩展到 40 条情绪 prompt
+  - tokenizer 路径多重 fallback
+  - 新增 test_generation: 32 token greedy 生成看语法结构
+
+7 个测试模块:
   1. test_prompt_loss        基础困惑度（loss < 11.9 = 比随机好）
   2. test_topk_prediction    top-k 词汇合理性
   3. test_language_isolation 中英文 token 分离度
   4. test_exit_depth         不同难度 prompt 的循环深度分布
-  5. test_c_t_clustering     c_t 自发聚类（采样 + t-SNE 可选）
+  5. test_c_t_clustering     c_t 自发聚类（40 条采样）
   6. test_c_t_injection ⭐   手动初始化 c_t 看输出差异（人格机制验证）
+  7. test_generation         32 token greedy/top-k 生成（语法结构检查）
 
 用法:
     python sanity_check.py --checkpoint <path> --output <json_path>
@@ -19,8 +27,11 @@ Luma Sanity Check v1 (2026-04-15)
 from __future__ import annotations
 
 import argparse
+import functools
+import inspect
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -64,20 +75,52 @@ PROMPTS_DIFFICULTY = {
     "edge_noise": "asdfghjkl qwerty",
 }
 
-# 情绪类 prompts - 用于采集 c_t，做 PCA 得到情绪轴
+# 情绪类 prompts - 40 条（扩展自 12 条），每类 10 条，给 PCA 足够样本
 PROMPTS_EMOTION = {
-    "happy_1": "今天是个好日子，我感到非常",
-    "happy_2": "收到礼物的那一刻，心里",
-    "happy_3": "和朋友相聚总是令人",
-    "sad_1": "失去亲人的痛苦让人",
-    "sad_2": "分别的时候心里总是",
-    "sad_3": "漫长的等待让人",
-    "calm_1": "静静地坐在湖边，听风吹过",
-    "calm_2": "清晨的森林里，一切都那么",
-    "calm_3": "冥想时内心变得",
-    "angry_1": "不公正的待遇让人",
-    "angry_2": "被背叛后心中",
-    "angry_3": "连续的挫折让我",
+    # happy × 10
+    "happy_01": "今天是个好日子，我感到非常",
+    "happy_02": "收到礼物的那一刻，心里",
+    "happy_03": "和朋友相聚总是令人",
+    "happy_04": "看到孩子们的笑脸，我",
+    "happy_05": "考试考满分的时候，整个人",
+    "happy_06": "听到好消息后，忍不住",
+    "happy_07": "春天来了，到处都是",
+    "happy_08": "完成一个项目后，内心充满",
+    "happy_09": "和家人团聚的时刻让我",
+    "happy_10": "阳光明媚的早晨，心情",
+    # sad × 10
+    "sad_01": "失去亲人的痛苦让人",
+    "sad_02": "分别的时候心里总是",
+    "sad_03": "漫长的等待让人",
+    "sad_04": "看着空荡荡的房间，我",
+    "sad_05": "梦想破碎的那一刻，心情",
+    "sad_06": "听到坏消息后，整个人",
+    "sad_07": "独自走在雨中，感到",
+    "sad_08": "回忆起逝去的时光，心里",
+    "sad_09": "朋友远去后，生活变得",
+    "sad_10": "面对挫折和失败，我",
+    # calm × 10
+    "calm_01": "静静地坐在湖边，听风吹过",
+    "calm_02": "清晨的森林里，一切都那么",
+    "calm_03": "冥想时内心变得",
+    "calm_04": "读一本好书的午后，感到",
+    "calm_05": "山间的清泉流淌，让人",
+    "calm_06": "深夜独自看星空，心里",
+    "calm_07": "慢慢喝一杯茶，思绪",
+    "calm_08": "走在樱花林中，每一步都",
+    "calm_09": "放下手机的那一刻，内心",
+    "calm_10": "站在悬崖边看日出，感觉",
+    # angry × 10
+    "angry_01": "不公正的待遇让人",
+    "angry_02": "被背叛后心中",
+    "angry_03": "连续的挫折让我",
+    "angry_04": "看到弱者被欺负，我",
+    "angry_05": "听到谎言被拆穿后，心里",
+    "angry_06": "工作被人抢功的那一刻，感到",
+    "angry_07": "面对无理取闹的人，我",
+    "angry_08": "规则被破坏时，内心",
+    "angry_09": "被误解又无法辩解，心情",
+    "angry_10": "看到虚伪的表演，让我",
 }
 
 
@@ -85,15 +128,41 @@ PROMPTS_EMOTION = {
 # 公共工具
 # ---------------------------------------------------------------------------
 
+def _resolve_tokenizer_path(cfg_args: dict) -> str:
+    """多重 fallback 定位 tokenizer 目录。"""
+    # 优先级: ckpt 里存的路径 > model/qwen3_5_tokenizer > model/Qwen2.5-0.5B > HF 默认
+    candidates = []
+    if cfg_args.get("tokenizer_path"):
+        p = cfg_args["tokenizer_path"]
+        # 相对路径转绝对：相对于 trainer/ 目录
+        if not os.path.isabs(p):
+            candidates.append(str((_ROOT / "trainer" / p).resolve()))
+            candidates.append(str((_ROOT / p).resolve()))
+        else:
+            candidates.append(p)
+    candidates += [
+        str(_ROOT / "model" / "qwen3_5_tokenizer"),
+        str(_ROOT / "model" / "Qwen2.5-0.5B"),
+        str(_ROOT.parent / "model" / "qwen3_5_tokenizer"),
+    ]
+    for c in candidates:
+        if Path(c).exists() and any(Path(c).glob("tokenizer*")):
+            return c
+    # 最后 fallback 让 HF 自己找（会报错但至少明确）
+    return candidates[0] if candidates else "Qwen/Qwen2.5-0.5B"
+
+
 def load_model(checkpoint_path: str, device: str = "cuda:0") -> tuple:
     """加载 checkpoint。返回 (model, tokenizer, config)."""
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if "args" in ckpt:
         cfg_args = ckpt["args"]
+        if not isinstance(cfg_args, dict):
+            # 旧版 ckpt 存的是 Namespace
+            cfg_args = vars(cfg_args)
     else:
         cfg_args = {}
 
-    # 重建 config（尽量匹配训练时的 arch 参数）
     cfg = LumaConfig(
         hidden_size=cfg_args.get("hidden_size", 768),
         intermediate_size=cfg_args.get("intermediate_size", 3072),
@@ -107,7 +176,6 @@ def load_model(checkpoint_path: str, device: str = "cuda:0") -> tuple:
         mamba_d_state=cfg_args.get("mamba_d_state", 192),
         mamba_chunk_size=cfg_args.get("mamba_chunk_size", 32),
         reason_loops=cfg_args.get("reason_loops", 4),
-        # Phase 6 + stellarator
         enable_world_jepa=True,
         disable_self_jepa=False,
         enable_self_check_ring=True,
@@ -133,17 +201,23 @@ def load_model(checkpoint_path: str, device: str = "cuda:0") -> tuple:
         world_mask_ratio=0.4,
     )
     model = LumaForCausalLM(cfg).to(device).eval()
-    # 允许非严格 load，兼容老 checkpoint
     missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
     if missing:
         print(f"  [warn] {len(missing)} missing keys, e.g. {missing[:3]}", file=sys.stderr)
     if unexpected:
         print(f"  [warn] {len(unexpected)} unexpected keys, e.g. {unexpected[:3]}", file=sys.stderr)
 
-    # tokenizer
-    tok_path = cfg_args.get("tokenizer_path", str(_ROOT / "model" / "qwen3_5_tokenizer"))
-    tokenizer = AutoTokenizer.from_pretrained(tok_path)
+    tok_path = _resolve_tokenizer_path(cfg_args)
+    print(f"  tokenizer: {tok_path}")
+    tokenizer = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=True)
     return model, tokenizer, cfg
+
+
+def _get_last_aux(model) -> dict:
+    """正确访问 last_aux。aux 挂在 LumaForCausalLM 上，不是 backbone 上。"""
+    raw_model = getattr(model, "_orig_mod", model)
+    aux = getattr(raw_model, "last_aux", {})
+    return aux if aux else {}
 
 
 @torch.no_grad()
@@ -153,7 +227,6 @@ def _forward_with_loss(model, tokenizer, text: str, device: str):
     labels = ids.clone()
     out = model(input_ids=ids, labels=labels)
     logits = out.logits
-    # 对齐 reason_memory prefix
     if logits.size(-2) > labels.size(-1):
         logits = logits[:, -labels.size(-1):, :]
     _logits = logits[..., :-1, :].contiguous()
@@ -163,9 +236,21 @@ def _forward_with_loss(model, tokenizer, text: str, device: str):
         _labels.view(-1),
         ignore_index=-100, reduction="none",
     )
-    raw_model = getattr(model, "_orig_mod", model)
-    aux = getattr(raw_model.model, "last_aux", {}) if hasattr(raw_model, "model") else {}
+    aux = _get_last_aux(model)
     return logits, per_tok, ids, aux
+
+
+def _extract_ct_vec(aux: dict) -> Optional[np.ndarray]:
+    """从 aux 里提取最终 c_t 向量。优先用 c_t_history[-1]，次选 c_t。"""
+    ct_history = aux.get("c_t_history", [])
+    if ct_history:
+        last_ct = ct_history[-1]
+        if hasattr(last_ct, "detach"):
+            return last_ct.detach().float().cpu().squeeze().numpy()
+    ct = aux.get("c_t")
+    if ct is not None and hasattr(ct, "detach"):
+        return ct.detach().float().cpu().squeeze().numpy()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +259,6 @@ def _forward_with_loss(model, tokenizer, text: str, device: str):
 
 @torch.no_grad()
 def test_prompt_loss(model, tokenizer, device: str) -> dict:
-    """测基础困惑度。目标：所有 prompt loss < 11.9 (random baseline for 151936 vocab)."""
     vocab_size = model.config.vocab_size
     baseline = math.log(vocab_size)
 
@@ -208,7 +292,6 @@ def test_prompt_loss(model, tokenizer, device: str) -> dict:
 
 @torch.no_grad()
 def test_topk_prediction(model, tokenizer, device: str, k: int = 10) -> dict:
-    """给 prompt 看 top-k next token。目标：top-k 是合理 token。"""
     results = {}
     for name, text in PROMPTS_BASIC.items():
         logits, _, ids, _ = _forward_with_loss(model, tokenizer, text, device)
@@ -231,19 +314,16 @@ def test_topk_prediction(model, tokenizer, device: str, k: int = 10) -> dict:
 # ---------------------------------------------------------------------------
 
 def _is_chinese_token(tok: str) -> bool:
-    """粗略判断：含有中文字符的 token。"""
     return any("\u4e00" <= c <= "\u9fff" for c in tok)
 
 
 def _is_english_token(tok: str) -> bool:
-    """粗略判断：纯 ASCII 字母的 token（剔除空格/标点）。"""
     clean = tok.lstrip("▁ ").strip()
     return len(clean) > 0 and all(c.isascii() and c.isalpha() for c in clean)
 
 
 @torch.no_grad()
 def test_language_isolation(model, tokenizer, device: str, k: int = 20) -> dict:
-    """中文 prefix 看 top-k 是中文 token 的比例。"""
     cn_prompts = [("cn_weather", PROMPTS_BASIC["cn_weather"]),
                   ("cn_coding", PROMPTS_BASIC["cn_coding"])]
     en_prompts = [("en_fox", PROMPTS_BASIC["en_fox"]),
@@ -275,7 +355,6 @@ def test_language_isolation(model, tokenizer, device: str, k: int = 20) -> dict:
 
 @torch.no_grad()
 def test_exit_depth_distribution(model, tokenizer, device: str) -> dict:
-    """不同难度 prompt 的 exit loops 分布。目标：难度和循环数正相关。"""
     results = {}
     for name, text in PROMPTS_DIFFICULTY.items():
         _, _, _, aux = _forward_with_loss(model, tokenizer, text, device)
@@ -283,9 +362,15 @@ def test_exit_depth_distribution(model, tokenizer, device: str) -> dict:
         if exit_loops is None:
             loops_val = -1
         elif hasattr(exit_loops, "item"):
-            loops_val = int(exit_loops.float().mean().item())
+            try:
+                loops_val = int(exit_loops.float().mean().item())
+            except Exception:
+                loops_val = -1
         else:
-            loops_val = int(exit_loops)
+            try:
+                loops_val = int(exit_loops)
+            except Exception:
+                loops_val = -1
         results[name] = {
             "prompt": text,
             "exit_loops": loops_val,
@@ -308,18 +393,12 @@ def test_exit_depth_distribution(model, tokenizer, device: str) -> dict:
 
 @torch.no_grad()
 def test_c_t_clustering(model, tokenizer, device: str) -> dict:
-    """采集情绪 prompt 的最终 c_t。返回每条 prompt 的 c_t 向量和标签。
-    不做 t-SNE（需要 sklearn），只保存 raw 向量供后续分析。"""
     samples = []
     for name, text in PROMPTS_EMOTION.items():
         _, _, _, aux = _forward_with_loss(model, tokenizer, text, device)
-        ct_history = aux.get("c_t_history", [])
-        if ct_history and len(ct_history) > 0:
-            last_ct = ct_history[-1]
-            if hasattr(last_ct, "cpu"):
-                vec = last_ct.float().cpu().squeeze().numpy().tolist()
-            else:
-                vec = []
+        vec_np = _extract_ct_vec(aux)
+        if vec_np is not None:
+            vec = vec_np.tolist()
         else:
             vec = []
         emotion = name.split("_")[0]
@@ -328,56 +407,93 @@ def test_c_t_clustering(model, tokenizer, device: str) -> dict:
             "emotion": emotion,
             "prompt": text,
             "c_t_dim": len(vec),
-            "c_t_vec": vec[:64],  # 截前 64 维（应该就是 c_t_dim）
+            "c_t_vec_first8": vec[:8],  # 只存前 8 维避免文件过大
             "c_t_norm": float(np.linalg.norm(vec)) if vec else 0.0,
         })
-    # 按情绪统计 c_t 平均
+
+    # 按情绪计算平均 c_t 和类内一致性（cosine similarity）
     emotion_stats = {}
-    for emo in {s["emotion"] for s in samples}:
-        vecs = [s["c_t_vec"] for s in samples if s["emotion"] == emo and s["c_t_vec"]]
-        if vecs:
-            arr = np.array(vecs)
-            emotion_stats[emo] = {
-                "mean_c_t": arr.mean(axis=0).tolist(),
-                "norm_mean": float(arr.mean(axis=0).__abs__().mean()),
-            }
+    samples_by_emo = {}
+    for s in samples:
+        if s["c_t_norm"] > 0:
+            # 需要完整向量做统计，重新采集
+            pass
+    # 重新采集完整向量用于类内 cosine
+    full_vecs = {}
+    for name, text in PROMPTS_EMOTION.items():
+        _, _, _, aux = _forward_with_loss(model, tokenizer, text, device)
+        v = _extract_ct_vec(aux)
+        if v is not None and v.size > 0:
+            full_vecs[name] = v
+            emo = name.split("_")[0]
+            samples_by_emo.setdefault(emo, []).append(v)
+
+    for emo, vecs in samples_by_emo.items():
+        if len(vecs) < 2:
+            continue
+        arr = np.stack(vecs)
+        mean_v = arr.mean(axis=0)
+        # 类内 cosine：每个样本和类中心的 cosine
+        norms = np.linalg.norm(arr, axis=1, keepdims=True).clip(min=1e-8)
+        norm_mean = np.linalg.norm(mean_v)
+        cos_sims = (arr @ mean_v) / (norms.flatten() * max(norm_mean, 1e-8))
+        emotion_stats[emo] = {
+            "count": len(vecs),
+            "mean_norm": float(norms.mean()),
+            "intra_cosine_mean": round(float(cos_sims.mean()), 4),
+            "intra_cosine_std": round(float(cos_sims.std()), 4),
+        }
+
+    # 类间 cosine（中心之间）
+    emotions_list = sorted(samples_by_emo.keys())
+    inter_cosine = {}
+    for i, e1 in enumerate(emotions_list):
+        for e2 in emotions_list[i+1:]:
+            v1 = np.stack(samples_by_emo[e1]).mean(axis=0)
+            v2 = np.stack(samples_by_emo[e2]).mean(axis=0)
+            cos = float((v1 @ v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-8))
+            inter_cosine[f"{e1}_vs_{e2}"] = round(cos, 4)
+
     return {
-        "samples": samples,
+        "samples_count": len(samples),
+        "samples_preview": samples[:4],
         "emotion_stats": emotion_stats,
-        "note": "t-SNE 可视化需要 sklearn，本脚本只导出 raw 向量",
+        "inter_emotion_cosine": inter_cosine,
+        "verdict": {
+            "intra_tight": all(s.get("intra_cosine_mean", 0) > 0.7 for s in emotion_stats.values()),
+            "inter_separated": all(c < 0.95 for c in inter_cosine.values()) if inter_cosine else False,
+        },
     }
 
 
 # ---------------------------------------------------------------------------
-# 测试 6: c_t 注入 ⭐
+# 测试 6: c_t 注入 ⭐ (自适应 monkey-patch)
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def test_c_t_injection(model, tokenizer, device: str) -> dict:
-    """手动覆盖 c_t 方向看输出差异。
-    方法: 先采集 PROMPTS_EMOTION 的 c_t，做 PCA 取前 2 主方向作为"情绪轴"，
-    然后用 ±主轴 × 不同强度覆盖 c_t，生成 top-k 看差异。"""
-    # 1. 采集情绪 c_t
+    """用 PCA 情绪轴注入不同 c_t，看输出差异。"""
+    # Step 1: 采集情绪 c_t
     ct_samples = []
     for name, text in PROMPTS_EMOTION.items():
         _, _, _, aux = _forward_with_loss(model, tokenizer, text, device)
-        ct_history = aux.get("c_t_history", [])
-        if ct_history:
-            last_ct = ct_history[-1]
-            if hasattr(last_ct, "cpu"):
-                ct_samples.append(last_ct.float().cpu().squeeze().numpy())
-    if len(ct_samples) < 2:
-        return {"error": "collected <2 c_t samples, cannot do PCA"}
+        v = _extract_ct_vec(aux)
+        if v is not None and v.size > 0:
+            ct_samples.append(v)
+
+    if len(ct_samples) < 3:
+        return {"error": f"collected only {len(ct_samples)} c_t samples, cannot do PCA"}
 
     arr = np.stack(ct_samples)  # (N, c_t_dim)
     mean = arr.mean(axis=0)
     centered = arr - mean
+
     # PCA via SVD
     U, S, Vt = np.linalg.svd(centered, full_matrices=False)
-    principal_dir1 = Vt[0]  # (c_t_dim,)
+    principal_dir1 = Vt[0]
     principal_dir2 = Vt[1] if Vt.shape[0] > 1 else np.zeros_like(Vt[0])
 
-    # 2. 构造 4 种注入方向: neutral / +dir1 / -dir1 / +dir2
+    # Step 2: 构造注入方向
     test_ct_vectors = {
         "neutral": np.zeros_like(mean),
         "positive_axis1": mean + 3.0 * principal_dir1,
@@ -385,32 +501,38 @@ def test_c_t_injection(model, tokenizer, device: str) -> dict:
         "positive_axis2": mean + 3.0 * principal_dir2,
     }
 
-    # 3. 对测试 prompt 做注入。
-    # 注入机制: monkey-patch introspection_state_stream 的 forward
-    # 让它永远返回指定的 c_t
-    test_prompt = "今天下雨了，我感到"
+    # Step 3: 自适应 monkey-patch introspection.forward
     raw_model = getattr(model, "_orig_mod", model)
     backbone = raw_model.model
     introspection = backbone.introspection_state_stream
 
     original_forward = introspection.forward
+    # 用 inspect 拿到原函数签名，保证参数透传
+    try:
+        orig_sig = inspect.signature(original_forward)
+    except (ValueError, TypeError):
+        orig_sig = None
 
-    def make_patched_forward(override_ct):
-        override_ct_t = torch.tensor(override_ct, dtype=torch.float32, device=device).unsqueeze(0)
+    def make_patched_forward(override_ct: np.ndarray):
+        override_t = torch.tensor(override_ct, dtype=torch.float32, device=device).unsqueeze(0)
 
-        def patched(h, block_reprs, slow_state, loop_progress=None, loop_index=0, meta_override=None):
-            # 调原 forward 拿 know_gap 和 new_slow_state
-            know_gap, original_c_t, new_slow_state = original_forward(
-                h, block_reprs, slow_state,
-                loop_progress=loop_progress, loop_index=loop_index, meta_override=meta_override,
-            )
-            # 强行用 override_ct 替换
-            bsz = original_c_t.size(0)
-            new_ct = override_ct_t.expand(bsz, -1).to(original_c_t.dtype)
-            return know_gap, new_ct, new_slow_state
-
+        @functools.wraps(original_forward)
+        def patched(*args, **kwargs):
+            # 调原 forward 获取所有返回值
+            result = original_forward(*args, **kwargs)
+            # 返回值可能是 tuple (know_gap, c_t, slow_state)
+            if isinstance(result, tuple) and len(result) >= 2:
+                # 强替换第 2 个元素（c_t）
+                first = result[0]
+                orig_ct = result[1]
+                rest = result[2:] if len(result) > 2 else ()
+                bsz = orig_ct.size(0)
+                new_ct = override_t.expand(bsz, -1).to(orig_ct.dtype)
+                return (first, new_ct) + rest
+            return result
         return patched
 
+    test_prompt = "今天下雨了，我感到"
     results = {}
     for inj_name, inj_vec in test_ct_vectors.items():
         introspection.forward = make_patched_forward(inj_vec)
@@ -426,32 +548,100 @@ def test_c_t_injection(model, tokenizer, device: str) -> dict:
                 "top_10_tokens": topk_toks,
                 "top_10_probs": [round(float(p.item()), 4) for p in topk_probs],
             }
+        except Exception as e:
+            results[inj_name] = {"error": str(e)}
         finally:
             introspection.forward = original_forward
 
-    # 4. 计算不同注入之间的 top-k 分布 KL 散度
-    if len(results) >= 2:
-        keys = list(results.keys())
-        # 简单做法: 对比每一对的 top-10 token 重叠率
-        overlap_matrix = {}
-        for i, k1 in enumerate(keys):
-            for k2 in keys[i+1:]:
-                set1 = set(results[k1]["top_10_tokens"])
-                set2 = set(results[k2]["top_10_tokens"])
-                overlap = len(set1 & set2) / 10.0
-                overlap_matrix[f"{k1}_vs_{k2}"] = round(overlap, 2)
-        results["_overlap_matrix"] = overlap_matrix
-        # 判定: 如果所有 overlap > 0.9 → c_t 注入没效果（人格框架弱）
+    # Step 4: 对比 top-10 重叠率
+    overlap_matrix = {}
+    keys = [k for k in results.keys() if "error" not in results[k]]
+    for i, k1 in enumerate(keys):
+        for k2 in keys[i+1:]:
+            set1 = set(results[k1]["top_10_tokens"])
+            set2 = set(results[k2]["top_10_tokens"])
+            overlap = len(set1 & set2) / 10.0
+            overlap_matrix[f"{k1}_vs_{k2}"] = round(overlap, 2)
+    results["_overlap_matrix"] = overlap_matrix
+    if overlap_matrix:
         all_overlaps = list(overlap_matrix.values())
+        mean_ol = float(np.mean(all_overlaps))
         results["_verdict"] = {
-            "mean_overlap": round(float(np.mean(all_overlaps)), 2),
-            "c_t_has_influence": float(np.mean(all_overlaps)) < 0.7,
+            "mean_overlap": round(mean_ol, 3),
+            "min_overlap": round(float(np.min(all_overlaps)), 3),
+            "c_t_has_strong_influence": mean_ol < 0.5,
+            "c_t_has_some_influence": mean_ol < 0.7,
+            "c_t_has_no_influence": mean_ol > 0.9,
         }
 
     return {
         "test_prompt": test_prompt,
-        "pca_explained_variance_top2": [float(s**2 / (S**2).sum()) for s in S[:2]],
+        "n_samples_collected": len(ct_samples),
+        "pca_explained_variance_top2": [float(s**2 / max((S**2).sum(), 1e-8)) for s in S[:2]],
         "injections": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 测试 7: 简单生成
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def test_generation(model, tokenizer, device: str, max_new: int = 32, temperature: float = 0.7) -> dict:
+    """对几个 seed prompt 做 32 token greedy/top-k 生成。
+    loss 7-8 级别的模型生成会很乱，但至少能看有没有语法结构、是否陷入重复。"""
+    seed_prompts = {
+        "cn_start": "今天",
+        "en_start": "The",
+        "story_cn": "从前有一个小孩，他",
+        "qa_cn": "问：天空为什么是蓝色的？\n答：",
+    }
+
+    results = {}
+    for name, prompt in seed_prompts.items():
+        try:
+            ids = tokenizer(prompt, return_tensors="pt", add_special_tokens=False).input_ids.to(device)
+            original_len = ids.size(1)
+            generated = ids.clone()
+
+            for _ in range(max_new):
+                out = model(input_ids=generated, labels=generated)
+                logits = out.logits
+                if logits.size(-2) > generated.size(-1):
+                    logits = logits[:, -generated.size(-1):, :]
+                last_logits = logits[0, -1, :].float() / max(temperature, 1e-6)
+                # Top-k=40 采样，避免完全贪心陷入循环
+                topk_vals, topk_idx = last_logits.topk(40)
+                probs = torch.softmax(topk_vals, dim=-1)
+                choice = torch.multinomial(probs, 1)
+                next_token = topk_idx[choice]
+                generated = torch.cat([generated, next_token.unsqueeze(0)], dim=-1)
+
+            new_tokens = generated[0, original_len:].cpu().tolist()
+            decoded = tokenizer.decode(new_tokens, skip_special_tokens=False)
+            # 判断重复：最常出现的 token 占比
+            from collections import Counter
+            counts = Counter(new_tokens)
+            most_common_pct = counts.most_common(1)[0][1] / max(len(new_tokens), 1)
+
+            results[name] = {
+                "prompt": prompt,
+                "generated_tokens": new_tokens,
+                "decoded": decoded,
+                "stats": {
+                    "length": len(new_tokens),
+                    "unique_tokens": len(set(new_tokens)),
+                    "most_common_token_pct": round(most_common_pct, 3),
+                    "is_repetitive": most_common_pct > 0.3,
+                },
+            }
+        except Exception as e:
+            results[name] = {"error": str(e)}
+
+    return {
+        "seeds": results,
+        "temperature": temperature,
+        "max_new_tokens": max_new,
     }
 
 
@@ -466,26 +656,28 @@ ALL_TESTS = {
     "exit": test_exit_depth_distribution,
     "ct_cluster": test_c_t_clustering,
     "ct_inject": test_c_t_injection,
+    "generation": test_generation,
 }
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True, help="模型 checkpoint 路径")
-    parser.add_argument("--output", default="", help="结果 JSON 输出路径")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--output", default="")
     parser.add_argument("--tests", default="all",
-                        help=f"测试列表: all 或 逗号分隔 ({','.join(ALL_TESTS.keys())})")
+                        help=f"all 或 逗号分隔 ({','.join(ALL_TESTS.keys())})")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
-    print(f"Luma Sanity Check")
+    print(f"Luma Sanity Check v2")
     print(f"  checkpoint: {args.checkpoint}")
     print(f"  device: {args.device}")
     print(f"  tests: {args.tests}")
     print()
 
     model, tokenizer, cfg = load_model(args.checkpoint, device=args.device)
-    print(f"Model loaded: {sum(p.numel() for p in model.parameters())/1e6:.1f}M params")
+    n_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"Model loaded: {n_params:.1f}M params")
     print()
 
     if args.tests == "all":
@@ -496,6 +688,7 @@ def main():
     results = {
         "checkpoint": args.checkpoint,
         "timestamp": __import__("datetime").datetime.now().isoformat(),
+        "model_params_M": round(n_params, 3),
         "tests": {},
     }
 
@@ -512,7 +705,6 @@ def main():
             results["tests"][name] = {"error": str(e), "traceback": traceback.format_exc()[:2000]}
             print(f"  [error] {e}")
 
-    # 输出
     if args.output:
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -531,9 +723,19 @@ def main():
     if "exit" in results["tests"]:
         es = results["tests"]["exit"].get("summary", {})
         print(f"  exit_loops: mean={es.get('mean_loops')} max={es.get('max_loops')}")
+    if "ct_cluster" in results["tests"]:
+        cc = results["tests"]["ct_cluster"].get("verdict", {})
+        print(f"  ct_cluster: intra_tight={cc.get('intra_tight')} inter_separated={cc.get('inter_separated')}")
     if "ct_inject" in results["tests"]:
         ci = results["tests"]["ct_inject"].get("injections", {}).get("_verdict", {})
-        print(f"  ct_inject: mean_overlap={ci.get('mean_overlap')} has_influence={ci.get('c_t_has_influence')}")
+        print(f"  ct_inject: mean_overlap={ci.get('mean_overlap')} has_influence={ci.get('c_t_has_some_influence')}")
+    if "generation" in results["tests"]:
+        gr = results["tests"]["generation"].get("seeds", {})
+        for name, r in gr.items():
+            if "decoded" in r:
+                d = r["decoded"][:60].replace("\n", "\\n")
+                rep = r.get("stats", {}).get("is_repetitive", False)
+                print(f"  gen[{name}]: {d!r}{' [REPETITIVE]' if rep else ''}")
 
 
 if __name__ == "__main__":
