@@ -1,8 +1,10 @@
 #!/bin/bash
-# Luma 实验启动脚本 — 默认 Phase E damped (216M, seq=2048, 1 epoch)
+# Luma 实验启动脚本 — 默认 Stellarator (Hero v19 生产形态, 215M, seq=2048, 1 epoch)
+# 4.15 v19 扶正：主干 F_main(h) 不看 c_t + low-rank modulator(c_t) + sigmoid gated fusion
+# 实测 fp_proxy L=0.062, sig_raw=0, ema=7.52 @ step 26250
 # 用法: ./run_experiment.sh <实验名> [额外参数...]
-# 例子: ./run_experiment.sh hero_v7_baseline
-#       ./run_experiment.sh hero_v7_h_mask --h_mask_ratio 0.25 --h_mask_loss_mode cosine
+# 例子: ./run_experiment.sh baseline                        # 默认 v19 Stellarator
+#       ./run_experiment.sh legacy_v13 --stellarator_mode 0 --loop_lora_rank 32  # 回退 v13
 set -e
 
 if [ -z "$1" ]; then
@@ -56,16 +58,23 @@ PHASE6="--phase 6 --world_jepa_mode scaffold --world_jepa_weight 0.3 \
   --mhc_streams 3 --mhc_alpha_init 0.01 \
   --exit_aux_weight 0.01 --exit_second_order_delta_weight 0.3"
 
-# ── IS9 记忆栈：introspection memory + CMDA + MoR + LoRA32 + 赫布 ────
+# ── IS9 记忆栈：introspection memory + CMDA + MoR + 赫布（Stellarator 下 LoRA=0）────
 # 4.14 v18: 关 self-JEPA 所有 SIGReg (ct/delta/rollout/loop/cos)。
-# LeJEPA paper SIGReg 只用于 World-JEPA 防 encoder 坍缩，
-# c_t 是 64 维人格向量，有 RMSNorm + ct_norm clamp，不需要额外正则。
+#   LeJEPA paper SIGReg 只用于 World-JEPA 防 encoder 坍缩，
+#   c_t 是 64 维人格向量，有 RMSNorm + ct_norm clamp，不需要额外正则。
+# 4.15 v19: loop_lora_rank=0（Stellarator 主干不需要 LoRA 制造 per-loop 差异）。
 IS9="--enable_token_depth_routing 1 --mor_target_continue_ratio 0.7 --mor_balance_weight 0.01 \
   --exit_score_threshold 0.8 --enable_sigreg_ct 0 --sigreg_ct_weight 0.0 \
   --sigreg_delta_weight 0.0 \
-  --enable_time_conditioning 1 --loop_lora_rank 32 \
+  --enable_time_conditioning 1 --loop_lora_rank 0 \
   --introspection_input_mode memory --introspection_memory_tokens 4 --introspection_inject_mode cmda \
   --enable_neuromod_ct 1 --neuromod_mode jepa_surprise --neuromod_hebb_rank 32"
+
+# ── Stellarator 仿星器架构 (v19 生产形态) ─────────────────────────────
+# 主干 F_main(h) 不看 c_t + low-rank modulator(c_t, rank=8) + sigmoid gated fusion
+# 实测 fp_proxy L=0.062 (严格收缩), ema=7.52 @ step 26250 (碾压 v16 同期 ~17)
+# 理论: Lip(h_next, h) ≤ 1 + g·α ≈ 1.05
+STELLARATOR="--stellarator_mode 1 --stellarator_mod_rank 8"
 
 # ── 检查 GPU ──────────────────────────────────────────────────────────
 GPU_PROCS=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | wc -l)
@@ -87,7 +96,7 @@ echo "================================================================"
 
 cd "$TRAINER_DIR"
 PYTHONUNBUFFERED=1 nohup $PYTHON train_luma_refactor.py \
-  $ARCH $TRAIN $PHASE_E $PHASE6 $IS9 "$@" \
+  $ARCH $TRAIN $PHASE_E $PHASE6 $IS9 $STELLARATOR "$@" \
   > "$LOG" 2>&1 &
 
 PID=$!
