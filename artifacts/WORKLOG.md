@@ -1,5 +1,112 @@
 # Luma 工作日志
 
+## [2026-04-15 01:30] 🔍 DOD rank 语义澄清 + 新增梯度方向流追踪器
+
+### 背景
+v19 在 step 28000 出现 rank=1/20 mode1=100% 的"偶发 DOD 坍缩"。追查后发现这不是真正的参数空间坍缩——DOD rank 的测量语义被误解了。
+
+### 当前 LayerGradTracker 测的到底是什么
+
+代码在 `minimind/luma_stage0/dynamics_analysis.py:151-220`：
+
+```python
+tracker.update(step, {
+    "embedding": ||grad_embedding||,      # 标量
+    "compress_00": ||grad_compress_0||,   # 标量
+    ...
+    "world_jepa": ||grad_world_jepa||,    # 标量
+})  # 20 个 layer → 20 个标量
+```
+
+数据矩阵 `X`: shape `(200, 20)` — 200 步 × 20 层**梯度范数**（每层只保留标量幅度，丢失方向）。
+
+`_pod_analysis(X)` 做的是：
+1. 中心化 X
+2. `cov = X_c.T @ X_c`（20×20 协方差）
+3. 特征值 → `effective_rank = sum(eigval_ratio > 1e-3)`
+
+**rank 测的是"每层梯度范数时间序列的主成分数"**，即 layer 之间 ||grad|| 的同步性，不是梯度方向的独立性。
+
+### 具体语义对照
+
+| DOD 现象 | 真实含义 | 不是什么 |
+|---------|---------|---------|
+| rank 低 | 各 layer 的 `||grad||` 同步涨跌 | ❌ 参数空间坍缩 |
+| rank 高 | 各 layer 的 `||grad||` 独立波动 | ❌ 梯度方向多样性 |
+| mode1=100% | 单一时间模式主导所有层的幅度变化 | ❌ 单一 Hessian 特征值主导 |
+| rank=1/20 瞬态 | 某 200 步窗口内所有层同步响应一个强信号 | ❌ loss landscape 退化 |
+
+### v19 rank=1 事件分析
+
+step 28000 rank=1/20 mode1=100%：
+- 前后 ema: 7.62 → **7.70** → 7.71 → 7.58（完全没反弹）
+- h_diversity = 1.08（健康）
+- fp_proxy L 全程 0.05-0.1（收缩正常）
+- 前 50 步 rank=8/20（健康），后 200 步 rank=4/20（立即恢复）
+
+**结论**：rank=1 是 "200 步窗口内偶发梯度同步事件"，不是结构性坍缩。真正的坍缩应该满足：
+- rank ≤ 3 **连续多个窗口**
+- mode1 ≥ 95% **持续**
+- loss ema 停滞或反弹
+
+v19 零占任何一条。
+
+### 对比 v14 真实崩溃
+
+v14 step 11000 前的真实 rank 坍缩：
+- rank=2/20 **连续多个窗口**
+- mode1=99.2% **稳定**
+- grad ratio **同步爆炸** 到 1e9+
+- loss 开始**反弹**
+
+v19 的坍缩是单点 + 立即恢复，v14 是持续 + loss 恶化。**两种完全不同的现象，同一个指标读出来看起来一样**——这正是 LayerGradTracker 的盲点。
+
+### 为什么 v19 会频繁"看起来坍缩"
+
+Phase E damped + Stellarator 架构下：
+1. body 是 near-identity (Lip≈0.06)，loss 对 body 内各 layer 的梯度几乎是同一个信号的分解
+2. compression 12 层的 Mamba 都在学相似的序列建模信号，`||grad||` 同步涨跌是正常的
+3. F_main 不看 c_t 后移除了"独立扰动源"，各 layer 梯度更同步
+
+**低 rank 是仿星器架构的预期副产品**，不是病。
+
+### 当前指标的根本局限
+
+只采标量范数 → 只能测"幅度同步性"，看不见：
+- 每层参数空间内的梯度方向是否独立
+- 不同 layer 是否在学不同的子空间
+- 参数更新是否真的在探索多个维度
+
+### 优化方向
+
+新增 **LayerGradDirectionTracker**：
+- 每层固定一个 random projection 矩阵 `P_i ∈ R^{K × n_i}`（K=8，n_i=该层参数维度）
+- 每步计算 `v_i = P_i @ grad_i.flatten()` → K 维向量
+- 20 层 concat → 每步 `(20*8) = 160` 维向量
+- 200 步窗口做 POD
+- rank 上限变成 **160**（原来是 20）
+
+这样真正测的是"梯度在参数空间的方向独立性"，不是范数同步性。
+
+**保留** LayerGradTracker（标量范数的同步性仍是有用的副信号），**新增** LayerGradDirectionTracker 作为主判据。
+
+### 为什么 random projection 可用
+
+Johnson-Lindenstrauss 引理：d 维向量通过 O(log N / ε²) 维随机投影保距 (1±ε)。
+- 每层 grad flatten 后可能上百万维
+- 投影到 K=8 维，保留的主要是方向信息的 low-dim embedding
+- 不同随机 seed 不影响 POD rank 的定性判断
+
+代价：每步加 20 次矩阵乘（K=8, d≈几 M），可忽略（<1% 训练开销）。
+
+### 下一步
+- 实现 `LayerGradDirectionTracker`
+- trainer 里同时维护两个 tracker
+- 日志里打印 `rank=5/20 (norm) dir_rank=42/160 (direction)`
+- 不重启 v19（生产环境），代码改动只影响下次训练
+
+---
+
 ## [2026-04-15 00:30] 🏆 Hero v19: Stellarator 架构 — 仿星器假设完全验证
 
 ### 核心胜利（step 26250/80444 = 32.6% epoch）

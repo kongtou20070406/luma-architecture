@@ -1,14 +1,27 @@
 """
-Luma 训练动力学在线分析 v2
-========================
+Luma 训练动力学在线分析 v2+
+=========================
 v1 对三维梯度范数做 POD，rank 上限永远是 3，区分度不足。
-v2 改为逐层梯度范数（dim ≈ 30-40），POD rank 真正反映独立更新方向数。
-新增 c_t batch 方差追踪和退出深度分布追踪。
+v2 改为逐层梯度范数（dim ≈ 20-40），POD rank 反映梯度范数同步性（非方向独立性）。
+v3 (4.15) 新增 LayerGradDirectionTracker: 每层 grad 做 random projection 到 K 维，
+   测真正的"梯度方向在参数空间的独立性"。
 
-POD rank（= DOD rank）：
-  衡量参数更新在多少个独立方向上运动。
-  - rank=1：所有梯度在同一方向上（单一 loss 主导，坏）
-  - rank ≈ dim/2+：各层梯度较独立（健康）
+**DOD rank 语义**（易混淆，请注意区分）：
+  - v2 LayerGradTracker:
+    输入 = 每层 ||grad||（标量），20 层 → 20 维
+    rank = 20 层 ||grad|| 时间序列的主成分数
+    测的是 **layer 之间幅度同步性**：rank 低 = 所有层范数同步涨跌
+    **不是** 参数空间坍缩或梯度方向退化
+
+  - v3 LayerGradDirectionTracker:
+    输入 = 每层 random_proj(grad.flatten())（K=8 维），20 层 concat → 160 维
+    rank = 160 维轨迹的主成分数
+    测的是 **梯度在参数子空间的独立方向数**
+    更接近参数更新的真实多样性
+
+两个都保留，对照读：
+  rank_norm 低 + rank_dir 高 = 幅度同步但方向独立（仿星器预期）
+  rank_norm 低 + rank_dir 低 = 真正的参数空间坍缩（病态）
 
 DMD：
   分析轨迹的动力学模态。
@@ -217,6 +230,101 @@ class LayerGradTracker:
             "n_layers": len(self._layer_names) if self._layer_names else 0,
             "dead_layers": dead_layers,
             "layer_stats": layer_stats,
+        }
+
+
+# ---------------------------------------------------------------------------
+# v3 (4.15): 真正的梯度方向流追踪器
+# ---------------------------------------------------------------------------
+
+class LayerGradDirectionTracker:
+    """
+    v3 追踪器：每层梯度做 random projection 到 K 维，测**梯度方向**的独立性。
+
+    动机：v2 的 LayerGradTracker 只保留每层 ||grad|| 标量，rank 测的是
+          "layer 之间幅度同步性"，不是梯度方向多样性。本 tracker 补上这一缺口。
+
+    算法：
+    - 每层 param 的 grad.flatten() ∈ R^{n_i}（可能上百万维）
+    - 固定 random projection P_i ∈ R^{K × n_i}（JL 引理保距）
+    - 投影: v_i = P_i @ grad_i.flatten() ∈ R^K
+    - 所有层 concat: V = [v_0; v_1; ...; v_{L-1}] ∈ R^{L*K}
+    - 200 步窗口做 POD，rank 上限 = L*K
+
+    典型配置:
+    - K=8, L=20 → dim=160
+    - dim/2 ≈ 80 健康
+    - dim < 10 可能真的坍缩（需要结合 loss 趋势交叉验证）
+
+    用法:
+        tracker = LayerGradDirectionTracker(window=200, k_proj=8)
+        tracker.register_layers(model, layer_getter)  # 首次调用时初始化投影矩阵
+        tracker.update(step, layer_grads)  # {name: flat_grad_tensor}
+        result = tracker.analyze()  # {dir_rank, dir_mode1_pct, ...}
+    """
+
+    def __init__(self, window: int = 200, k_proj: int = 8, seed: int = 12345):
+        self.window = window
+        self.k_proj = k_proj
+        self.seed = seed
+        self._buf: deque = deque(maxlen=window)
+        self._steps: deque = deque(maxlen=window)
+        self._projections: Dict[str, np.ndarray] = {}  # layer_name → P_i (K, n_i)
+        self._layer_order: Optional[List[str]] = None  # 固定顺序保证 concat 一致
+
+    def _ensure_projection(self, name: str, dim: int) -> np.ndarray:
+        """Lazy 初始化 random projection matrix（每层参数维度不同）。"""
+        if name not in self._projections:
+            # per-layer seed 避免不同层的投影相关
+            rng = np.random.default_rng(self.seed + hash(name) % (2**31))
+            # JL 标准做法：从 N(0, 1/K) 采样
+            P = rng.normal(0.0, 1.0 / math.sqrt(self.k_proj), size=(self.k_proj, dim))
+            self._projections[name] = P.astype(np.float32)
+        return self._projections[name]
+
+    def update(self, step: int, layer_flat_grads: Dict[str, np.ndarray]) -> None:
+        """
+        layer_flat_grads: {layer_name: np.ndarray 1D flattened grad}
+        """
+        if not layer_flat_grads:
+            return
+        if self._layer_order is None:
+            # 首次：固定层顺序
+            self._layer_order = sorted(layer_flat_grads.keys())
+        # 投影 + concat
+        parts: List[np.ndarray] = []
+        for name in self._layer_order:
+            grad_flat = layer_flat_grads.get(name)
+            if grad_flat is None or grad_flat.size == 0:
+                parts.append(np.zeros(self.k_proj, dtype=np.float32))
+                continue
+            if not np.isfinite(grad_flat).all():
+                return  # 有 NaN/Inf 跳过这一步
+            P = self._ensure_projection(name, grad_flat.size)
+            v = P @ grad_flat  # (K,)
+            parts.append(v.astype(np.float32))
+        vec = np.concatenate(parts)  # (L*K,)
+        if np.isfinite(vec).all():
+            self._buf.append(vec)
+            self._steps.append(step)
+
+    def analyze(self) -> Dict[str, Any]:
+        if len(self._buf) < 3:
+            return {}
+        x = np.array(list(self._buf), dtype=np.float64)  # (n_steps, L*K)
+        pod = _pod_analysis(x)
+        n_layers = len(self._layer_order) if self._layer_order else 0
+        dim_total = x.shape[1]
+        return {
+            "window_steps": len(self._buf),
+            "first_step": self._steps[0],
+            "last_step": self._steps[-1],
+            "pod": pod,
+            "dir_rank": pod["effective_rank"],
+            "dir_mode1_pct": pod.get("energy_mode1_pct", 100.0),
+            "dim_total": dim_total,
+            "n_layers": n_layers,
+            "k_proj": self.k_proj,
         }
 
 

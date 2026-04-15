@@ -32,6 +32,7 @@ from pathlib import Path
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -42,7 +43,8 @@ from transformers import AutoTokenizer
 from dataset.lm_dataset import PretrainDataset
 from dataset.packed_dataset import PackedPretrainDataset
 from luma_stage0.dynamics_analysis import (
-    CtStateTracker, GradTrajectoryTracker, LayerGradTracker, ExitDepthTracker,
+    CtStateTracker, GradTrajectoryTracker, LayerGradTracker, LayerGradDirectionTracker,
+    ExitDepthTracker,
     render_dynamics_report, render_markdown, save_report,
 )
 from luma_stage0.optimizers import LumaCosineScheduler, LumaMuonAdamWOptimizer, LumaOptimizerConfig
@@ -521,17 +523,40 @@ def compute_grad_metrics(model: LumaForCausalLM) -> dict:
     ratio = max(norms) / min(norms) if len(norms) >= 2 else float("inf")
 
     # ── v2: per-layer ──
+    # v3 (4.15): 同时采集 per-layer flat grad（给 LayerGradDirectionTracker 做 random proj）
+    # 大模块用 sub-sampling（取前 N 参数元素，避免全拉容易 OOM）
     layer_norms: dict[str, float] = {}
-    layer_norms["embedding"] = _module_grad_norm(list(backbone.embedding.parameters()))
+    layer_flat_grads: dict[str, np.ndarray] = {}
+
+    def _collect(name: str, params: list):
+        layer_norms[name] = _module_grad_norm(params)
+        # 拉扁所有 grad，用头 N 元素（最多 8192 个）作为 signature
+        # 足以让 random projection 有区分度，CPU numpy 开销极小
+        _MAX_ELEMS = 8192
+        flats = []
+        running = 0
+        for p in params:
+            if p.grad is None:
+                continue
+            g = p.grad.detach().float().reshape(-1)
+            if running >= _MAX_ELEMS:
+                break
+            take = min(_MAX_ELEMS - running, g.numel())
+            flats.append(g[:take].cpu().numpy())
+            running += take
+        if flats:
+            layer_flat_grads[name] = np.concatenate(flats)
+
+    _collect("embedding", list(backbone.embedding.parameters()))
     for i, layer in enumerate(backbone.compression.layers):
-        layer_norms[f"compress_{i:02d}"] = _module_grad_norm(list(layer.parameters()))
+        _collect(f"compress_{i:02d}", list(layer.parameters()))
     for i, layer in enumerate(backbone.reason_core.shared_layers):
-        layer_norms[f"reason_shared_{i}"] = _module_grad_norm(list(layer.parameters()))
-    layer_norms["mhc"] = _module_grad_norm(list(backbone.mhc.parameters()))
-    layer_norms["introspection"] = _module_grad_norm(list(backbone.introspection_state_stream.parameters()))
-    layer_norms["self_jepa"] = _module_grad_norm(list(backbone.self_jepa_residual_predictor.parameters()))
-    layer_norms["world_jepa"] = _module_grad_norm(list(backbone.world_latent_jepa.parameters()))
-    layer_norms["exit_ctrl"] = _module_grad_norm(list(backbone.exit_controller.parameters()))
+        _collect(f"reason_shared_{i}", list(layer.parameters()))
+    _collect("mhc", list(backbone.mhc.parameters()))
+    _collect("introspection", list(backbone.introspection_state_stream.parameters()))
+    _collect("self_jepa", list(backbone.self_jepa_residual_predictor.parameters()))
+    _collect("world_jepa", list(backbone.world_latent_jepa.parameters()))
+    _collect("exit_ctrl", list(backbone.exit_controller.parameters()))
 
     return {
         "grad_norm_compress": n_compress,
@@ -539,6 +564,7 @@ def compute_grad_metrics(model: LumaForCausalLM) -> dict:
         "grad_norm_reasoning": n_reasoning,
         "grad_ratio": ratio,
         "layer_grad_norms": layer_norms,
+        "layer_flat_grads": layer_flat_grads,  # v3: 给 LayerGradDirectionTracker 用
     }
 
 
@@ -695,6 +721,10 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
     # ── 动力学分析器 ─────────────────────────────────────────────────────
     grad_tracker = GradTrajectoryTracker(window=min(args.dod_interval, 200))
     layer_grad_tracker = LayerGradTracker(window=min(args.dod_interval, 200))
+    # v3 (4.15): 梯度方向流追踪，测参数空间的梯度方向独立性（不只是范数）
+    layer_grad_dir_tracker = LayerGradDirectionTracker(
+        window=min(args.dod_interval, 200), k_proj=8,
+    )
     ct_tracker = CtStateTracker(window=100, proj_dim=64)
     exit_depth_tracker = ExitDepthTracker(window=min(args.dod_interval, 200),
                                           max_loops=getattr(args, "reason_loops", 15))
@@ -1067,6 +1097,10 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
         layer_norms = grad_metrics.get("layer_grad_norms")
         if layer_norms:
             layer_grad_tracker.update(step, layer_norms)
+        # v3: 梯度方向流 (random projection)
+        layer_flat_grads = grad_metrics.get("layer_flat_grads")
+        if layer_flat_grads:
+            layer_grad_dir_tracker.update(step, layer_flat_grads)
         raw_m = getattr(model, "_orig_mod", model)
         if hasattr(raw_m, "last_aux") and raw_m.last_aux:
             ct_tensor = raw_m.last_aux.get("c_t")
@@ -1080,6 +1114,7 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
             snap_grad = grad_tracker.analyze()
             snap_ct = ct_tracker.analyze()
             snap_layer = layer_grad_tracker.analyze()
+            snap_dir = layer_grad_dir_tracker.analyze()  # v3: 梯度方向流
             snap_exit = exit_depth_tracker.analyze()
             if snap_grad:
                 grad_snapshots.append(snap_grad)
@@ -1093,11 +1128,15 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                 e1 = snap_grad.get("energy_mode1_pct", 100.0)
                 radius = snap_grad.get("dmd_spectral_radius", float("nan"))
                 dmd_str = f"{radius:.4f}" if math.isfinite(radius) else "nan"
-                # v2 逐层信息
+                # v2 逐层信息（梯度范数同步性）
                 v2_rank = snap_layer.get("dod_rank", -1) if snap_layer else -1
                 v2_e1 = snap_layer.get("energy_mode1_pct", 100.0) if snap_layer else 100.0
                 v2_dims = snap_layer.get("n_layers", 0) if snap_layer else 0
                 dead = snap_layer.get("dead_layers", []) if snap_layer else []
+                # v3 方向流信息（参数空间方向独立性）
+                v3_rank = snap_dir.get("dir_rank", -1) if snap_dir else -1
+                v3_e1 = snap_dir.get("dir_mode1_pct", 100.0) if snap_dir else 100.0
+                v3_dim_total = snap_dir.get("dim_total", 0) if snap_dir else 0
                 # 退出深度
                 exit_info = ""
                 if snap_exit:
@@ -1106,7 +1145,8 @@ def train(args, luma_config: LumaConfig, model: LumaForCausalLM,
                                  f" entropy={snap_exit['depth_entropy']:.3f}")
                 Logger(
                     f"[DOD step {step}]"
-                    f"  rank={v2_rank}/{v2_dims} mode1={v2_e1:.1f}%"
+                    f"  rank_norm={v2_rank}/{v2_dims} mode1={v2_e1:.1f}%"
+                    f"  rank_dir={v3_rank}/{v3_dim_total} mode1={v3_e1:.1f}%"
                     f"  dmd_radius={dmd_str}"
                     + (f"  dead={dead}" if dead else "")
                     + exit_info
